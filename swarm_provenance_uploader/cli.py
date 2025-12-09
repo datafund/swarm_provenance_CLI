@@ -8,9 +8,19 @@ import json
 
 from . import config
 from .core import file_utils, swarm_client, metadata_builder
+from .core.gateway_client import GatewayClient
 from .models import ProvenanceMetadata, ValidationError
 
 app = typer.Typer(help="Swarm Provenance CLI - Wraps and uploads data to Swarm.")
+stamps_app = typer.Typer(help="Manage postage stamps.")
+app.add_typer(stamps_app, name="stamps")
+
+# Global state for backend configuration
+_backend_config = {
+    "backend": config.BACKEND,
+    "gateway_url": config.GATEWAY_URL,
+    "bee_url": config.BEE_GATEWAY_URL,
+}
 
 @app.command()
 def upload(
@@ -28,22 +38,31 @@ def upload(
      ],
     provenance_standard: Annotated[Optional[str], typer.Option("--std", help="Identifier for the provenance standard used (optional).")] = None,
     encryption: Annotated[Optional[str], typer.Option("--enc", help="Details about encryption used (optional).")] = None,
-    gateway_url: Annotated[str, typer.Option(help=f"Bee Gateway URL. [default: {config.BEE_GATEWAY_URL}]" )] = config.BEE_GATEWAY_URL,
+    bee_url: Annotated[Optional[str], typer.Option("--bee-url", help="Bee Gateway URL (when backend=local).")] = None,
     stamp_depth: Annotated[int, typer.Option(help=f"Postage stamp depth. [default: {config.DEFAULT_POSTAGE_DEPTH}]")] = config.DEFAULT_POSTAGE_DEPTH,
     stamp_amount: Annotated[int, typer.Option(help=f"Postage stamp amount. [default: {config.DEFAULT_POSTAGE_AMOUNT}]")] = config.DEFAULT_POSTAGE_AMOUNT,
     stamp_check_retries: Annotated[int, typer.Option("--stamp-retries", help="Number of times to check for stamp usability.")] = 12,
     stamp_check_interval: Annotated[int, typer.Option("--stamp-interval", help="Seconds to wait between stamp usability checks.")] = 20,
-    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False # New verbose flag
- ):
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False
+):
     """
     Hashes, Base64-encodes, wraps, and Uploads a
     provenance data file to Swarm.
     """
+    # Determine which backend to use
+    use_gateway = _backend_config["backend"] == "gateway"
+    gateway_url = _backend_config["gateway_url"]
+    local_bee_url = bee_url or _backend_config["bee_url"]
+
     if verbose:
         typer.echo("Verbose mode enabled.")
         typer.echo(f"--> Initial Config:")
+        typer.echo(f"    Backend: {_backend_config['backend']}")
         typer.echo(f"    File: {file}")
-        typer.echo(f"    Gateway URL: {gateway_url}")
+        if use_gateway:
+            typer.echo(f"    Gateway URL: {gateway_url}")
+        else:
+            typer.echo(f"    Bee URL: {local_bee_url}")
         typer.echo(f"    Stamp Depth: {stamp_depth}")
         typer.echo(f"    Stamp Amount: {stamp_amount}")
         typer.echo(f"    Stamp Check Retries: {stamp_check_retries}")
@@ -79,10 +98,15 @@ def upload(
     # 5 & 6. Request postage stamp
     typer.echo(f"Purchasing postage stamp...")
     if verbose:
-        typer.echo(f"    (Amount: {stamp_amount}, Depth: {stamp_depth} from {gateway_url})")
+        backend_url = gateway_url if use_gateway else local_bee_url
+        typer.echo(f"    (Amount: {stamp_amount}, Depth: {stamp_depth} from {backend_url})")
     stamp_id = None
     try:
-        stamp_id = swarm_client.purchase_postage_stamp(gateway_url, stamp_amount, stamp_depth, verbose=verbose) # Pass verbose
+        if use_gateway:
+            gw_client = GatewayClient(base_url=gateway_url)
+            stamp_id = gw_client.purchase_stamp(stamp_amount, stamp_depth, verbose=verbose)
+        else:
+            stamp_id = swarm_client.purchase_postage_stamp(local_bee_url, stamp_amount, stamp_depth, verbose=verbose)
         if verbose:
             typer.echo(f"    Stamp ID Received: {stamp_id} (Length: {len(stamp_id)})")
             typer.echo(f"    Stamp ID (lowercase for header): {stamp_id.lower()}")
@@ -102,12 +126,25 @@ def upload(
             typer.echo(f"Checking stamp usability (attempt {i+1}/{stamp_check_retries})... ", nl=False)
 
         try:
-            # Pass verbose to get_stamp_info as well
-            stamp_info = swarm_client.get_stamp_info(gateway_url, stamp_id, verbose=verbose)
+            # Get stamp info using appropriate backend
+            if use_gateway:
+                gw_client = GatewayClient(base_url=gateway_url)
+                stamp_details = gw_client.get_stamp(stamp_id, verbose=verbose)
+                if stamp_details:
+                    stamp_info = {
+                        "exists": stamp_details.exists,
+                        "usable": stamp_details.usable,
+                        "batchTTL": stamp_details.batchTTL,
+                    }
+                else:
+                    stamp_info = None
+            else:
+                stamp_info = swarm_client.get_stamp_info(local_bee_url, stamp_id, verbose=verbose)
+
             if stamp_info:
                 exists = stamp_info.get("exists", False)
                 usable = stamp_info.get("usable", False)
-                batch_ttl_seconds = stamp_info.get("batchTTL") # TTL in seconds
+                batch_ttl_seconds = stamp_info.get("batchTTL")  # TTL in seconds
 
                 if verbose:
                     ttl_str = f"{batch_ttl_seconds // 60}m {batch_ttl_seconds % 60}s" if batch_ttl_seconds is not None else "N/A"
@@ -119,11 +156,9 @@ def upload(
                     else: typer.secho(f"    Stamp {stamp_id.lower()} is now USABLE!", fg=typer.colors.GREEN)
                     break
                 else:
-                    if not verbose: typer.echo("retrying...") # Clearer than just "retrying..."
-                    # else: typer.echo(f"    Stamp {stamp_id.lower()} not yet usable. Retrying...") # Already covered by verbose block
+                    if not verbose: typer.echo("retrying...")
             else:
                 if not verbose: typer.echo("not found, retrying...")
-                # else: typer.echo(f"    Stamp {stamp_id.lower()} not found or error during check. Retrying...") # Already covered
 
         except Exception as e:
             if not verbose: typer.echo(typer.style("error checking, retrying...", fg=typer.colors.YELLOW))
@@ -134,7 +169,7 @@ def upload(
             if verbose:
                 typer.echo(f"    Waiting {stamp_check_interval}s before next check...")
             time.sleep(stamp_check_interval)
-        elif not stamp_is_ready_for_upload and not verbose: # Last attempt failed, print newline
+        elif not stamp_is_ready_for_upload and not verbose:  # Last attempt failed, print newline
             typer.echo(typer.style("failed.", fg=typer.colors.RED))
 
 
@@ -156,7 +191,11 @@ def upload(
     if verbose:
         typer.echo(f"    (Using stamp_id: {stamp_id.lower()} in header)")
     try:
-        swarm_ref_hash = swarm_client.upload_data(gateway_url, final_payload_bytes, stamp_id, verbose=verbose) # Pass verbose
+        if use_gateway:
+            gw_client = GatewayClient(base_url=gateway_url)
+            swarm_ref_hash = gw_client.upload_data(final_payload_bytes, stamp_id, verbose=verbose)
+        else:
+            swarm_ref_hash = swarm_client.upload_data(local_bee_url, final_payload_bytes, stamp_id, verbose=verbose)
     except Exception as e:
         typer.secho(f"ERROR: Failed uploading data: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -176,28 +215,42 @@ def download(
         dir_okay=True,
         writable=True,
         resolve_path=True,
-        default_factory=lambda: Path.cwd() # Default to current working directory
+        default_factory=lambda: Path.cwd()  # Default to current working directory
     )],
-    gateway_url: Annotated[str, typer.Option(help=f"Bee Gateway URL. [default: {config.BEE_GATEWAY_URL}]" )] = config.BEE_GATEWAY_URL,
+    bee_url: Annotated[Optional[str], typer.Option("--bee-url", help="Bee Gateway URL (when backend=local).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False
 ):
     """
     Downloads Provenance Metadata from Swarm, decodes the wrapped data,
     verifies its integrity, and saves both files.
     """
+    # Determine which backend to use
+    use_gateway = _backend_config["backend"] == "gateway"
+    gateway_url = _backend_config["gateway_url"]
+    local_bee_url = bee_url or _backend_config["bee_url"]
+
     if verbose:
         typer.echo("Verbose mode enabled.")
         typer.echo(f"--> Initial Config for Download:")
+        typer.echo(f"    Backend: {_backend_config['backend']}")
         typer.echo(f"    Swarm Hash: {swarm_hash}")
         typer.echo(f"    Output Directory: {output_dir}")
-        typer.echo(f"    Gateway URL: {gateway_url}")
+        if use_gateway:
+            typer.echo(f"    Gateway URL: {gateway_url}")
+        else:
+            typer.echo(f"    Bee URL: {local_bee_url}")
     else:
         typer.echo(f"Downloading data for Swarm hash: {swarm_hash[:12]}...")
 
     # 1 & 2. Request and retrieve data (Provenance Metadata JSON bytes)
-    typer.echo(f"Fetching metadata from Swarm via {gateway_url}...")
+    backend_url = gateway_url if use_gateway else local_bee_url
+    typer.echo(f"Fetching metadata from Swarm via {backend_url}...")
     try:
-        metadata_bytes = swarm_client.download_data_from_swarm(gateway_url, swarm_hash, verbose=verbose)
+        if use_gateway:
+            gw_client = GatewayClient(base_url=gateway_url)
+            metadata_bytes = gw_client.download_data(swarm_hash, verbose=verbose)
+        else:
+            metadata_bytes = swarm_client.download_data_from_swarm(local_bee_url, swarm_hash, verbose=verbose)
         if verbose:
             typer.echo(f"    Successfully fetched {len(metadata_bytes)} bytes of metadata.")
     except FileNotFoundError as e:
@@ -300,17 +353,276 @@ def download(
         raise typer.Exit(code=1)
 
 
+# --- Stamps Subcommands ---
+
+def _format_ttl(seconds: int) -> str:
+    """Format TTL seconds into human readable string."""
+    if seconds < 60:
+        return f"{seconds}s"
+    elif seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60}s"
+    elif seconds < 86400:
+        hours = seconds // 3600
+        mins = (seconds % 3600) // 60
+        return f"{hours}h {mins}m"
+    else:
+        days = seconds // 86400
+        hours = (seconds % 86400) // 3600
+        return f"{days}d {hours}h"
+
+
+@stamps_app.command("list")
+def stamps_list(
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
+):
+    """
+    List all postage stamp batches. (Gateway only)
+    """
+    if _backend_config["backend"] != "gateway":
+        typer.secho("ERROR: 'stamps list' requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    gateway_url = _backend_config["gateway_url"]
+    if verbose:
+        typer.echo(f"Listing stamps from {gateway_url}...")
+
+    try:
+        gw_client = GatewayClient(base_url=gateway_url)
+        result = gw_client.list_stamps(verbose=verbose)
+
+        if not result.stamps:
+            typer.echo("No stamps found.")
+            return
+
+        # Print header
+        typer.echo(f"\n{'ID':<20} {'Usable':<8} {'TTL':<12} {'Depth':<6} {'Utilization':<12}")
+        typer.echo("-" * 60)
+
+        for stamp in result.stamps:
+            stamp_id_short = f"{stamp.batchID[:8]}...{stamp.batchID[-8:]}"
+            usable_str = typer.style("Yes", fg=typer.colors.GREEN) if stamp.usable else typer.style("No", fg=typer.colors.RED)
+            ttl_str = _format_ttl(stamp.batchTTL)
+            util_str = f"{stamp.utilization}%"
+            typer.echo(f"{stamp_id_short:<20} {usable_str:<8} {ttl_str:<12} {stamp.depth:<6} {util_str:<12}")
+
+        typer.echo(f"\nTotal: {result.total_count} stamp(s)")
+
+    except Exception as e:
+        typer.secho(f"ERROR: Failed to list stamps: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@stamps_app.command("info")
+def stamps_info(
+    stamp_id: Annotated[str, typer.Argument(help="Stamp batch ID to get info for.")],
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
+):
+    """
+    Get detailed information about a specific stamp.
+    """
+    use_gateway = _backend_config["backend"] == "gateway"
+    gateway_url = _backend_config["gateway_url"]
+    bee_url = _backend_config["bee_url"]
+
+    if verbose:
+        backend_url = gateway_url if use_gateway else bee_url
+        typer.echo(f"Getting stamp info from {backend_url}...")
+
+    try:
+        if use_gateway:
+            gw_client = GatewayClient(base_url=gateway_url)
+            stamp = gw_client.get_stamp(stamp_id, verbose=verbose)
+            if not stamp:
+                typer.secho(f"Stamp {stamp_id} not found.", fg=typer.colors.YELLOW)
+                raise typer.Exit(code=1)
+
+            typer.echo(f"\nStamp Details:")
+            typer.echo(f"  Batch ID:    {stamp.batchID}")
+            typer.echo(f"  Usable:      {typer.style('Yes', fg=typer.colors.GREEN) if stamp.usable else typer.style('No', fg=typer.colors.RED)}")
+            typer.echo(f"  Exists:      {'Yes' if stamp.exists else 'No'}")
+            typer.echo(f"  TTL:         {_format_ttl(stamp.batchTTL)}")
+            typer.echo(f"  Depth:       {stamp.depth}")
+            typer.echo(f"  Amount:      {stamp.amount}")
+            typer.echo(f"  Utilization: {stamp.utilization}%")
+            if stamp.label:
+                typer.echo(f"  Label:       {stamp.label}")
+        else:
+            stamp_info = swarm_client.get_stamp_info(bee_url, stamp_id, verbose=verbose)
+            if not stamp_info:
+                typer.secho(f"Stamp {stamp_id} not found.", fg=typer.colors.YELLOW)
+                raise typer.Exit(code=1)
+
+            typer.echo(f"\nStamp Details:")
+            typer.echo(f"  Batch ID:    {stamp_info.get('batchID', 'N/A')}")
+            typer.echo(f"  Usable:      {'Yes' if stamp_info.get('usable') else 'No'}")
+            typer.echo(f"  Exists:      {'Yes' if stamp_info.get('exists') else 'No'}")
+            ttl = stamp_info.get('batchTTL')
+            typer.echo(f"  TTL:         {_format_ttl(ttl) if ttl else 'N/A'}")
+            typer.echo(f"  Depth:       {stamp_info.get('depth', 'N/A')}")
+            typer.echo(f"  Amount:      {stamp_info.get('amount', 'N/A')}")
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        typer.secho(f"ERROR: Failed to get stamp info: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@stamps_app.command("extend")
+def stamps_extend(
+    stamp_id: Annotated[str, typer.Argument(help="Stamp batch ID to extend.")],
+    amount: Annotated[int, typer.Option("--amount", "-a", help="Amount of BZZ to add to the stamp.")],
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
+):
+    """
+    Extend an existing stamp by adding funds. (Gateway only)
+    """
+    if _backend_config["backend"] != "gateway":
+        typer.secho("ERROR: 'stamps extend' requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    gateway_url = _backend_config["gateway_url"]
+    if verbose:
+        typer.echo(f"Extending stamp {stamp_id} with amount {amount}...")
+
+    try:
+        gw_client = GatewayClient(base_url=gateway_url)
+        result_id = gw_client.extend_stamp(stamp_id, amount, verbose=verbose)
+        typer.secho(f"SUCCESS: Stamp extended.", fg=typer.colors.GREEN)
+        typer.echo(f"Batch ID: {result_id}")
+    except Exception as e:
+        typer.secho(f"ERROR: Failed to extend stamp: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+# --- Info Commands ---
+
+@app.command()
+def wallet(
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
+):
+    """
+    Show wallet address and BZZ balance. (Gateway only)
+    """
+    if _backend_config["backend"] != "gateway":
+        typer.secho("ERROR: 'wallet' requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    gateway_url = _backend_config["gateway_url"]
+    if verbose:
+        typer.echo(f"Getting wallet info from {gateway_url}...")
+
+    try:
+        gw_client = GatewayClient(base_url=gateway_url)
+        wallet_info = gw_client.get_wallet(verbose=verbose)
+        typer.echo(f"\nWallet Information:")
+        typer.echo(f"  Address: {wallet_info.walletAddress}")
+        typer.echo(f"  BZZ Balance: {wallet_info.bzzBalance}")
+    except Exception as e:
+        typer.secho(f"ERROR: Failed to get wallet info: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def chequebook(
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
+):
+    """
+    Show chequebook address and balance. (Gateway only)
+    """
+    if _backend_config["backend"] != "gateway":
+        typer.secho("ERROR: 'chequebook' requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    gateway_url = _backend_config["gateway_url"]
+    if verbose:
+        typer.echo(f"Getting chequebook info from {gateway_url}...")
+
+    try:
+        gw_client = GatewayClient(base_url=gateway_url)
+        cheque_info = gw_client.get_chequebook(verbose=verbose)
+        typer.echo(f"\nChequebook Information:")
+        typer.echo(f"  Address:           {cheque_info.chequebookAddress}")
+        typer.echo(f"  Available Balance: {cheque_info.availableBalance}")
+        typer.echo(f"  Total Balance:     {cheque_info.totalBalance}")
+    except Exception as e:
+        typer.secho(f"ERROR: Failed to get chequebook info: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def health(
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
+):
+    """
+    Check if the backend is healthy and reachable.
+    """
+    import time as time_module
+
+    use_gateway = _backend_config["backend"] == "gateway"
+    gateway_url = _backend_config["gateway_url"]
+    bee_url = _backend_config["bee_url"]
+    backend_url = gateway_url if use_gateway else bee_url
+
+    if verbose:
+        typer.echo(f"Checking health of {backend_url}...")
+
+    start_time = time_module.time()
+    try:
+        if use_gateway:
+            gw_client = GatewayClient(base_url=gateway_url)
+            is_healthy = gw_client.health_check(verbose=verbose)
+        else:
+            # For local Bee, try to get stamps endpoint as health check
+            import requests
+            response = requests.get(f"{bee_url}/health", timeout=10)
+            is_healthy = response.status_code == 200
+
+        elapsed_ms = int((time_module.time() - start_time) * 1000)
+
+        if is_healthy:
+            typer.secho(f"✓ Backend: {backend_url}", fg=typer.colors.GREEN)
+            typer.secho(f"✓ Status: Healthy", fg=typer.colors.GREEN)
+            typer.echo(f"  Response time: {elapsed_ms}ms")
+        else:
+            typer.secho(f"✗ Backend: {backend_url}", fg=typer.colors.RED)
+            typer.secho(f"✗ Status: Unhealthy", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+
+    except Exception as e:
+        typer.secho(f"✗ Backend: {backend_url}", fg=typer.colors.RED)
+        typer.secho(f"✗ Status: Unreachable", fg=typer.colors.RED)
+        if verbose:
+            typer.echo(f"  Error: {e}")
+        raise typer.Exit(code=1)
+
+
 @app.callback()
 def main(
-    ctx: typer.Context, # Context object for Typer
-    # Add global options here if needed later, e.g. for config file
+    ctx: typer.Context,
+    backend: Annotated[Optional[str], typer.Option(
+        "--backend", "-b",
+        help="Backend to use: 'gateway' (default) or 'local'"
+    )] = None,
+    gateway_url: Annotated[Optional[str], typer.Option(
+        "--gateway-url",
+        help=f"Gateway URL (when backend=gateway). [default: {config.GATEWAY_URL}]"
+    )] = None,
 ):
-     """
-     Swarm Provenance CLI Toolkit - Wraps and uploads data to Swarm.
-     Use --verbose for detailed debug output.
-     """
-     # You can use ctx.obj to pass objects between commands if you add subcommands
-     pass
+    """
+    Swarm Provenance CLI Toolkit - Wraps and uploads data to Swarm.
+
+    By default uses the provenance gateway (no local Bee node required).
+    Use --backend local for direct Bee node communication.
+    """
+    if backend:
+        if backend not in ("gateway", "local"):
+            typer.secho(f"ERROR: Invalid backend '{backend}'. Use 'gateway' or 'local'.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        _backend_config["backend"] = backend
+
+    if gateway_url:
+        _backend_config["gateway_url"] = gateway_url
 
 if __name__ == "__main__":
      app()
