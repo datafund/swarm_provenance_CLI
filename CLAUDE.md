@@ -2,6 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## GitHub
+
+- **Always use the `origin` remote**: `datafund/swarm_provenance_CLI`
+- Never use `upstream` for issues, PRs, or any GitHub operations
+- When running `gh` commands, always specify `--repo datafund/swarm_provenance_CLI`
+
+## Git Commits
+
+- Never mention "Claude" or AI tools in commit messages
+- Keep commit messages focused on what changed and why
+
 ## Project Overview
 
 The Swarm Provenance Uploader is a Python CLI toolkit that wraps provenance data files within metadata structures and uploads them to the Swarm decentralized storage network via a Bee gateway. It provides bidirectional operations for secure data storage with integrity verification.
