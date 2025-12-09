@@ -15,7 +15,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-The Swarm Provenance Uploader is a Python CLI toolkit that wraps provenance data files within metadata structures and uploads them to the Swarm decentralized storage network via a Bee gateway. It provides bidirectional operations for secure data storage with integrity verification.
+The Swarm Provenance Uploader is a Python CLI toolkit that wraps provenance data files within metadata structures and uploads them to the Swarm decentralized storage network. It supports two backends:
+
+- **Gateway** (default): Uses `provenance-gateway.datafund.io` - no local Bee node required
+- **Local**: Direct Bee node communication for development/self-hosted setups
 
 ## Development Commands
 
@@ -34,11 +37,26 @@ pytest
 
 ### CLI Usage
 ```bash
-# Upload data to Swarm
-swarm-prov-upload --file /path/to/data.txt --std "PROV-STD-V1" --verbose
+# Check backend health
+swarm-prov-upload health
 
-# Download and verify data from Swarm
-swarm-prov-upload download <swarm_hash> --output-dir ./downloads --verbose
+# Upload data (uses gateway by default)
+swarm-prov-upload upload --file /path/to/data.txt --std "PROV-STD-V1"
+
+# Upload with local Bee backend
+swarm-prov-upload --backend local upload --file /path/to/data.txt
+
+# Download and verify data
+swarm-prov-upload download <swarm_hash> --output-dir ./downloads
+
+# Stamp management (gateway only)
+swarm-prov-upload stamps list
+swarm-prov-upload stamps info <stamp_id>
+swarm-prov-upload stamps extend <stamp_id> --amount 1000000
+
+# Wallet info (gateway only)
+swarm-prov-upload wallet
+swarm-prov-upload chequebook
 ```
 
 ## Architecture
@@ -46,10 +64,26 @@ swarm-prov-upload download <swarm_hash> --output-dir ./downloads --verbose
 ### Core Workflow
 The application follows a modular architecture with clear separation of concerns:
 
-1. **CLI Layer** (`cli.py`): Typer-based command interface with upload/download commands
+1. **CLI Layer** (`cli.py`): Typer-based command interface with commands for upload, download, stamps, wallet, health
 2. **Core Modules** (`core/`): Business logic split across specialized modules
-3. **Data Models** (`models.py`): Pydantic v2 schemas for metadata structure
+   - `gateway_client.py`: Client for provenance-gateway API (default)
+   - `swarm_client.py`: Client for local Bee node API
+   - `file_utils.py`: File I/O and encoding utilities
+   - `metadata_builder.py`: Metadata construction
+3. **Data Models** (`models.py`): Pydantic v2 schemas for metadata and API responses
 4. **Configuration** (`config.py`): Environment-based configuration management
+
+### Backend Clients
+
+**GatewayClient** (`core/gateway_client.py`):
+- Default backend, requires no local infrastructure
+- Supports all features: stamps, wallet, chequebook, data upload/download
+- Uses provenance-gateway.datafund.io API
+
+**SwarmClient** (`core/swarm_client.py`):
+- For local Bee node communication
+- Subset of features (no stamp list, no extend, no wallet)
+- Used with `--backend local`
 
 ### Key Components
 
@@ -60,14 +94,19 @@ The application follows a modular architecture with clear separation of concerns
 - `provenance_standard`: Optional provenance standard identifier
 - `encryption`: Optional encryption details
 
+**Gateway API Models**: Response schemas for gateway endpoints:
+- `StampDetails`, `StampListResponse`, `StampPurchaseResponse`
+- `DataUploadResponse`, `DataDownloadResponse`
+- `WalletResponse`, `ChequebookResponse`
+
 **Upload Process**:
 1. File reading and SHA256 hashing (`file_utils.py`)
-2. Postage stamp purchasing and validation (`swarm_client.py`)
+2. Postage stamp purchasing and validation (via selected backend client)
 3. Metadata wrapping (`metadata_builder.py`)
-4. Upload to Swarm network (`swarm_client.py`)
+4. Upload to Swarm network (via selected backend client)
 
 **Download Process**:
-1. Metadata retrieval from Swarm (`swarm_client.py`)
+1. Metadata retrieval from Swarm (via selected backend client)
 2. Data extraction and Base64 decoding (`file_utils.py`)
 3. SHA256 integrity verification
 4. File output with metadata preservation
@@ -81,9 +120,15 @@ The codebase implements comprehensive error handling:
 
 ### Configuration Management
 Uses python-dotenv for environment configuration:
-- `BEE_GATEWAY_URL`: Swarm Bee gateway endpoint (default: http://localhost:1633)
-- `POSTAGE_DEPTH`: Stamp depth parameter (default: 17)
-- `POSTAGE_AMOUNT`: Stamp amount parameter (default: 1000000000)
+
+**Backend Selection**:
+- `PROVENANCE_BACKEND`: `gateway` (default) or `local`
+- `PROVENANCE_GATEWAY_URL`: Gateway URL (default: https://provenance-gateway.datafund.io)
+- `BEE_GATEWAY_URL`: Local Bee URL (default: http://localhost:1633)
+
+**Stamp Defaults**:
+- `DEFAULT_POSTAGE_DEPTH`: Stamp depth parameter (default: 17)
+- `DEFAULT_POSTAGE_AMOUNT`: Stamp amount parameter (default: 1000000000)
 
 ## Testing Approach
 
