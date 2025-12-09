@@ -5,15 +5,40 @@ from pathlib import Path
 import sys
 import time
 import json
+import warnings
 
-from . import config
+from . import config, __version__
 from .core import file_utils, swarm_client, metadata_builder
 from .core.gateway_client import GatewayClient
 from .models import ProvenanceMetadata, ValidationError
+from . import exceptions
 
 app = typer.Typer(help="Swarm Provenance CLI - Wraps and uploads data to Swarm.")
 stamps_app = typer.Typer(help="Manage postage stamps.")
 app.add_typer(stamps_app, name="stamps")
+
+
+def _version_callback(value: bool):
+    """Print version and exit."""
+    if value:
+        typer.echo(f"swarm-prov-upload {__version__}")
+        raise typer.Exit()
+
+
+def _show_local_backend_warning():
+    """Show deprecation warning for local backend usage."""
+    if not _backend_config.get("_warning_shown"):
+        typer.secho(
+            "\n⚠️  Note: Local Bee backend is intended for development/testing.",
+            fg=typer.colors.YELLOW,
+            err=True
+        )
+        typer.secho(
+            "   For production use, consider the gateway: --backend gateway\n",
+            fg=typer.colors.YELLOW,
+            err=True
+        )
+        _backend_config["_warning_shown"] = True
 
 # Global state for backend configuration
 _backend_config = {
@@ -39,6 +64,7 @@ def upload(
     provenance_standard: Annotated[Optional[str], typer.Option("--std", help="Identifier for the provenance standard used (optional).")] = None,
     encryption: Annotated[Optional[str], typer.Option("--enc", help="Details about encryption used (optional).")] = None,
     bee_url: Annotated[Optional[str], typer.Option("--bee-url", help="Bee Gateway URL (when backend=local).")] = None,
+    stamp_id: Annotated[Optional[str], typer.Option("--stamp-id", "-s", help="Existing stamp ID to reuse (skips stamp purchase).")] = None,
     stamp_depth: Annotated[int, typer.Option(help=f"Postage stamp depth. [default: {config.DEFAULT_POSTAGE_DEPTH}]")] = config.DEFAULT_POSTAGE_DEPTH,
     stamp_amount: Annotated[int, typer.Option(help=f"Postage stamp amount. [default: {config.DEFAULT_POSTAGE_AMOUNT}]")] = config.DEFAULT_POSTAGE_AMOUNT,
     stamp_check_retries: Annotated[int, typer.Option("--stamp-retries", help="Number of times to check for stamp usability.")] = 12,
@@ -48,11 +74,17 @@ def upload(
     """
     Hashes, Base64-encodes, wraps, and Uploads a
     provenance data file to Swarm.
+
+    By default purchases a new stamp. Use --stamp-id to reuse an existing stamp.
     """
     # Determine which backend to use
     use_gateway = _backend_config["backend"] == "gateway"
     gateway_url = _backend_config["gateway_url"]
     local_bee_url = bee_url or _backend_config["bee_url"]
+
+    # Show warning for local backend
+    if not use_gateway:
+        _show_local_backend_warning()
 
     if verbose:
         typer.echo("Verbose mode enabled.")
@@ -95,30 +127,44 @@ def upload(
        typer.secho(f"ERROR: Failed preparing metadata structure: {e}", fg=typer.colors.RED, err=True)
        raise typer.Exit(code=1)
 
-    # 5 & 6. Request postage stamp
-    typer.echo(f"Purchasing postage stamp...")
-    if verbose:
-        backend_url = gateway_url if use_gateway else local_bee_url
-        typer.echo(f"    (Amount: {stamp_amount}, Depth: {stamp_depth} from {backend_url})")
-    stamp_id = None
-    try:
-        if use_gateway:
-            gw_client = GatewayClient(base_url=gateway_url)
-            stamp_id = gw_client.purchase_stamp(stamp_amount, stamp_depth, verbose=verbose)
-        else:
-            stamp_id = swarm_client.purchase_postage_stamp(local_bee_url, stamp_amount, stamp_depth, verbose=verbose)
+    # 5 & 6. Request postage stamp OR use existing one
+    used_existing_stamp = False
+    if stamp_id:
+        # User provided an existing stamp ID
+        used_existing_stamp = True
+        typer.echo(f"Using existing stamp: ...{stamp_id[-12:]}")
         if verbose:
-            typer.echo(f"    Stamp ID Received: {stamp_id} (Length: {len(stamp_id)})")
-            typer.echo(f"    Stamp ID (lowercase for header): {stamp_id.lower()}")
-        else:
-            typer.echo(f"Postage stamp purchased (ID: ...{stamp_id[-12:]})")
+            typer.echo(f"    Stamp ID: {stamp_id}")
+    else:
+        # Purchase a new stamp
+        typer.echo(f"Purchasing postage stamp...")
+        if verbose:
+            backend_url = gateway_url if use_gateway else local_bee_url
+            typer.echo(f"    (Amount: {stamp_amount}, Depth: {stamp_depth} from {backend_url})")
+        try:
+            if use_gateway:
+                gw_client = GatewayClient(base_url=gateway_url)
+                stamp_id = gw_client.purchase_stamp(stamp_amount, stamp_depth, verbose=verbose)
+            else:
+                stamp_id = swarm_client.purchase_postage_stamp(local_bee_url, stamp_amount, stamp_depth, verbose=verbose)
+            if verbose:
+                typer.echo(f"    Stamp ID Received: {stamp_id} (Length: {len(stamp_id)})")
+                typer.echo(f"    Stamp ID (lowercase for header): {stamp_id.lower()}")
+            else:
+                typer.echo(f"Postage stamp purchased (ID: ...{stamp_id[-12:]})")
 
-    except Exception as e:
-        typer.secho(f"ERROR: Failed purchasing stamp: {e}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+        except exceptions.StampPurchaseError as e:
+            typer.secho(f"ERROR: Failed purchasing stamp: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        except Exception as e:
+            typer.secho(f"ERROR: Failed purchasing stamp: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
 
     # Poll for stamp existence and usability
-    typer.echo(f"Waiting for stamp to become usable (up to {stamp_check_retries * stamp_check_interval // 60} minutes)...")
+    if used_existing_stamp:
+        typer.echo(f"Verifying stamp is usable...")
+    else:
+        typer.echo(f"Waiting for stamp to become usable (up to {stamp_check_retries * stamp_check_interval // 60} minutes)...")
     stamp_is_ready_for_upload = False
     for i in range(stamp_check_retries):
         if not verbose:
@@ -228,6 +274,10 @@ def download(
     use_gateway = _backend_config["backend"] == "gateway"
     gateway_url = _backend_config["gateway_url"]
     local_bee_url = bee_url or _backend_config["bee_url"]
+
+    # Show warning for local backend
+    if not use_gateway:
+        _show_local_backend_warning()
 
     if verbose:
         typer.echo("Verbose mode enabled.")
@@ -424,6 +474,10 @@ def stamps_info(
     gateway_url = _backend_config["gateway_url"]
     bee_url = _backend_config["bee_url"]
 
+    # Show warning for local backend
+    if not use_gateway:
+        _show_local_backend_warning()
+
     if verbose:
         backend_url = gateway_url if use_gateway else bee_url
         typer.echo(f"Getting stamp info from {backend_url}...")
@@ -564,6 +618,10 @@ def health(
     bee_url = _backend_config["bee_url"]
     backend_url = gateway_url if use_gateway else bee_url
 
+    # Show warning for local backend
+    if not use_gateway:
+        _show_local_backend_warning()
+
     if verbose:
         typer.echo(f"Checking health of {backend_url}...")
 
@@ -600,6 +658,12 @@ def health(
 @app.callback()
 def main(
     ctx: typer.Context,
+    version: Annotated[Optional[bool], typer.Option(
+        "--version", "-V",
+        help="Show version and exit.",
+        callback=_version_callback,
+        is_eager=True,
+    )] = None,
     backend: Annotated[Optional[str], typer.Option(
         "--backend", "-b",
         help="Backend to use: 'gateway' (default) or 'local'"
