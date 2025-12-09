@@ -32,7 +32,19 @@ pip install -e .[testing]
 
 ### Testing
 ```bash
+# Run all tests (unit + integration)
 pytest
+
+# Run only unit tests (skip integration)
+pytest --ignore=tests/test_integration.py
+
+# Run only integration tests (requires real backends)
+pytest tests/test_integration.py -v
+
+# Run by marker
+pytest -m local_bee    # Local Bee tests only
+pytest -m gateway      # Gateway tests only
+pytest -m integration  # All integration tests
 ```
 
 ### CLI Usage
@@ -132,13 +144,20 @@ Uses python-dotenv for environment configuration:
 
 ## Testing Approach
 
-The test suite uses pytest with comprehensive mocking:
+The test suite has two layers:
+
+### Unit Tests (Mocked)
+- `test_cli.py`: CLI command tests with mocked backends
+- `test_gateway_client.py`: GatewayClient tests with mocked HTTP
 - Network calls mocked via `requests-mock`
 - File I/O operations mocked with `pytest-mock`
-- CLI command testing with Typer's testing utilities
-- Test data includes realistic Swarm API responses
+- Do not require live services
 
-Tests do not require a live Bee node and run entirely with mocks.
+### Integration Tests (Real Backends)
+- `test_integration.py`: Tests against real services
+- Auto-skip when backends unavailable
+- Markers: `@pytest.mark.integration`, `@pytest.mark.local_bee`, `@pytest.mark.gateway`
+- Require: Local Bee at `localhost:1633` and/or gateway at `provenance-gateway.datafund.io`
 
 ## Development Guidelines
 
