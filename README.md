@@ -13,11 +13,17 @@ and upload them to the Swarm decentralized storage network.
 # Install
 pip install -e .
 
+# Check version
+swarm-prov-upload --version
+
 # Check connectivity
 swarm-prov-upload health
 
 # Upload data
 swarm-prov-upload upload --file /path/to/data.txt
+
+# Upload with existing stamp (skip purchase)
+swarm-prov-upload upload --file /path/to/data.txt --stamp-id <existing_stamp_id>
 
 # Download and verify
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads
@@ -117,6 +123,9 @@ pytest -m gateway
 ```bash
 # Upload data to Swarm
 swarm-prov-upload upload --file /path/to/data.txt --std "PROV-STD-V1" --verbose
+
+# Upload with existing stamp (cost savings, faster)
+swarm-prov-upload upload --file /path/to/data.txt --stamp-id <existing_stamp_id>
 
 # Download and verify data
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads --verbose
