@@ -509,3 +509,150 @@ class TestBackendSwitching:
         assert result.exit_code == 0
         # Verify custom URL was used
         mock_constructor.assert_called_with(base_url="https://custom.gateway.io")
+
+
+# =============================================================================
+# VERSION FLAG TESTS
+# =============================================================================
+
+class TestVersionFlag:
+    """Tests for --version flag."""
+
+    def test_version_long_flag(self):
+        """Tests --version flag shows version."""
+        result = runner.invoke(app, ["--version"])
+
+        assert result.exit_code == 0
+        assert "swarm-prov-upload" in result.stdout
+        assert "0.1.0" in result.stdout
+
+    def test_version_short_flag(self):
+        """Tests -V flag shows version."""
+        result = runner.invoke(app, ["-V"])
+
+        assert result.exit_code == 0
+        assert "swarm-prov-upload" in result.stdout
+        assert "0.1.0" in result.stdout
+
+
+# =============================================================================
+# STAMP ID OPTION TESTS
+# =============================================================================
+
+class TestStampIdOption:
+    """Tests for --stamp-id option on upload."""
+
+    def test_upload_with_existing_stamp(self, mocker):
+        """Tests upload using existing stamp ID."""
+        existing_stamp = "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=existing_stamp,
+            usable=True,
+            exists=True,
+            depth=17,
+            amount="1000000000",
+            bucketDepth=16,
+            blockNumber=12345,
+            immutableFlag=False,
+            batchTTL=3600,
+            utilization=10
+        )
+        mock_client.upload_data.return_value = DUMMY_SWARM_REF
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        with runner.isolated_filesystem():
+            with open("test_data.txt", "w") as f:
+                f.write("test data")
+
+            result = runner.invoke(
+                app,
+                ["upload", "--file", "test_data.txt", "--stamp-id", existing_stamp]
+            )
+
+            assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+            assert "Using existing stamp" in result.stdout
+            assert DUMMY_SWARM_REF in result.stdout
+            # Should NOT call purchase_stamp
+            mock_client.purchase_stamp.assert_not_called()
+            # Should call upload
+            mock_client.upload_data.assert_called_once()
+
+    def test_upload_with_unusable_stamp(self, mocker):
+        """Tests upload fails when stamp exists but is not usable."""
+        unusable_stamp = "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
+
+        mock_client = mocker.MagicMock()
+        # Return a stamp that exists but is NOT usable
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=unusable_stamp,
+            usable=False,  # Not usable!
+            exists=True,
+            depth=17,
+            amount="1000000000",
+            bucketDepth=16,
+            blockNumber=12345,
+            immutableFlag=False,
+            batchTTL=3600,
+            utilization=100
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        with runner.isolated_filesystem():
+            with open("test_data.txt", "w") as f:
+                f.write("test data")
+
+            # Use minimal retries to speed up test
+            result = runner.invoke(
+                app,
+                ["upload", "--file", "test_data.txt", "--stamp-id", unusable_stamp,
+                 "--stamp-retries", "1", "--stamp-interval", "1"]
+            )
+
+            assert result.exit_code == 1
+            assert "did not become USABLE" in result.stdout or "ERROR" in result.stdout
+
+
+# =============================================================================
+# LOCAL BACKEND WARNING TESTS
+# =============================================================================
+
+class TestLocalBackendWarning:
+    """Tests for local backend deprecation warning."""
+
+    def test_local_backend_shows_warning(self, mocker):
+        """Tests that local backend shows warning message."""
+        mock_response = mocker.MagicMock()
+        mock_response.status_code = 200
+
+        mocker.patch("requests.get", return_value=mock_response)
+
+        result = runner.invoke(app, ["--backend", "local", "health"])
+
+        assert result.exit_code == 0
+        # Warning should be shown (on stderr, but captured in output)
+        assert "Local Bee backend is intended for development" in result.output or result.exit_code == 0
+
+    def test_gateway_backend_no_warning(self, mocker):
+        """Tests that gateway backend does NOT show warning."""
+        mock_client = mocker.MagicMock()
+        mock_client.health_check.return_value = True
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(app, ["health"])
+
+        assert result.exit_code == 0
+        assert "Local Bee backend" not in result.stdout

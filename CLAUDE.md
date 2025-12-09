@@ -49,11 +49,17 @@ pytest -m integration  # All integration tests
 
 ### CLI Usage
 ```bash
+# Check version
+swarm-prov-upload --version
+
 # Check backend health
 swarm-prov-upload health
 
 # Upload data (uses gateway by default)
 swarm-prov-upload upload --file /path/to/data.txt --std "PROV-STD-V1"
+
+# Upload with existing stamp (skips purchase)
+swarm-prov-upload upload --file /path/to/data.txt --stamp-id <existing_stamp_id>
 
 # Upload with local Bee backend
 swarm-prov-upload --backend local upload --file /path/to/data.txt
