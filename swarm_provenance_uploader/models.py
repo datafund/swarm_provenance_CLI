@@ -18,16 +18,21 @@ class ProvenanceMetadata(BaseModel):
 class StampDetails(BaseModel):
     """Details of a postage stamp batch."""
     batchID: str = Field(description="The batch ID (stamp ID)")
-    utilization: int = Field(default=0, description="Utilization percentage")
+    utilization: Optional[int] = Field(default=None, description="Utilization percentage (may be null)")
     usable: bool = Field(description="Whether the stamp is usable for uploads")
     label: Optional[str] = Field(default=None, description="Optional label for the stamp")
     depth: int = Field(description="Stamp depth")
     amount: str = Field(description="Stamp amount (as string for large numbers)")
     bucketDepth: int = Field(description="Bucket depth")
-    blockNumber: int = Field(description="Block number when stamp was created")
     immutableFlag: bool = Field(description="Whether the stamp is immutable")
-    exists: bool = Field(description="Whether the stamp exists")
     batchTTL: int = Field(description="Time to live in seconds")
+    # Optional fields that may or may not be present depending on API version
+    blockNumber: Optional[int] = Field(default=None, description="Block number when stamp was created")
+    exists: Optional[bool] = Field(default=None, description="Whether the stamp exists")
+    start: Optional[int] = Field(default=None, description="Start block number")
+    owner: Optional[str] = Field(default=None, description="Owner address")
+    expectedExpiration: Optional[str] = Field(default=None, description="Expected expiration date")
+    local: Optional[bool] = Field(default=None, description="Whether stamp is local")
 
 
 class StampListResponse(BaseModel):
