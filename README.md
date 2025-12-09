@@ -79,11 +79,36 @@ DEFAULT_POSTAGE_AMOUNT=1000000000
 
 ## Run Tests
 
-Tests use mocks and do not require a live Bee node or gateway.
+### Unit Tests (Mocked)
+
+Unit tests use mocks and do not require a live Bee node or gateway.
 
 ```bash
+# Run all tests (unit + integration)
 pytest
+
+# Run only unit tests (skip integration)
+pytest --ignore=tests/test_integration.py
 ```
+
+### Integration Tests (Real Backends)
+
+Integration tests hit real services. They auto-skip if backends are unavailable.
+
+```bash
+# Run only integration tests
+pytest tests/test_integration.py -v
+
+# Run only local Bee tests
+pytest -m local_bee
+
+# Run only gateway tests
+pytest -m gateway
+```
+
+**Requirements:**
+- Local Bee: Running at `http://localhost:1633`
+- Gateway: Available at `https://provenance-gateway.datafund.io`
 
 ## Usage
 
@@ -339,7 +364,8 @@ swarm_provenance_uploader/
 │       └── swarm_client.py      # Local Bee API client
 └── tests/
     ├── __init__.py
-    ├── test_cli.py
-    └── test_gateway_client.py
+    ├── test_cli.py              # CLI unit tests (mocked)
+    ├── test_gateway_client.py   # GatewayClient unit tests (mocked)
+    └── test_integration.py      # Integration tests (real backends)
 ```
 
