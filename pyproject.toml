@@ -29,5 +29,12 @@ swarm-prov-upload = "swarm_provenance_uploader.cli:app"
 testing = [
     "pytest>=7.4",
     "pytest-mock>=3.12",
-     "requests-mock>=1.11"
+    "requests-mock>=1.11"
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests as integration tests (hit real backends)",
+    "local_bee: marks tests that require local Bee node",
+    "gateway: marks tests that require gateway service",
 ]
