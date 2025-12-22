@@ -364,6 +364,7 @@ swarm_provenance_uploader/
 │   ├── __init__.py
 │   ├── cli.py
 │   ├── config.py
+│   ├── exceptions.py            # Custom exception classes
 │   ├── models.py
 │   └── core/
 │       ├── __init__.py
