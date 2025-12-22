@@ -188,7 +188,7 @@ def upload(
                 stamp_info = swarm_client.get_stamp_info(local_bee_url, stamp_id, verbose=verbose)
 
             if stamp_info:
-                exists = stamp_info.get("exists", False)
+                exists = stamp_info.get("exists")
                 usable = stamp_info.get("usable", False)
                 batch_ttl_seconds = stamp_info.get("batchTTL")  # TTL in seconds
 
@@ -196,7 +196,8 @@ def upload(
                     ttl_str = f"{batch_ttl_seconds // 60}m {batch_ttl_seconds % 60}s" if batch_ttl_seconds is not None else "N/A"
                     typer.echo(f"    Attempt {i+1}: Stamp found - Exists={exists}, Usable={usable}, TTL={ttl_str}")
 
-                if exists and usable:
+                # Check usable flag - exists may be None from gateway API
+                if usable:
                     stamp_is_ready_for_upload = True
                     if not verbose: typer.echo(typer.style("OK", fg=typer.colors.GREEN))
                     else: typer.secho(f"    Stamp {stamp_id.lower()} is now USABLE!", fg=typer.colors.GREEN)

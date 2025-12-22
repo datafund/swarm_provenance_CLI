@@ -8,8 +8,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Never use `upstream` for issues, PRs, or any GitHub operations
 - When running `gh` commands, always specify `--repo datafund/swarm_provenance_CLI`
 
-## Git Commits
+## Git Workflow
 
+**IMPORTANT**: Always create a feature branch before making changes. Never commit directly to `main`.
+
+### Branch Naming
+- `fix/` - Bug fixes (e.g., `fix/stamp-usability-check`)
+- `feature/` - New features (e.g., `feature/add-stamp-purchase-command`)
+- `docs/` - Documentation only (e.g., `docs/update-readme`)
+
+### Commit Messages
 - Never mention "Claude" or AI tools in commit messages
 - Keep commit messages focused on what changed and why
 
