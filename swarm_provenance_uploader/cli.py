@@ -65,8 +65,10 @@ def upload(
     encryption: Annotated[Optional[str], typer.Option("--enc", help="Details about encryption used (optional).")] = None,
     bee_url: Annotated[Optional[str], typer.Option("--bee-url", help="Bee Gateway URL (when backend=local).")] = None,
     stamp_id: Annotated[Optional[str], typer.Option("--stamp-id", "-s", help="Existing stamp ID to reuse (skips stamp purchase).")] = None,
-    stamp_depth: Annotated[int, typer.Option(help=f"Postage stamp depth. [default: {config.DEFAULT_POSTAGE_DEPTH}]")] = config.DEFAULT_POSTAGE_DEPTH,
-    stamp_amount: Annotated[int, typer.Option(help=f"Postage stamp amount. [default: {config.DEFAULT_POSTAGE_AMOUNT}]")] = config.DEFAULT_POSTAGE_AMOUNT,
+    duration: Annotated[Optional[int], typer.Option("--duration", "-d", help="Stamp validity in hours (min 24, gateway only).")] = None,
+    size: Annotated[Optional[str], typer.Option("--size", help="Stamp size preset: 'small', 'medium', 'large' (gateway only).")] = None,
+    stamp_depth: Annotated[Optional[int], typer.Option("--depth", help="Postage stamp depth (16-32).")] = None,
+    stamp_amount: Annotated[Optional[int], typer.Option("--amount", help="Legacy: PLUR amount (local backend or deprecated).")] = None,
     stamp_check_retries: Annotated[int, typer.Option("--stamp-retries", help="Number of times to check for stamp usability.")] = 12,
     stamp_check_interval: Annotated[int, typer.Option("--stamp-interval", help="Seconds to wait between stamp usability checks.")] = 20,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False
@@ -75,7 +77,10 @@ def upload(
     Hashes, Base64-encodes, wraps, and Uploads a
     provenance data file to Swarm.
 
-    By default purchases a new stamp. Use --stamp-id to reuse an existing stamp.
+    By default purchases a new stamp with 25 hours validity.
+    Use --stamp-id to reuse an existing stamp.
+    Use --duration to specify validity in hours (min 24).
+    Use --size for preset sizes: small, medium, large.
     """
     # Determine which backend to use
     use_gateway = _backend_config["backend"] == "gateway"
@@ -93,10 +98,16 @@ def upload(
         typer.echo(f"    File: {file}")
         if use_gateway:
             typer.echo(f"    Gateway URL: {gateway_url}")
+            if duration:
+                typer.echo(f"    Duration: {duration} hours")
+            if size:
+                typer.echo(f"    Size: {size}")
         else:
             typer.echo(f"    Bee URL: {local_bee_url}")
-        typer.echo(f"    Stamp Depth: {stamp_depth}")
-        typer.echo(f"    Stamp Amount: {stamp_amount}")
+            if stamp_amount:
+                typer.echo(f"    Stamp Amount: {stamp_amount}")
+        if stamp_depth:
+            typer.echo(f"    Stamp Depth: {stamp_depth}")
         typer.echo(f"    Stamp Check Retries: {stamp_check_retries}")
         typer.echo(f"    Stamp Check Interval: {stamp_check_interval}s")
     else:
@@ -140,13 +151,25 @@ def upload(
         typer.echo(f"Purchasing postage stamp...")
         if verbose:
             backend_url = gateway_url if use_gateway else local_bee_url
-            typer.echo(f"    (Amount: {stamp_amount}, Depth: {stamp_depth} from {backend_url})")
+            if use_gateway:
+                typer.echo(f"    (Duration: {duration or 'default'}h, Size: {size or 'default'}, Depth: {stamp_depth or 'default'} from {backend_url})")
+            else:
+                typer.echo(f"    (Amount: {stamp_amount or config.DEFAULT_POSTAGE_AMOUNT}, Depth: {stamp_depth or config.DEFAULT_POSTAGE_DEPTH} from {backend_url})")
         try:
             if use_gateway:
                 gw_client = GatewayClient(base_url=gateway_url)
-                stamp_id = gw_client.purchase_stamp(stamp_amount, stamp_depth, verbose=verbose)
+                stamp_id = gw_client.purchase_stamp(
+                    duration_hours=duration,
+                    size=size,
+                    depth=stamp_depth,
+                    amount=stamp_amount,  # Legacy fallback
+                    verbose=verbose
+                )
             else:
-                stamp_id = swarm_client.purchase_postage_stamp(local_bee_url, stamp_amount, stamp_depth, verbose=verbose)
+                # Local backend still uses amount/depth
+                local_amount = stamp_amount or config.DEFAULT_POSTAGE_AMOUNT
+                local_depth = stamp_depth or config.DEFAULT_POSTAGE_DEPTH
+                stamp_id = swarm_client.purchase_postage_stamp(local_bee_url, local_amount, local_depth, verbose=verbose)
             if verbose:
                 typer.echo(f"    Stamp ID Received: {stamp_id} (Length: {len(stamp_id)})")
                 typer.echo(f"    Stamp ID (lowercase for header): {stamp_id.lower()}")
