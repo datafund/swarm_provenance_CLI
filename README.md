@@ -19,8 +19,14 @@ swarm-prov-upload --version
 # Check connectivity
 swarm-prov-upload health
 
-# Upload data
+# Upload data (purchases stamp with 25 hour validity)
 swarm-prov-upload upload --file /path/to/data.txt
+
+# Upload with custom duration (hours)
+swarm-prov-upload upload --file /path/to/data.txt --duration 48
+
+# Upload with size preset (small, medium, large)
+swarm-prov-upload upload --file /path/to/data.txt --size medium
 
 # Upload with existing stamp (skip purchase)
 swarm-prov-upload upload --file /path/to/data.txt --stamp-id <existing_stamp_id>
@@ -80,7 +86,8 @@ PROVENANCE_BACKEND=gateway           # gateway (default) or local
 PROVENANCE_GATEWAY_URL=https://provenance-gateway.datafund.io
 BEE_GATEWAY_URL=http://localhost:1633
 DEFAULT_POSTAGE_DEPTH=17
-DEFAULT_POSTAGE_AMOUNT=1000000000
+DEFAULT_POSTAGE_DURATION_HOURS=25    # Stamp validity in hours (gateway only, min 24)
+DEFAULT_POSTAGE_AMOUNT=1000000000    # Legacy: for local backend
 ```
 
 ## Run Tests
@@ -121,8 +128,14 @@ pytest -m gateway
 ### Data Operations
 
 ```bash
-# Upload data to Swarm
+# Upload data to Swarm (default: 25 hour stamp validity)
 swarm-prov-upload upload --file /path/to/data.txt --std "PROV-STD-V1" --verbose
+
+# Upload with custom duration (hours, min 24)
+swarm-prov-upload upload --file /path/to/data.txt --duration 168  # 7 days
+
+# Upload with size preset (small, medium, large)
+swarm-prov-upload upload --file /path/to/data.txt --size large
 
 # Upload with existing stamp (cost savings, faster)
 swarm-prov-upload upload --file /path/to/data.txt --stamp-id <existing_stamp_id>
@@ -130,6 +143,15 @@ swarm-prov-upload upload --file /path/to/data.txt --stamp-id <existing_stamp_id>
 # Download and verify data
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads --verbose
 ```
+
+**Upload Options:**
+| Option | Description |
+|--------|-------------|
+| `--duration`, `-d` | Stamp validity in hours (min 24, gateway only) |
+| `--size` | Size preset: `small`, `medium`, `large` (gateway only) |
+| `--depth` | Technical depth parameter (16-32) |
+| `--stamp-id`, `-s` | Use existing stamp (skip purchase) |
+| `--amount` | Legacy: PLUR amount (local backend) |
 
 ### Stamp Management (Gateway only)
 

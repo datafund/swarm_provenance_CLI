@@ -13,7 +13,7 @@ from swarm_provenance_uploader.models import (
 runner = CliRunner()
 
 # Test constants
-DUMMY_HASH = "a028d9370473556397e189567c07279195890a16886002103369966898407152"
+DUMMY_HASH = "a028d9370473556397e189567c07279195890a1688600210336996689840.2.0"
 DUMMY_STAMP = "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
 DUMMY_SWARM_REF = "b5d4ea763a1396676771151158461f73678f1676166acd06a0a18600b85de8a4"
 
@@ -524,8 +524,8 @@ class TestVersionFlag:
 
         assert result.exit_code == 0
         assert "swarm-prov-upload" in result.stdout
-        # Version format: 0.1.2 or 0.1.2+git.abc1234
-        assert "0.1.2" in result.stdout
+        # Version format: 0.2.0 or 0.2.0+git.abc1234
+        assert "0.2.0" in result.stdout
 
     def test_version_short_flag(self):
         """Tests -V flag shows version."""
@@ -533,8 +533,8 @@ class TestVersionFlag:
 
         assert result.exit_code == 0
         assert "swarm-prov-upload" in result.stdout
-        # Version format: 0.1.2 or 0.1.2+git.abc1234
-        assert "0.1.2" in result.stdout
+        # Version format: 0.2.0 or 0.2.0+git.abc1234
+        assert "0.2.0" in result.stdout
 
 
 # =============================================================================

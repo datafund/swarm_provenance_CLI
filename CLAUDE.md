@@ -89,14 +89,20 @@ swarm-prov-upload --version
 # Check backend health
 swarm-prov-upload health
 
-# Upload data (uses gateway by default)
+# Upload data (uses gateway by default, 25 hour stamp validity)
 swarm-prov-upload upload --file /path/to/data.txt --std "PROV-STD-V1"
+
+# Upload with custom duration (hours, min 24)
+swarm-prov-upload upload --file /path/to/data.txt --duration 168  # 7 days
+
+# Upload with size preset
+swarm-prov-upload upload --file /path/to/data.txt --size medium
 
 # Upload with existing stamp (skips purchase)
 swarm-prov-upload upload --file /path/to/data.txt --stamp-id <existing_stamp_id>
 
-# Upload with local Bee backend
-swarm-prov-upload --backend local upload --file /path/to/data.txt
+# Upload with local Bee backend (uses legacy amount)
+swarm-prov-upload --backend local upload --file /path/to/data.txt --amount 1000000000
 
 # Download and verify data
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads
@@ -181,7 +187,8 @@ Uses python-dotenv for environment configuration:
 
 **Stamp Defaults**:
 - `DEFAULT_POSTAGE_DEPTH`: Stamp depth parameter (default: 17)
-- `DEFAULT_POSTAGE_AMOUNT`: Stamp amount parameter (default: 1000000000)
+- `DEFAULT_POSTAGE_DURATION_HOURS`: Stamp validity in hours (gateway only, default: 25)
+- `DEFAULT_POSTAGE_AMOUNT`: Legacy PLUR amount for local backend (default: 1000000000)
 
 ## Testing Approach
 

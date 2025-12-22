@@ -99,24 +99,50 @@ class GatewayClient:
             raise ConnectionError(f"Failed to list stamps: {e}") from e
 
     def purchase_stamp(
-        self, amount: int, depth: int, label: Optional[str] = None, verbose: bool = False
+        self,
+        duration_hours: Optional[int] = None,
+        size: Optional[str] = None,
+        depth: Optional[int] = None,
+        label: Optional[str] = None,
+        amount: Optional[int] = None,
+        verbose: bool = False
     ) -> str:
         """
         Purchase a new postage stamp.
 
         Args:
-            amount: Amount of BZZ to fund the stamp
-            depth: Depth of the stamp (determines capacity)
+            duration_hours: Hours of validity (min 24, default 25)
+            size: Preset size - 'small', 'medium', or 'large'
+            depth: Technical depth parameter (16-32)
             label: Optional label for the stamp
+            amount: Legacy - PLUR amount (use duration_hours instead)
             verbose: Enable debug output
 
         Returns:
             The batch ID (stamp ID) of the newly created stamp.
         """
         url = self._make_url("/api/v1/stamps/")
-        payload = {"amount": amount, "depth": depth}
-        if label:
+        payload = {}
+
+        # New duration-based parameter (preferred)
+        if duration_hours is not None:
+            payload["duration_hours"] = duration_hours
+
+        # Size preset
+        if size is not None:
+            payload["size"] = size
+
+        # Depth parameter
+        if depth is not None:
+            payload["depth"] = depth
+
+        # Label
+        if label is not None:
             payload["label"] = label
+
+        # Legacy amount (for backwards compatibility)
+        if amount is not None:
+            payload["amount"] = amount
 
         if verbose:
             print(f"--- DEBUG: Purchase Stamp ---")

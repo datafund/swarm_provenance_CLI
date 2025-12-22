@@ -7,7 +7,8 @@ load_dotenv()  # Load variables from .env file
 GATEWAY_DEFAULT_URL = "https://provenance-gateway.datafund.io"
 BEE_DEFAULT_URL = "http://localhost:1633"
 DEFAULT_DEPTH = 17
-DEFAULT_AMOUNT = 1000000000
+DEFAULT_DURATION_HOURS = 25  # Minimum 24 hours required by gateway
+DEFAULT_AMOUNT = 1000000000  # Legacy: kept for local Bee backend
 DEFAULT_BACKEND = "gateway"  # "gateway" or "local"
 
 # --- Backend Configuration ---
@@ -23,6 +24,12 @@ try:
 except (ValueError, TypeError):
     DEFAULT_POSTAGE_DEPTH = DEFAULT_DEPTH
 
+try:
+    DEFAULT_POSTAGE_DURATION_HOURS = int(os.getenv("DEFAULT_POSTAGE_DURATION_HOURS", str(DEFAULT_DURATION_HOURS)))
+except (ValueError, TypeError):
+    DEFAULT_POSTAGE_DURATION_HOURS = DEFAULT_DURATION_HOURS
+
+# Legacy: kept for local Bee backend compatibility
 try:
     DEFAULT_POSTAGE_AMOUNT = int(os.getenv("DEFAULT_POSTAGE_AMOUNT", str(DEFAULT_AMOUNT)))
 except (ValueError, TypeError):

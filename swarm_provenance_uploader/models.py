@@ -42,10 +42,12 @@ class StampListResponse(BaseModel):
 
 
 class StampPurchaseRequest(BaseModel):
-    """Request body for purchasing a new stamp."""
-    amount: int = Field(description="Amount of BZZ to fund the stamp")
-    depth: int = Field(description="Depth of the stamp (determines capacity)")
+    """Request body for purchasing a new stamp (gateway API)."""
+    duration_hours: Optional[int] = Field(default=None, ge=24, description="Hours of validity (min 24, default 25)")
+    size: Optional[str] = Field(default=None, description="Preset size: 'small', 'medium', or 'large'")
+    depth: Optional[int] = Field(default=None, ge=16, le=32, description="Technical depth parameter (16-32)")
     label: Optional[str] = Field(default=None, description="Optional label for the stamp")
+    amount: Optional[int] = Field(default=None, description="Legacy: PLUR amount (use duration_hours instead)")
 
 
 class StampPurchaseResponse(BaseModel):
