@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarm-provenance-uploader"
-version = "0.1.1"
+version = "0.1.2"
 description = "A CLI toolkit for wrapping data and uploading to Swarm."
 readme = "README.md"
 requires-python = ">=3.8"
