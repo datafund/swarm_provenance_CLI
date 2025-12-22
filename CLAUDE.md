@@ -13,6 +13,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Never mention "Claude" or AI tools in commit messages
 - Keep commit messages focused on what changed and why
 
+## Version Management
+
+**IMPORTANT**: Increment the version number with each change that modifies functionality.
+
+### Version Location
+- Primary: `swarm_provenance_uploader/__init__.py` (`__version__`)
+- Mirror: `pyproject.toml` (`version` field)
+
+Both files MUST be kept in sync.
+
+### Version Format
+Uses semantic versioning with optional git hash: `MAJOR.MINOR.PATCH[+git.SHORT_HASH]`
+
+- **Release versions**: `0.1.0`, `1.0.0` (clean semver for PyPI releases)
+- **Development versions**: `0.1.1+git.abc1234` (includes git hash for traceability)
+
+### When to Increment
+- **PATCH** (0.0.X): Bug fixes, documentation updates, minor improvements
+- **MINOR** (0.X.0): New features, new CLI commands, new API endpoints
+- **MAJOR** (X.0.0): Breaking changes, incompatible API changes
+
+### How to Update Version
+1. Update `__version__` in `swarm_provenance_uploader/__init__.py`
+2. Update `version` in `pyproject.toml`
+3. The git hash suffix is added automatically at runtime (see below)
+
 ## Project Overview
 
 The Swarm Provenance Uploader is a Python CLI toolkit that wraps provenance data files within metadata structures and uploads them to the Swarm decentralized storage network. It supports two backends:
@@ -89,7 +115,8 @@ The application follows a modular architecture with clear separation of concerns
    - `file_utils.py`: File I/O and encoding utilities
    - `metadata_builder.py`: Metadata construction
 3. **Data Models** (`models.py`): Pydantic v2 schemas for metadata and API responses
-4. **Configuration** (`config.py`): Environment-based configuration management
+4. **Exceptions** (`exceptions.py`): Custom exception hierarchy for unified error handling
+5. **Configuration** (`config.py`): Environment-based configuration management
 
 ### Backend Clients
 
