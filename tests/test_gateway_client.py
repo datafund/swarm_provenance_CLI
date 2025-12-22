@@ -123,7 +123,7 @@ class TestGatewayClientStamps:
         assert result.total_count == 0
 
     def test_purchase_stamp_success(self, requests_mock):
-        """Tests purchasing a stamp."""
+        """Tests purchasing a stamp with duration_hours."""
         requests_mock.post(
             "https://test.gateway.io/api/v1/stamps/",
             json={"batchID": DUMMY_STAMP, "message": "Stamp purchased"},
@@ -131,9 +131,23 @@ class TestGatewayClientStamps:
         )
 
         client = GatewayClient(base_url="https://test.gateway.io")
-        result = client.purchase_stamp(amount=1000000000, depth=17)
+        result = client.purchase_stamp(duration_hours=48)
 
         assert result == DUMMY_STAMP
+
+    def test_purchase_stamp_with_size(self, requests_mock):
+        """Tests purchasing a stamp with size preset."""
+        adapter = requests_mock.post(
+            "https://test.gateway.io/api/v1/stamps/",
+            json={"batchID": DUMMY_STAMP},
+            status_code=201
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        client.purchase_stamp(size="medium")
+
+        # Verify size was sent in request
+        assert adapter.last_request.json()["size"] == "medium"
 
     def test_purchase_stamp_with_label(self, requests_mock):
         """Tests purchasing a stamp with label."""
@@ -144,10 +158,25 @@ class TestGatewayClientStamps:
         )
 
         client = GatewayClient(base_url="https://test.gateway.io")
-        client.purchase_stamp(amount=1000000000, depth=17, label="test-label")
+        client.purchase_stamp(duration_hours=24, label="test-label")
 
         # Verify label was sent in request
         assert adapter.last_request.json()["label"] == "test-label"
+
+    def test_purchase_stamp_legacy_amount(self, requests_mock):
+        """Tests purchasing a stamp with legacy amount parameter."""
+        adapter = requests_mock.post(
+            "https://test.gateway.io/api/v1/stamps/",
+            json={"batchID": DUMMY_STAMP},
+            status_code=201
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        client.purchase_stamp(amount=1000000000, depth=17)
+
+        # Verify legacy params were sent
+        assert adapter.last_request.json()["amount"] == 1000000000
+        assert adapter.last_request.json()["depth"] == 17
 
     def test_get_stamp_success(self, requests_mock):
         """Tests getting stamp details."""

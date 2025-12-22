@@ -3,7 +3,7 @@
 import subprocess
 from pathlib import Path
 
-__version_base__ = "0.1.2"
+__version_base__ = "0.2.0"
 
 
 def _get_git_hash() -> str:
