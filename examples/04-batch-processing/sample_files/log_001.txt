@@ -1,0 +1,10 @@
+2025-01-08 00:00:15 [INFO] Application started
+2025-01-08 00:00:16 [INFO] Loading configuration from /etc/app/config.yaml
+2025-01-08 00:00:17 [INFO] Database connection established
+2025-01-08 00:00:18 [INFO] Cache initialized (Redis)
+2025-01-08 00:01:00 [INFO] HTTP server listening on port 8080
+2025-01-08 00:05:23 [INFO] Request received: GET /api/health
+2025-01-08 00:05:24 [INFO] Health check passed
+2025-01-08 00:15:45 [INFO] Request received: POST /api/data
+2025-01-08 00:15:46 [INFO] Data processed successfully
+2025-01-08 00:30:00 [INFO] Scheduled task: cleanup_temp_files

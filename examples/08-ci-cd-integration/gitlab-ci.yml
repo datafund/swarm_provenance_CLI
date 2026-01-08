@@ -1,0 +1,142 @@
+# GitLab CI Configuration: Archive Build Artifacts to Swarm
+#
+# This configuration archives release artifacts to the Swarm network
+# and creates a provenance manifest.
+#
+# Usage:
+# 1. Copy this content to your .gitlab-ci.yml or include it
+# 2. Customize the build stage for your project
+# 3. Configure CI/CD variables as needed
+
+variables:
+  PROVENANCE_BACKEND: gateway
+  # PROVENANCE_GATEWAY_URL: https://provenance-gateway.datafund.io
+  SWARM_STAMP_SIZE: medium
+
+stages:
+  - build
+  - archive
+  - verify
+
+# Build stage - customize for your project
+build:
+  stage: build
+  image: python:3.11
+  script:
+    - mkdir -p dist
+    # Replace with your actual build commands
+    - echo "Build complete at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > dist/build-info.txt
+    - echo "Commit: ${CI_COMMIT_SHA}" >> dist/build-info.txt
+    - echo "Ref: ${CI_COMMIT_REF_NAME}" >> dist/build-info.txt
+    - tar -czvf dist/app-${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}.tar.gz
+        --exclude='.git'
+        --exclude='node_modules'
+        --exclude='dist'
+        .
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 hour
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+# Archive to Swarm
+archive_to_swarm:
+  stage: archive
+  image: python:3.11
+  dependencies:
+    - build
+  before_script:
+    - pip install swarm-provenance-uploader
+    - swarm-prov-upload --version
+    - swarm-prov-upload health
+  script:
+    - |
+      # Find and upload artifacts
+      for file in dist/*.tar.gz; do
+        if [ -f "$file" ]; then
+          echo "Uploading: $file"
+
+          OUTPUT=$(swarm-prov-upload upload \
+            --file "$file" \
+            --std "RELEASE-V1" \
+            --size ${SWARM_STAMP_SIZE} \
+            2>&1)
+
+          echo "$OUTPUT"
+
+          # Extract Swarm reference
+          SWARM_REF=$(echo "$OUTPUT" | grep -oE '[a-f0-9]{64}' | tail -1)
+          echo "SWARM_REF=$SWARM_REF" >> archive.env
+
+          # Create manifest
+          cat > manifest.json << EOF
+      {
+        "version": "1.0",
+        "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+        "ci_environment": {
+          "platform": "gitlab-ci",
+          "project": "${CI_PROJECT_PATH}",
+          "pipeline_id": "${CI_PIPELINE_ID}",
+          "job_id": "${CI_JOB_ID}",
+          "commit_sha": "${CI_COMMIT_SHA}",
+          "commit_ref": "${CI_COMMIT_REF_NAME}",
+          "tag": "${CI_COMMIT_TAG:-none}"
+        },
+        "provenance_standard": "RELEASE-V1",
+        "artifacts": [
+          {
+            "filename": "$(basename $file)",
+            "swarm_ref": "$SWARM_REF",
+            "size": $(stat -c%s "$file" 2>/dev/null || stat -f%z "$file")
+          }
+        ]
+      }
+      EOF
+
+          echo "Manifest created:"
+          cat manifest.json
+        fi
+      done
+  artifacts:
+    paths:
+      - manifest.json
+    reports:
+      dotenv: archive.env
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+# Verify the archive
+verify_archive:
+  stage: verify
+  image: python:3.11
+  dependencies:
+    - archive_to_swarm
+  before_script:
+    - pip install swarm-provenance-uploader
+  script:
+    - |
+      if [ -n "$SWARM_REF" ]; then
+        echo "Verifying Swarm reference: $SWARM_REF"
+
+        mkdir -p verified
+        swarm-prov-upload download "$SWARM_REF" --output-dir ./verified
+
+        echo "Downloaded files:"
+        ls -la verified/
+
+        echo "Verification complete"
+      else
+        echo "No SWARM_REF found, skipping verification"
+      fi
+  artifacts:
+    paths:
+      - verified/
+    expire_in: 1 day
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_PIPELINE_SOURCE == "web"
+  allow_failure: true

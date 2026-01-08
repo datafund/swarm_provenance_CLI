@@ -1,0 +1,25 @@
+{
+  "id": "mu-20250108120000-001",
+  "version": "1.0",
+  "domain": "market-forecast",
+  "timestamp": "2025-01-08T12:00:00Z",
+  "payload": {
+    "event": "price_prediction",
+    "asset": "ETH/USD",
+    "prediction": {
+      "value": 2500.00,
+      "currency": "USD"
+    },
+    "confidence": 0.85,
+    "timeframe": "24h",
+    "methodology": "ensemble-ml-v2",
+    "model_version": "3.2.1"
+  },
+  "metadata": {
+    "created_by": "forecast-system",
+    "schema": "market-forecast-v1",
+    "source": "swarm-provenance-cli-examples"
+  },
+  "related_units": [],
+  "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

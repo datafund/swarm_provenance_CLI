@@ -1,0 +1,158 @@
+# GitHub Actions Workflow: Archive Build Artifacts to Swarm
+#
+# This workflow archives release artifacts to the Swarm network
+# and creates a provenance manifest.
+#
+# Usage:
+# 1. Copy this file to .github/workflows/swarm-archive.yml
+# 2. Customize the build steps for your project
+# 3. Configure any required secrets
+
+name: Archive to Swarm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      artifact_path:
+        description: 'Path to artifact(s) to archive'
+        required: false
+        default: './dist/*'
+
+env:
+  PROVENANCE_BACKEND: gateway
+  # PROVENANCE_GATEWAY_URL: https://provenance-gateway.datafund.io
+
+jobs:
+  archive:
+    name: Archive Artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Swarm CLI
+        run: |
+          pip install swarm-provenance-uploader
+          swarm-prov-upload --version
+
+      - name: Health Check
+        run: swarm-prov-upload health
+
+      # Customize this step for your build process
+      - name: Build Project
+        run: |
+          mkdir -p dist
+          # Replace with your actual build commands
+          echo "Build complete at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > dist/build-info.txt
+          echo "Commit: ${{ github.sha }}" >> dist/build-info.txt
+          echo "Ref: ${{ github.ref }}" >> dist/build-info.txt
+
+          # Example: create a sample artifact
+          tar -czvf dist/app-${{ github.ref_name || 'dev' }}.tar.gz \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='dist' \
+            .
+
+      - name: Archive to Swarm
+        id: archive
+        run: |
+          # Upload the main artifact
+          ARTIFACT_PATH="${{ github.event.inputs.artifact_path || './dist/*.tar.gz' }}"
+
+          for file in $ARTIFACT_PATH; do
+            if [ -f "$file" ]; then
+              echo "Uploading: $file"
+
+              OUTPUT=$(swarm-prov-upload upload \
+                --file "$file" \
+                --std "RELEASE-V1" \
+                --size medium \
+                2>&1)
+
+              echo "$OUTPUT"
+
+              # Extract Swarm reference
+              SWARM_REF=$(echo "$OUTPUT" | grep -oE '[a-f0-9]{64}' | tail -1)
+              echo "Swarm reference: $SWARM_REF"
+
+              # Save for later steps
+              echo "swarm_ref=$SWARM_REF" >> $GITHUB_OUTPUT
+              echo "artifact_name=$(basename $file)" >> $GITHUB_OUTPUT
+            fi
+          done
+
+      - name: Create Release Manifest
+        run: |
+          mkdir -p artifacts
+
+          cat > artifacts/release-manifest.json << EOF
+          {
+            "version": "1.0",
+            "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "ci_environment": {
+              "platform": "github-actions",
+              "repository": "${{ github.repository }}",
+              "run_id": "${{ github.run_id }}",
+              "run_number": "${{ github.run_number }}",
+              "commit_sha": "${{ github.sha }}",
+              "ref": "${{ github.ref }}",
+              "ref_name": "${{ github.ref_name }}",
+              "actor": "${{ github.actor }}"
+            },
+            "provenance_standard": "RELEASE-V1",
+            "artifacts": [
+              {
+                "filename": "${{ steps.archive.outputs.artifact_name }}",
+                "swarm_ref": "${{ steps.archive.outputs.swarm_ref }}"
+              }
+            ],
+            "verification": {
+              "download_command": "swarm-prov-upload download ${{ steps.archive.outputs.swarm_ref }} --output-dir ./downloaded"
+            }
+          }
+          EOF
+
+          cat artifacts/release-manifest.json
+
+      - name: Upload Manifest as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: swarm-manifest
+          path: artifacts/release-manifest.json
+
+      - name: Add to Release Notes
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          append_body: true
+          body: |
+            ---
+            **Swarm Archive**
+            - Reference: `${{ steps.archive.outputs.swarm_ref }}`
+            - Download: `swarm-prov-upload download ${{ steps.archive.outputs.swarm_ref }}`
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "## Swarm Archive Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Artifact | ${{ steps.archive.outputs.artifact_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Swarm Ref | \`${{ steps.archive.outputs.swarm_ref }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Standard | RELEASE-V1 |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Download Command" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "swarm-prov-upload download ${{ steps.archive.outputs.swarm_ref }} --output-dir ./downloaded" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

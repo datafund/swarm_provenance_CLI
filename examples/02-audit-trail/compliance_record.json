@@ -1,0 +1,81 @@
+{
+  "schema_version": "1.0",
+  "document_type": "COMPLIANCE_ASSESSMENT",
+  "compliance_framework": "SOC2",
+  "assessment_id": "soc2-2025-q1-001",
+  "organization": {
+    "name": "Example Corporation",
+    "identifier": "ORG-12345"
+  },
+  "assessment_period": {
+    "start_date": "2024-10-01",
+    "end_date": "2024-12-31"
+  },
+  "assessment_date": "2025-01-08",
+  "assessor": {
+    "name": "Internal Compliance Team",
+    "certification": "CISA"
+  },
+  "controls": [
+    {
+      "control_id": "CC6.1",
+      "category": "Logical and Physical Access Controls",
+      "description": "The entity implements logical access security software",
+      "status": "IMPLEMENTED",
+      "effectiveness": "OPERATING_EFFECTIVELY",
+      "evidence": [
+        "doc-access-policy-v2.1",
+        "doc-access-review-2024q4"
+      ],
+      "findings": [],
+      "last_tested": "2024-12-15"
+    },
+    {
+      "control_id": "CC6.2",
+      "category": "Logical and Physical Access Controls",
+      "description": "Prior to granting access, the entity verifies identity",
+      "status": "IMPLEMENTED",
+      "effectiveness": "OPERATING_EFFECTIVELY",
+      "evidence": [
+        "doc-identity-verification-process",
+        "doc-new-hire-checklist"
+      ],
+      "findings": [],
+      "last_tested": "2024-12-18"
+    },
+    {
+      "control_id": "CC7.1",
+      "category": "System Operations",
+      "description": "Entity detects security incidents",
+      "status": "IMPLEMENTED",
+      "effectiveness": "NEEDS_IMPROVEMENT",
+      "evidence": [
+        "doc-incident-response-plan",
+        "doc-siem-configuration"
+      ],
+      "findings": [
+        {
+          "finding_id": "FIND-2025-001",
+          "severity": "LOW",
+          "description": "Alert thresholds need tuning to reduce false positives",
+          "remediation_plan": "Scheduled for 2025-Q2",
+          "due_date": "2025-06-30"
+        }
+      ],
+      "last_tested": "2024-12-20"
+    }
+  ],
+  "overall_assessment": {
+    "status": "COMPLIANT_WITH_EXCEPTIONS",
+    "exceptions_count": 1,
+    "critical_findings": 0,
+    "high_findings": 0,
+    "medium_findings": 0,
+    "low_findings": 1
+  },
+  "certification": {
+    "issued": true,
+    "valid_from": "2025-01-15",
+    "valid_until": "2026-01-14"
+  }
+}

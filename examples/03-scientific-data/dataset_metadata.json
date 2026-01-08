@@ -1,0 +1,83 @@
+{
+  "schema_version": "datacite-4.4",
+  "identifier": {
+    "type": "DOI",
+    "value": "10.5281/example.20250108"
+  },
+  "title": "Urban Climate Monitoring Dataset - Ljubljana Q1 2025",
+  "creators": [
+    {
+      "name": "Smith, Jane",
+      "affiliation": "University of Ljubljana",
+      "orcid": "0000-0001-2345-6789"
+    },
+    {
+      "name": "Novak, Peter",
+      "affiliation": "Jozef Stefan Institute",
+      "orcid": "0000-0002-3456-7890"
+    }
+  ],
+  "publication_year": 2025,
+  "resource_type": "Dataset",
+  "description": "Hourly temperature, humidity, and air quality measurements from 5 monitoring stations across Ljubljana metropolitan area. Data collected using calibrated IoT sensors with 99.2% uptime during the collection period.",
+  "subjects": [
+    {"term": "climate monitoring", "scheme": "LCSH"},
+    {"term": "urban heat island", "scheme": "LCSH"},
+    {"term": "air quality", "scheme": "LCSH"},
+    {"term": "IoT sensors", "scheme": "free"}
+  ],
+  "dates": [
+    {"date": "2025-01-01/2025-03-31", "type": "Collected"},
+    {"date": "2025-04-15", "type": "Submitted"},
+    {"date": "2025-04-20", "type": "Accepted"}
+  ],
+  "language": "en",
+  "version": "1.0.0",
+  "rights": {
+    "identifier": "CC-BY-4.0",
+    "name": "Creative Commons Attribution 4.0 International",
+    "uri": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "funding": [
+    {
+      "funder": "Slovenian Research Agency",
+      "award_number": "P2-0001",
+      "award_title": "Urban Environmental Monitoring Initiative"
+    }
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "10.5281/example.methodology",
+      "type": "DOI",
+      "relation": "IsDescribedBy"
+    }
+  ],
+  "geo_locations": [
+    {
+      "place": "Ljubljana, Slovenia",
+      "point": {"latitude": 46.0569, "longitude": 14.5058}
+    }
+  ],
+  "provenance": {
+    "standard": "PROV-O",
+    "generated_at": "2025-01-08T12:00:00Z",
+    "generator": "swarm-provenance-cli",
+    "collection_method": "Automated IoT sensor network",
+    "quality_control": "Automated outlier detection + manual review",
+    "processing_steps": [
+      "Raw data collection from 5 stations",
+      "Timestamp normalization to UTC",
+      "Outlier detection and flagging",
+      "Gap filling using linear interpolation",
+      "Quality score assignment"
+    ]
+  },
+  "technical_info": {
+    "format": "CSV",
+    "size_bytes": 2456789,
+    "records": 10800,
+    "columns": ["timestamp", "station_id", "temperature_c", "humidity_pct", "pm25", "pm10", "quality_score"],
+    "temporal_resolution": "hourly",
+    "spatial_resolution": "point measurements"
+  }
+}

@@ -1,0 +1,10 @@
+2025-01-08 01:00:00 [INFO] Hourly metrics collection started
+2025-01-08 01:00:01 [INFO] CPU usage: 23%
+2025-01-08 01:00:01 [INFO] Memory usage: 45%
+2025-01-08 01:00:02 [INFO] Disk usage: 67%
+2025-01-08 01:00:02 [INFO] Active connections: 142
+2025-01-08 01:15:33 [WARN] High latency detected on endpoint /api/search
+2025-01-08 01:15:34 [INFO] Latency normalized after retry
+2025-01-08 01:30:00 [INFO] Scheduled task: sync_external_data
+2025-01-08 01:30:15 [INFO] External sync completed: 1523 records
+2025-01-08 01:45:00 [INFO] Request received: GET /api/reports

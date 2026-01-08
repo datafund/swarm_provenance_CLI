@@ -1,0 +1,25 @@
+Swarm Provenance CLI - Sample Data File
+========================================
+
+This is a sample file demonstrating the Swarm Provenance Uploader.
+
+When uploaded to Swarm, this file will be:
+1. Read and hashed (SHA256)
+2. Base64 encoded
+3. Wrapped in provenance metadata
+4. Stored on the decentralized Swarm network
+
+The resulting Swarm reference hash uniquely identifies this content
+and can be used to retrieve and verify the data at any time.
+
+Key features demonstrated:
+- Content integrity via SHA256 hashing
+- Metadata preservation
+- Decentralized storage
+- Cryptographic verification
+
+For more information, see:
+- https://github.com/datafund/swarm_provenance_CLI
+- https://docs.ethswarm.org/
+
+End of sample file.
