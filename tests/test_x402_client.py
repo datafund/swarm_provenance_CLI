@@ -421,3 +421,220 @@ class TestX402ClientFormatting:
         assert client.format_amount_usd("50000") == "$0.05"
         assert client.format_amount_usd("1000000") == "$1.00"
         assert client.format_amount_usd("10000000") == "$10.00"
+
+    def test_format_amount_usd_zero(self, mock_eth_deps):
+        """Tests formatting zero amount."""
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client()
+        assert client.format_amount_usd("0") == "$0.00"
+
+    def test_format_amount_usd_small(self, mock_eth_deps):
+        """Tests formatting very small amounts."""
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client()
+        # 1 smallest unit = $0.000001, rounds to $0.00
+        assert client.format_amount_usd("1") == "$0.00"
+        # 100 smallest units = $0.0001, rounds to $0.00
+        assert client.format_amount_usd("100") == "$0.00"
+
+
+class TestX402ClientCustomRPC:
+    """Tests for custom RPC URL configuration."""
+
+    def test_custom_rpc_url(self, mock_eth_deps):
+        """Tests that custom RPC URL is used."""
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        custom_rpc = "https://custom.rpc.example.com"
+        client = X402Client(rpc_url=custom_rpc)
+
+        assert client._rpc_url == custom_rpc
+
+    def test_default_rpc_for_base_sepolia(self, mock_eth_deps):
+        """Tests default RPC for base-sepolia network."""
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(network="base-sepolia")
+        assert client._rpc_url == "https://sepolia.base.org"
+
+    def test_default_rpc_for_base_mainnet(self, mock_eth_deps):
+        """Tests default RPC for base mainnet."""
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(network="base")
+        assert client._rpc_url == "https://mainnet.base.org"
+
+
+class TestX402ClientNonce:
+    """Tests for nonce generation."""
+
+    def test_nonce_generation(self, mock_eth_deps):
+        """Tests that nonces are generated correctly."""
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client()
+        nonce = client._generate_nonce()
+
+        # Should be hex string starting with 0x
+        assert nonce.startswith("0x")
+        # Should be 32 bytes = 64 hex chars + 2 for '0x'
+        assert len(nonce) == 66
+
+    def test_nonces_are_unique(self, mock_eth_deps):
+        """Tests that each nonce is unique."""
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client()
+        nonces = [client._generate_nonce() for _ in range(10)]
+
+        # All nonces should be unique
+        assert len(set(nonces)) == 10
+
+
+class TestX402ClientPrivateKeyFormat:
+    """Tests for private key format handling."""
+
+    def test_private_key_without_0x_prefix(self):
+        """Tests that private key without 0x prefix is handled."""
+        key_without_prefix = "a" * 64  # No 0x prefix
+
+        with patch.dict(os.environ, {"SWARM_X402_PRIVATE_KEY": key_without_prefix}):
+            mock_account = MagicMock()
+            mock_account.address = DUMMY_ADDRESS
+
+            mock_account_class = MagicMock()
+            mock_account_class.from_key.return_value = mock_account
+
+            mock_web3_instance = MagicMock()
+            mock_web3_class = MagicMock(return_value=mock_web3_instance)
+            mock_web3_class.HTTPProvider = MagicMock()
+
+            with patch.dict(
+                "sys.modules",
+                {
+                    "eth_account": MagicMock(Account=mock_account_class),
+                    "eth_account.messages": MagicMock(),
+                    "web3": MagicMock(Web3=mock_web3_class),
+                },
+            ):
+                import swarm_provenance_uploader.core.x402_client as x402_module
+                x402_module._eth_account = None
+                x402_module._web3 = None
+
+                from swarm_provenance_uploader.core.x402_client import X402Client
+
+                client = X402Client()
+                # Should have added 0x prefix internally
+                assert client._private_key == "0x" + key_without_prefix
+
+
+class TestX402ClientErrorHandling:
+    """Tests for error handling edge cases."""
+
+    def test_rpc_connection_failure(self):
+        """Tests handling of RPC connection failures during balance check."""
+        with patch.dict(os.environ, {"SWARM_X402_PRIVATE_KEY": DUMMY_PRIVATE_KEY}):
+            mock_account = MagicMock()
+            mock_account.address = DUMMY_ADDRESS
+
+            mock_account_class = MagicMock()
+            mock_account_class.from_key.return_value = mock_account
+
+            # Mock web3 to raise exception on balance check
+            mock_web3_instance = MagicMock()
+            mock_contract = MagicMock()
+            mock_contract.functions.balanceOf.return_value.call.side_effect = Exception(
+                "Connection refused"
+            )
+            mock_web3_instance.eth.contract.return_value = mock_contract
+            mock_web3_instance.to_checksum_address = lambda x: x
+
+            mock_web3_class = MagicMock(return_value=mock_web3_instance)
+            mock_web3_class.HTTPProvider = MagicMock()
+
+            with patch.dict(
+                "sys.modules",
+                {
+                    "eth_account": MagicMock(Account=mock_account_class),
+                    "eth_account.messages": MagicMock(),
+                    "web3": MagicMock(Web3=mock_web3_class),
+                },
+            ):
+                import swarm_provenance_uploader.core.x402_client as x402_module
+                x402_module._eth_account = None
+                x402_module._web3 = None
+
+                from swarm_provenance_uploader.core.x402_client import X402Client
+
+                client = X402Client()
+
+                with pytest.raises(X402ConfigurationError) as exc_info:
+                    client.get_usdc_balance()
+
+                assert "Failed to check USDC balance" in str(exc_info.value)
+
+    def test_create_payment_header_without_balance_check(self, mock_eth_deps):
+        """Tests creating payment header with balance check disabled."""
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client()
+        # Should not raise even if balance would be insufficient
+        header = client.create_payment_header(
+            SAMPLE_402_RESPONSE,
+            check_balance=False,  # Skip balance check
+        )
+
+        assert header is not None
+
+
+class TestX402ClientMultiplePaymentOptions:
+    """Tests for handling multiple payment options."""
+
+    def test_multiple_networks_same_scheme(self, mock_eth_deps):
+        """Tests selecting from multiple networks with same scheme."""
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(network="base")
+        requirements = X402PaymentRequirements(
+            accepts=[
+                X402PaymentOption(
+                    scheme="exact",
+                    network="base-sepolia",
+                    maxAmountRequired="50000",
+                    resource="/test",
+                    payTo=DUMMY_PAY_TO,
+                ),
+                X402PaymentOption(
+                    scheme="exact",
+                    network="base",
+                    maxAmountRequired="100000",
+                    resource="/test",
+                    payTo=DUMMY_PAY_TO,
+                ),
+                X402PaymentOption(
+                    scheme="exact",
+                    network="ethereum",
+                    maxAmountRequired="200000",
+                    resource="/test",
+                    payTo=DUMMY_PAY_TO,
+                ),
+            ]
+        )
+
+        option = client.select_payment_option(requirements)
+
+        # Should select the base mainnet option
+        assert option.network == "base"
+        assert option.maxAmountRequired == "100000"
+
+    def test_empty_accepts_array(self, mock_eth_deps):
+        """Tests handling empty accepts array."""
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client()
+        requirements = X402PaymentRequirements(accepts=[])
+
+        with pytest.raises(X402NetworkError):
+            client.select_payment_option(requirements)

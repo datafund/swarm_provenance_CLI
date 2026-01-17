@@ -12,6 +12,56 @@ x402 is a payment protocol that uses HTTP 402 "Payment Required" responses to en
 - EIP-712 signed messages (no gas required for signing)
 - Testnet support for development
 
+### How It Works
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                          x402 Payment Flow                                    │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+   Your CLI                         Gateway                      Blockchain
+      │                                │                              │
+      │  1. Request (stamp purchase)   │                              │
+      │──────────────────────────────>│                              │
+      │                                │                              │
+      │  2. HTTP 402 Payment Required  │                              │
+      │<──────────────────────────────│                              │
+      │     { accepts: [{              │                              │
+      │         network: "base-sepolia"│                              │
+      │         amount: "50000"        │                              │
+      │         payTo: "0x..."         │                              │
+      │       }]                       │                              │
+      │     }                          │                              │
+      │                                │                              │
+      │  3. Sign EIP-712 message       │                              │
+      │  (offline, no gas needed)      │                              │
+      │                                │                              │
+      │  4. Retry with X-PAYMENT       │                              │
+      │──────────────────────────────>│                              │
+      │     { signature: "0x...",      │                              │
+      │       from: "0x...",           │                              │
+      │       to: "0x...",             │                              │
+      │       amount: "50000" }        │                              │
+      │                                │                              │
+      │                                │  5. Verify & execute         │
+      │                                │  TransferWithAuthorization   │
+      │                                │─────────────────────────────>│
+      │                                │                              │
+      │                                │  6. USDC transferred         │
+      │                                │<─────────────────────────────│
+      │                                │                              │
+      │  7. HTTP 201 Created           │                              │
+      │<──────────────────────────────│                              │
+      │     { batchID: "abc123..." }   │                              │
+      │                                │                              │
+```
+
+**Key points:**
+- Step 3 is done locally - no gas is required for signing
+- USDC uses 6 decimals, so "50000" = $0.05
+- The signature authorizes a one-time USDC transfer
+- If you decline payment, the request fails with PaymentRequiredError
+
 ## Prerequisites
 
 - Python 3.8+
