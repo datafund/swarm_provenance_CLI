@@ -366,3 +366,168 @@ class TestGatewayClientErrorHandling:
         client.list_stamps()
 
         assert adapter.last_request.headers.get("Authorization") == "Bearer secret-key"
+
+
+# =============================================================================
+# x402 PAYMENT HANDLING TESTS
+# =============================================================================
+
+class TestGatewayClientX402:
+    """Tests for x402 payment handling."""
+
+    # Sample 402 response
+    SAMPLE_402_RESPONSE = {
+        "x402Version": 1,
+        "accepts": [
+            {
+                "scheme": "exact",
+                "network": "base-sepolia",
+                "maxAmountRequired": "50000",
+                "resource": "/api/v1/stamps/",
+                "description": "Stamp purchase",
+                "payTo": "0x1234567890AbcdEF1234567890aBcDeF12345678",
+                "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+            }
+        ],
+    }
+
+    def test_402_without_x402_enabled_raises_error(self, requests_mock):
+        """Tests that 402 response raises PaymentRequiredError when x402 disabled."""
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/stamps/",
+            status_code=402,
+            json=self.SAMPLE_402_RESPONSE,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io", x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError) as exc_info:
+            client.purchase_stamp(duration_hours=24)
+
+        assert "x402" in str(exc_info.value).lower() or "payment required" in str(exc_info.value).lower()
+
+    def test_402_error_includes_payment_options(self, requests_mock):
+        """Tests that PaymentRequiredError includes payment options."""
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/stamps/",
+            status_code=402,
+            json=self.SAMPLE_402_RESPONSE,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io", x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError) as exc_info:
+            client.purchase_stamp()
+
+        # Should have payment options in the exception
+        assert exc_info.value.payment_options is not None
+
+    def test_x402_init_parameters(self):
+        """Tests x402 initialization parameters are stored."""
+        client = GatewayClient(
+            base_url="https://test.gateway.io",
+            x402_enabled=True,
+            x402_network="base",
+            x402_auto_pay=True,
+            x402_max_auto_pay_usd=5.00,
+        )
+
+        assert client.x402_enabled is True
+        assert client._x402_network == "base"
+        assert client._x402_auto_pay is True
+        assert client._x402_max_auto_pay_usd == 5.00
+
+    def test_should_auto_pay_within_limit(self):
+        """Tests auto-pay check when within limit."""
+        client = GatewayClient(
+            base_url="https://test.gateway.io",
+            x402_enabled=True,
+            x402_auto_pay=True,
+            x402_max_auto_pay_usd=1.00,
+        )
+
+        assert client._should_auto_pay(0.50) is True
+        assert client._should_auto_pay(1.00) is True
+        assert client._should_auto_pay(1.01) is False
+
+    def test_should_auto_pay_disabled(self):
+        """Tests auto-pay check when disabled."""
+        client = GatewayClient(
+            base_url="https://test.gateway.io",
+            x402_enabled=True,
+            x402_auto_pay=False,
+            x402_max_auto_pay_usd=10.00,
+        )
+
+        assert client._should_auto_pay(0.50) is False
+
+    def test_upload_data_402_without_x402(self, requests_mock):
+        """Tests that upload_data handles 402 when x402 disabled."""
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/data/",
+            status_code=402,
+            json=self.SAMPLE_402_RESPONSE,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io", x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError):
+            client.upload_data(data=b"test", stamp_id=DUMMY_STAMP)
+
+    def test_payment_callback_called(self, requests_mock):
+        """Tests that payment callback is called for confirmation."""
+        from unittest.mock import MagicMock, patch
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        # First request returns 402
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/stamps/",
+            [
+                {"status_code": 402, "json": self.SAMPLE_402_RESPONSE},
+                {"status_code": 201, "json": {"batchID": DUMMY_STAMP}},
+            ],
+        )
+
+        callback = MagicMock(return_value=False)  # User declines
+
+        client = GatewayClient(
+            base_url="https://test.gateway.io",
+            x402_enabled=True,
+            x402_private_key="0x" + "a" * 64,
+            x402_auto_pay=False,
+            x402_payment_callback=callback,
+        )
+
+        # Mock the x402 client
+        with patch.object(client, '_get_x402_client') as mock_get_client:
+            mock_x402 = MagicMock()
+            mock_x402.parse_402_response.return_value = MagicMock(accepts=[MagicMock(
+                scheme="exact",
+                network="base-sepolia",
+                maxAmountRequired="50000",
+                resource="/api/v1/stamps/",
+                description="Stamp purchase",
+                model_dump=lambda: {},
+            )])
+            mock_x402.select_payment_option.return_value = MagicMock(
+                maxAmountRequired="50000",
+                network="base-sepolia",
+                description="Stamp purchase",
+                resource="/api/v1/stamps/",
+                model_dump=lambda: {},
+            )
+            mock_x402.format_amount_usd.return_value = "$0.05"
+            mock_get_client.return_value = mock_x402
+
+            with pytest.raises(PaymentRequiredError) as exc_info:
+                client.purchase_stamp()
+
+            # Callback should have been called
+            callback.assert_called_once()
+            assert "declined" in str(exc_info.value).lower()
