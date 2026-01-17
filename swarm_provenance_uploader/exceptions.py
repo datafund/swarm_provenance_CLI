@@ -52,3 +52,49 @@ class ValidationError(ProvenanceError):
 class AuthenticationError(ProvenanceError):
     """Authentication failed (for future API key support)."""
     pass
+
+
+# --- x402 Payment Exceptions ---
+
+class X402Error(ProvenanceError):
+    """Base exception for x402 payment errors."""
+    pass
+
+
+class PaymentRequiredError(X402Error):
+    """HTTP 402 received but x402 payments not configured or disabled."""
+
+    def __init__(self, message: str, payment_options: list = None):
+        super().__init__(message)
+        self.payment_options = payment_options or []
+
+
+class InsufficientBalanceError(X402Error):
+    """Wallet USDC balance too low for required payment."""
+
+    def __init__(self, message: str, required: str = None, available: str = None):
+        super().__init__(message)
+        self.required = required
+        self.available = available
+
+
+class PaymentRejectedError(X402Error):
+    """Payment signature or amount rejected by x402 facilitator."""
+
+    def __init__(self, message: str, reason: str = None):
+        super().__init__(message)
+        self.reason = reason
+
+
+class X402ConfigurationError(X402Error):
+    """x402 configuration is invalid or incomplete."""
+    pass
+
+
+class X402NetworkError(X402Error):
+    """Network mismatch or unsupported network."""
+
+    def __init__(self, message: str, expected: str = None, actual: str = None):
+        super().__init__(message)
+        self.expected = expected
+        self.actual = actual

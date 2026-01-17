@@ -92,3 +92,44 @@ class ChequebookResponse(BaseModel):
     chequebookAddress: str = Field(description="Chequebook contract address")
     availableBalance: str = Field(description="Available balance")
     totalBalance: str = Field(description="Total balance")
+
+
+# --- x402 Payment Models ---
+
+class X402PaymentOption(BaseModel):
+    """A single payment option from the 402 response accepts array."""
+    scheme: str = Field(description="Payment scheme (e.g., 'exact')")
+    network: str = Field(description="Network identifier (e.g., 'base-sepolia', 'base')")
+    maxAmountRequired: str = Field(description="Maximum payment amount in smallest units")
+    resource: str = Field(description="Resource being paid for")
+    description: Optional[str] = Field(default=None, description="Human-readable description")
+    mimeType: Optional[str] = Field(default=None, description="MIME type of resource")
+    payTo: str = Field(description="Address to pay to")
+    maxTimeoutSeconds: Optional[int] = Field(default=None, description="Max timeout for payment")
+    asset: Optional[str] = Field(default=None, description="Asset/token contract address")
+    extra: Optional[dict] = Field(default=None, description="Additional provider-specific data")
+
+
+class X402PaymentRequirements(BaseModel):
+    """Parsed from HTTP 402 response."""
+    accepts: List[X402PaymentOption] = Field(description="List of accepted payment options")
+    error: Optional[str] = Field(default=None, description="Error message if present")
+    x402Version: int = Field(default=1, description="x402 protocol version")
+
+
+class X402PaymentAuthorization(BaseModel):
+    """Authorization data for payment signature."""
+    from_address: str = Field(alias="from", description="Payer wallet address")
+    to: str = Field(description="Recipient address")
+    value: str = Field(description="Payment amount in smallest units")
+    validAfter: int = Field(default=0, description="Timestamp after which payment is valid")
+    validBefore: int = Field(description="Timestamp before which payment is valid")
+    nonce: str = Field(description="Unique nonce for this payment")
+
+
+class X402PaymentPayload(BaseModel):
+    """Payload for X-PAYMENT header."""
+    x402Version: int = Field(default=1, description="x402 protocol version")
+    scheme: str = Field(default="exact", description="Payment scheme")
+    network: str = Field(description="Network identifier")
+    payload: dict = Field(description="Contains signature and authorization data")
