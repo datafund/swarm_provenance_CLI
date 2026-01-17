@@ -12,14 +12,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **IMPORTANT**: Always create a feature branch before making changes. Never commit directly to `main`.
 
+### x402 Feature Development (Active)
+
+**DO NOT MERGE `feature/x402-support` TO `main` UNTIL EXPLICITLY AGREED WITH USER.**
+
+The x402 implementation uses a branching strategy:
+- `feature/x402-support` - Main x402 feature branch (DO NOT MERGE TO MAIN)
+- `feature/x402-core-module` - Issue #37: Core payment module
+- `feature/x402-gateway-integration` - Issue #38: GatewayClient integration
+- `feature/x402-cli-commands` - Issue #39: CLI commands and config
+- `feature/x402-testing-docs` - Issue #40: Testing and documentation
+
+All sub-branches merge into `feature/x402-support`, which only merges to `main` after explicit approval.
+
 ### Branch Naming
 - `fix/` - Bug fixes (e.g., `fix/stamp-usability-check`)
 - `feature/` - New features (e.g., `feature/add-stamp-purchase-command`)
 - `docs/` - Documentation only (e.g., `docs/update-readme`)
 
 ### Commit Messages
-- Never mention "Claude" or AI tools in commit messages
+
+**CRITICAL: NEVER mention "Claude", "AI", "Generated with", "Co-Authored-By: Claude", or any AI attribution in commits, PRs, or issues. This is a strict requirement - no exceptions.**
+
 - Keep commit messages focused on what changed and why
+- Use conventional commit style when appropriate
 
 ## Version Management
 
