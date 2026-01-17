@@ -531,3 +531,120 @@ class TestGatewayClientX402:
             # Callback should have been called
             callback.assert_called_once()
             assert "declined" in str(exc_info.value).lower()
+
+    def test_auto_pay_skips_callback(self, requests_mock):
+        """Tests that auto-pay bypasses callback when within limit."""
+        from unittest.mock import MagicMock, patch
+
+        # First request returns 402, second succeeds
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/stamps/",
+            [
+                {"status_code": 402, "json": self.SAMPLE_402_RESPONSE},
+                {"status_code": 201, "json": {"batchID": DUMMY_STAMP}},
+            ],
+        )
+
+        callback = MagicMock(return_value=True)
+
+        client = GatewayClient(
+            base_url="https://test.gateway.io",
+            x402_enabled=True,
+            x402_private_key="0x" + "a" * 64,
+            x402_auto_pay=True,
+            x402_max_auto_pay_usd=1.00,  # $1 limit, payment is $0.05
+            x402_payment_callback=callback,
+        )
+
+        # Mock the x402 client
+        with patch.object(client, '_get_x402_client') as mock_get_client:
+            mock_x402 = MagicMock()
+            mock_x402.parse_402_response.return_value = MagicMock(accepts=[MagicMock(
+                maxAmountRequired="50000",  # $0.05
+            )])
+            mock_x402.select_payment_option.return_value = MagicMock(
+                maxAmountRequired="50000",
+                network="base-sepolia",
+                description="Stamp purchase",
+            )
+            mock_x402.format_amount_usd.return_value = "$0.05"
+            # Return a valid string for the payment header
+            mock_x402.sign_payment.return_value = "ZHVtbXlfcGF5bWVudF9oZWFkZXI="  # base64 encoded
+            mock_get_client.return_value = mock_x402
+
+            # Should succeed without calling callback (auto-pay within limit)
+            result = client.purchase_stamp()
+
+            # Callback should NOT be called since auto-pay handles it
+            callback.assert_not_called()
+            assert result is not None
+
+    def test_auto_pay_exceeds_limit_calls_callback(self, requests_mock):
+        """Tests that auto-pay calls callback when payment exceeds limit."""
+        from unittest.mock import MagicMock, patch
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/stamps/",
+            [
+                {"status_code": 402, "json": self.SAMPLE_402_RESPONSE},
+            ],
+        )
+
+        callback = MagicMock(return_value=False)  # User declines
+
+        client = GatewayClient(
+            base_url="https://test.gateway.io",
+            x402_enabled=True,
+            x402_private_key="0x" + "a" * 64,
+            x402_auto_pay=True,
+            x402_max_auto_pay_usd=0.01,  # $0.01 limit, payment is $0.05
+            x402_payment_callback=callback,
+        )
+
+        with patch.object(client, '_get_x402_client') as mock_get_client:
+            mock_x402 = MagicMock()
+            mock_x402.parse_402_response.return_value = MagicMock(accepts=[MagicMock(
+                maxAmountRequired="50000",  # $0.05 exceeds $0.01 limit
+            )])
+            mock_x402.select_payment_option.return_value = MagicMock(
+                maxAmountRequired="50000",
+                network="base-sepolia",
+                description="Stamp purchase",
+            )
+            mock_x402.format_amount_usd.return_value = "$0.05"
+            mock_get_client.return_value = mock_x402
+
+            with pytest.raises(PaymentRequiredError):
+                client.purchase_stamp()
+
+            # Callback SHOULD be called since payment exceeds auto-pay limit
+            callback.assert_called_once()
+
+    def test_x402_disabled_by_default(self):
+        """Tests that x402 is disabled by default."""
+        client = GatewayClient(base_url="https://test.gateway.io")
+        assert client.x402_enabled is False
+
+    def test_x402_default_network_is_base_sepolia(self):
+        """Tests default x402 network is base-sepolia."""
+        client = GatewayClient(
+            base_url="https://test.gateway.io",
+            x402_enabled=True,
+        )
+        assert client._x402_network == "base-sepolia"
+
+    def test_402_non_json_response(self, requests_mock):
+        """Tests handling of 402 with non-JSON response body."""
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/stamps/",
+            status_code=402,
+            text="Payment Required",
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io", x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError):
+            client.purchase_stamp()

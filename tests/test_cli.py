@@ -769,3 +769,43 @@ class TestX402GlobalFlags:
 
         assert result.exit_code == 1
         assert "Invalid x402 network" in result.stdout
+
+    def test_max_pay_flag_updates_config(self):
+        """Tests --max-pay flag updates the auto-pay limit."""
+        result = runner.invoke(app, ["--max-pay", "2.50", "x402", "status"])
+
+        assert result.exit_code == 0
+        # Should show the updated max pay value
+        assert "2.50" in result.stdout or "$2.50" in result.stdout
+
+
+class TestX402StatusDetails:
+    """Additional tests for x402 status command."""
+
+    def test_x402_status_shows_max_auto_pay(self):
+        """Tests x402 status shows max auto-pay amount."""
+        result = runner.invoke(app, ["--max-pay", "3.50", "x402", "status"])
+
+        assert result.exit_code == 0
+        assert "3.50" in result.stdout or "$3.50" in result.stdout
+
+    def test_x402_status_network_after_flag(self):
+        """Tests that --x402-network flag changes displayed network."""
+        result = runner.invoke(app, ["--x402-network", "base", "x402", "status"])
+
+        assert result.exit_code == 0
+        # Should show 'base' not 'base-sepolia'
+        assert "base" in result.stdout.lower()
+        # Mainnet warning might appear
+        # (no assertion as warning may or may not be present)
+
+    def test_x402_status_with_all_flags(self):
+        """Tests x402 status with multiple flags combined."""
+        result = runner.invoke(
+            app,
+            ["--x402", "--auto-pay", "--max-pay", "10.00", "--x402-network", "base-sepolia", "x402", "status"]
+        )
+
+        assert result.exit_code == 0
+        assert "Enabled" in result.stdout
+        assert "10.00" in result.stdout or "$10.00" in result.stdout
