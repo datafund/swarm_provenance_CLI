@@ -16,6 +16,8 @@ from . import exceptions
 app = typer.Typer(help="Swarm Provenance CLI - Wraps and uploads data to Swarm.")
 stamps_app = typer.Typer(help="Manage postage stamps.")
 app.add_typer(stamps_app, name="stamps")
+x402_app = typer.Typer(help="x402 payment configuration and status.")
+app.add_typer(x402_app, name="x402")
 
 
 def _version_callback(value: bool):
@@ -46,6 +48,64 @@ _backend_config = {
     "gateway_url": config.GATEWAY_URL,
     "bee_url": config.BEE_GATEWAY_URL,
 }
+
+# Global state for x402 payment configuration
+_x402_config = {
+    "enabled": config.X402_ENABLED,
+    "auto_pay": config.X402_AUTO_PAY,
+    "max_auto_pay_usd": config.X402_MAX_AUTO_PAY_USD,
+    "network": config.X402_NETWORK,
+}
+
+
+def _x402_payment_callback(amount_usd: str, description: str) -> bool:
+    """
+    Callback for x402 payment confirmation prompts.
+
+    Args:
+        amount_usd: Formatted amount string (e.g., "$0.05")
+        description: Description of what the payment is for
+
+    Returns:
+        True if user confirms, False otherwise
+    """
+    typer.echo("")
+    typer.secho(f"Payment required: {amount_usd} USDC", fg=typer.colors.YELLOW, bold=True)
+    typer.echo(f"  For: {description}")
+    typer.echo(f"  Network: {_x402_config['network']}")
+
+    # Prompt for confirmation
+    confirm = typer.confirm("Pay now?", default=True)
+    if confirm:
+        typer.echo("Processing payment...")
+    return confirm
+
+
+def _get_gateway_client_with_x402(gateway_url: str, verbose: bool = False) -> GatewayClient:
+    """
+    Create a GatewayClient with x402 configuration if enabled.
+
+    Args:
+        gateway_url: Gateway URL
+        verbose: Verbose mode
+
+    Returns:
+        Configured GatewayClient
+    """
+    if _x402_config["enabled"]:
+        if verbose:
+            typer.echo(f"    x402 payments enabled ({_x402_config['network']})")
+
+        return GatewayClient(
+            base_url=gateway_url,
+            x402_enabled=True,
+            x402_network=_x402_config["network"],
+            x402_auto_pay=_x402_config["auto_pay"],
+            x402_max_auto_pay_usd=_x402_config["max_auto_pay_usd"],
+            x402_payment_callback=_x402_payment_callback,
+        )
+    else:
+        return GatewayClient(base_url=gateway_url)
 
 @app.command()
 def upload(
@@ -157,7 +217,7 @@ def upload(
                 typer.echo(f"    (Amount: {stamp_amount or config.DEFAULT_POSTAGE_AMOUNT}, Depth: {stamp_depth or config.DEFAULT_POSTAGE_DEPTH} from {backend_url})")
         try:
             if use_gateway:
-                gw_client = GatewayClient(base_url=gateway_url)
+                gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
                 stamp_id = gw_client.purchase_stamp(
                     duration_hours=duration,
                     size=size,
@@ -176,6 +236,12 @@ def upload(
             else:
                 typer.echo(f"Postage stamp purchased (ID: ...{stamp_id[-12:]})")
 
+        except exceptions.PaymentRequiredError as e:
+            typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
+            typer.echo("Use --x402 to enable x402 payments, or use a gateway without x402 mode.")
+            if hasattr(e, 'payment_options') and e.payment_options:
+                typer.echo(f"Payment options: {e.payment_options}")
+            raise typer.Exit(code=1)
         except exceptions.StampPurchaseError as e:
             typer.secho(f"ERROR: Failed purchasing stamp: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -197,7 +263,7 @@ def upload(
         try:
             # Get stamp info using appropriate backend
             if use_gateway:
-                gw_client = GatewayClient(base_url=gateway_url)
+                gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
                 stamp_details = gw_client.get_stamp(stamp_id, verbose=verbose)
                 if stamp_details:
                     stamp_info = {
@@ -262,10 +328,16 @@ def upload(
         typer.echo(f"    (Using stamp_id: {stamp_id.lower()} in header)")
     try:
         if use_gateway:
-            gw_client = GatewayClient(base_url=gateway_url)
+            gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
             swarm_ref_hash = gw_client.upload_data(final_payload_bytes, stamp_id, verbose=verbose)
         else:
             swarm_ref_hash = swarm_client.upload_data(local_bee_url, final_payload_bytes, stamp_id, verbose=verbose)
+    except exceptions.PaymentRequiredError as e:
+        typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
+        typer.echo("Use --x402 to enable x402 payments, or use a gateway without x402 mode.")
+        if hasattr(e, 'payment_options') and e.payment_options:
+            typer.echo(f"Payment options: {e.payment_options}")
+        raise typer.Exit(code=1)
     except Exception as e:
         typer.secho(f"ERROR: Failed uploading data: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -679,6 +751,141 @@ def health(
         raise typer.Exit(code=1)
 
 
+# --- x402 Subcommands ---
+
+@x402_app.command("status")
+def x402_status(
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
+):
+    """
+    Show x402 payment configuration status.
+    """
+    import os
+
+    typer.echo("\nx402 Payment Configuration:")
+    typer.echo("-" * 40)
+
+    # Enabled status
+    enabled = _x402_config["enabled"]
+    enabled_str = typer.style("Enabled", fg=typer.colors.GREEN) if enabled else typer.style("Disabled", fg=typer.colors.YELLOW)
+    typer.echo(f"  Status:       {enabled_str}")
+
+    # Network
+    network = _x402_config["network"]
+    network_color = typer.colors.CYAN if network == "base-sepolia" else typer.colors.MAGENTA
+    typer.echo(f"  Network:      {typer.style(network, fg=network_color)}")
+
+    # Auto-pay settings
+    auto_pay = _x402_config["auto_pay"]
+    max_pay = _x402_config["max_auto_pay_usd"]
+    auto_str = typer.style("Yes", fg=typer.colors.GREEN) if auto_pay else typer.style("No", fg=typer.colors.YELLOW)
+    typer.echo(f"  Auto-pay:     {auto_str}")
+    typer.echo(f"  Max auto-pay: ${max_pay:.2f}")
+
+    # Check for private key (don't show the actual key)
+    pk_env_name = config.X402_PRIVATE_KEY_ENV
+    has_pk = bool(os.getenv(pk_env_name) or os.getenv("X402_PRIVATE_KEY"))
+    pk_str = typer.style("Configured", fg=typer.colors.GREEN) if has_pk else typer.style("Not set", fg=typer.colors.RED)
+    typer.echo(f"  Private key:  {pk_str}")
+
+    if has_pk and verbose:
+        # Show wallet address (safe to display)
+        try:
+            from .core.x402_client import X402Client
+            client = X402Client(network=network)
+            typer.echo(f"  Wallet:       {client.wallet_address}")
+        except Exception as e:
+            typer.echo(f"  Wallet:       {typer.style(f'Error: {e}', fg=typer.colors.RED)}")
+
+    typer.echo("")
+
+    if not has_pk:
+        typer.echo("To enable x402 payments, set your private key:")
+        typer.echo(f"  export {pk_env_name}=0x...")
+        typer.echo("")
+
+
+@x402_app.command("balance")
+def x402_balance(
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
+):
+    """
+    Show USDC balance for the x402 wallet.
+    """
+    import os
+
+    # Check for private key
+    pk_env_name = config.X402_PRIVATE_KEY_ENV
+    has_pk = bool(os.getenv(pk_env_name) or os.getenv("X402_PRIVATE_KEY"))
+
+    if not has_pk:
+        typer.secho(f"ERROR: No private key configured.", fg=typer.colors.RED, err=True)
+        typer.echo(f"Set your private key: export {pk_env_name}=0x...")
+        raise typer.Exit(code=1)
+
+    network = _x402_config["network"]
+
+    try:
+        from .core.x402_client import X402Client
+        client = X402Client(network=network)
+
+        if verbose:
+            typer.echo(f"Checking balance on {network}...")
+
+        raw_balance, usdc_balance = client.get_usdc_balance()
+
+        typer.echo(f"\nx402 Wallet Balance:")
+        typer.echo("-" * 40)
+        typer.echo(f"  Network: {network}")
+        typer.echo(f"  Address: {client.wallet_address}")
+        typer.echo(f"  USDC:    {typer.style(f'${usdc_balance:.6f}', fg=typer.colors.GREEN, bold=True)}")
+
+        if network == "base-sepolia":
+            typer.echo("")
+            typer.echo("Get testnet USDC: https://faucet.circle.com/")
+
+    except Exception as e:
+        typer.secho(f"ERROR: Failed to get balance: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@x402_app.command("info")
+def x402_info():
+    """
+    Show x402 setup instructions and useful links.
+    """
+    typer.echo("\nx402 Payment Setup Guide")
+    typer.echo("=" * 50)
+
+    typer.echo("\n1. Get a wallet private key:")
+    typer.echo("   - Create new: Use MetaMask or any Ethereum wallet")
+    typer.echo("   - Export private key (starts with 0x)")
+
+    typer.echo("\n2. Set environment variable:")
+    typer.echo("   export SWARM_X402_PRIVATE_KEY=0x...")
+
+    typer.echo("\n3. Get testnet funds (for testing):")
+    typer.echo("   - ETH (gas): https://www.alchemy.com/faucets/base-sepolia")
+    typer.echo("   - USDC:      https://faucet.circle.com/")
+
+    typer.echo("\n4. Enable x402 when uploading:")
+    typer.echo("   swarm-prov-upload --x402 upload --file data.txt")
+
+    typer.echo("\n5. For auto-pay (up to $1 without prompting):")
+    typer.echo("   swarm-prov-upload --x402 --auto-pay upload --file data.txt")
+
+    typer.echo("\nConfiguration options (.env or environment):")
+    typer.echo("   X402_ENABLED=true          # Enable by default")
+    typer.echo("   X402_NETWORK=base-sepolia  # or 'base' for mainnet")
+    typer.echo("   X402_AUTO_PAY=false        # Auto-pay without prompts")
+    typer.echo("   X402_MAX_AUTO_PAY_USD=1.00 # Max auto-pay per request")
+
+    typer.echo("\nUseful commands:")
+    typer.echo("   swarm-prov-upload x402 status   # Check configuration")
+    typer.echo("   swarm-prov-upload x402 balance  # Check USDC balance")
+    typer.echo("")
+
+
 @app.callback()
 def main(
     ctx: typer.Context,
@@ -696,12 +903,31 @@ def main(
         "--gateway-url",
         help=f"Gateway URL (when backend=gateway). [default: {config.GATEWAY_URL}]"
     )] = None,
+    x402: Annotated[Optional[bool], typer.Option(
+        "--x402",
+        help="Enable x402 pay-per-request payments (USDC on Base chain)."
+    )] = None,
+    auto_pay: Annotated[Optional[bool], typer.Option(
+        "--auto-pay",
+        help="Auto-pay without prompting (up to --max-pay limit)."
+    )] = None,
+    max_pay: Annotated[Optional[float], typer.Option(
+        "--max-pay",
+        help="Maximum auto-pay amount in USD per request. [default: 1.00]"
+    )] = None,
+    x402_network: Annotated[Optional[str], typer.Option(
+        "--x402-network",
+        help="x402 network: 'base-sepolia' (testnet) or 'base' (mainnet). [default: base-sepolia]"
+    )] = None,
 ):
     """
     Swarm Provenance CLI Toolkit - Wraps and uploads data to Swarm.
 
     By default uses the provenance gateway (no local Bee node required).
     Use --backend local for direct Bee node communication.
+
+    For pay-per-request mode, use --x402 to enable x402 payments.
+    Requires SWARM_X402_PRIVATE_KEY environment variable.
     """
     if backend:
         if backend not in ("gateway", "local"):
@@ -711,6 +937,19 @@ def main(
 
     if gateway_url:
         _backend_config["gateway_url"] = gateway_url
+
+    # x402 configuration
+    if x402 is not None:
+        _x402_config["enabled"] = x402
+    if auto_pay is not None:
+        _x402_config["auto_pay"] = auto_pay
+    if max_pay is not None:
+        _x402_config["max_auto_pay_usd"] = max_pay
+    if x402_network:
+        if x402_network not in ("base-sepolia", "base"):
+            typer.secho(f"ERROR: Invalid x402 network '{x402_network}'. Use 'base-sepolia' or 'base'.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        _x402_config["network"] = x402_network
 
 if __name__ == "__main__":
      app()

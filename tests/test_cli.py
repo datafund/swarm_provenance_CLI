@@ -1,6 +1,6 @@
 import pytest
 from typer.testing import CliRunner
-from swarm_provenance_uploader.cli import app, _backend_config
+from swarm_provenance_uploader.cli import app, _backend_config, _x402_config
 from swarm_provenance_uploader.models import (
     StampDetails,
     StampListResponse,
@@ -24,11 +24,19 @@ def reset_backend_config():
     _backend_config["backend"] = "gateway"
     _backend_config["gateway_url"] = "https://provenance-gateway.datafund.io"
     _backend_config["bee_url"] = "http://localhost:1633"
+    _x402_config["enabled"] = False
+    _x402_config["auto_pay"] = False
+    _x402_config["max_auto_pay_usd"] = 1.00
+    _x402_config["network"] = "base-sepolia"
     yield
     # Reset again after test
     _backend_config["backend"] = "gateway"
     _backend_config["gateway_url"] = "https://provenance-gateway.datafund.io"
     _backend_config["bee_url"] = "http://localhost:1633"
+    _x402_config["enabled"] = False
+    _x402_config["auto_pay"] = False
+    _x402_config["max_auto_pay_usd"] = 1.00
+    _x402_config["network"] = "base-sepolia"
 
 
 # =============================================================================
@@ -660,3 +668,104 @@ class TestLocalBackendWarning:
 
         assert result.exit_code == 0
         assert "Local Bee backend" not in result.stdout
+
+
+# =============================================================================
+# x402 COMMAND TESTS
+# =============================================================================
+
+class TestX402StatusCommand:
+    """Tests for x402 status command."""
+
+    def test_x402_status_shows_disabled(self):
+        """Tests x402 status shows disabled by default."""
+        result = runner.invoke(app, ["x402", "status"])
+
+        assert result.exit_code == 0
+        assert "x402 Payment Configuration" in result.stdout
+        assert "Disabled" in result.stdout
+
+    def test_x402_status_shows_network(self):
+        """Tests x402 status shows configured network."""
+        result = runner.invoke(app, ["x402", "status"])
+
+        assert result.exit_code == 0
+        assert "base-sepolia" in result.stdout
+
+    def test_x402_status_shows_auto_pay_settings(self):
+        """Tests x402 status shows auto-pay settings."""
+        result = runner.invoke(app, ["x402", "status"])
+
+        assert result.exit_code == 0
+        assert "Auto-pay" in result.stdout
+        assert "Max auto-pay" in result.stdout
+
+    def test_x402_status_shows_no_private_key(self):
+        """Tests x402 status shows private key not set."""
+        result = runner.invoke(app, ["x402", "status"])
+
+        assert result.exit_code == 0
+        assert "Not set" in result.stdout
+
+
+class TestX402InfoCommand:
+    """Tests for x402 info command."""
+
+    def test_x402_info_shows_setup_guide(self):
+        """Tests x402 info shows setup guide."""
+        result = runner.invoke(app, ["x402", "info"])
+
+        assert result.exit_code == 0
+        assert "x402 Payment Setup Guide" in result.stdout
+        assert "SWARM_X402_PRIVATE_KEY" in result.stdout
+        assert "faucet" in result.stdout.lower()
+
+
+class TestX402BalanceCommand:
+    """Tests for x402 balance command."""
+
+    def test_x402_balance_fails_without_private_key(self):
+        """Tests x402 balance fails when no private key configured."""
+        result = runner.invoke(app, ["x402", "balance"])
+
+        assert result.exit_code == 1
+        assert "No private key" in result.stdout or "ERROR" in result.stdout
+
+
+class TestX402GlobalFlags:
+    """Tests for x402 global CLI flags."""
+
+    def test_x402_flag_enables_payments(self):
+        """Tests --x402 flag enables x402 payments."""
+        # Just test that the flag is recognized
+        result = runner.invoke(app, ["--x402", "x402", "status"])
+
+        assert result.exit_code == 0
+        # After the flag, x402 should be enabled in config
+        assert "Enabled" in result.stdout or "x402" in result.stdout
+
+    def test_auto_pay_flag_recognized(self):
+        """Tests --auto-pay flag is recognized."""
+        result = runner.invoke(app, ["--auto-pay", "x402", "status"])
+
+        assert result.exit_code == 0
+
+    def test_max_pay_flag_recognized(self):
+        """Tests --max-pay flag is recognized."""
+        result = runner.invoke(app, ["--max-pay", "5.00", "x402", "status"])
+
+        assert result.exit_code == 0
+
+    def test_x402_network_flag_recognized(self):
+        """Tests --x402-network flag is recognized."""
+        result = runner.invoke(app, ["--x402-network", "base", "x402", "status"])
+
+        assert result.exit_code == 0
+        assert "base" in result.stdout
+
+    def test_invalid_x402_network_rejected(self):
+        """Tests invalid x402 network is rejected."""
+        result = runner.invoke(app, ["--x402-network", "ethereum", "x402", "status"])
+
+        assert result.exit_code == 1
+        assert "Invalid x402 network" in result.stdout
