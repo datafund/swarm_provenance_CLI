@@ -43,4 +43,6 @@ markers = [
     "integration: marks tests as integration tests (hit real backends)",
     "local_bee: marks tests that require local Bee node",
     "gateway: marks tests that require gateway service",
+    "x402: marks tests that require x402 wallet configuration",
+    "slow: marks tests that are slow or use real funds",
 ]
