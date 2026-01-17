@@ -90,6 +90,75 @@ DEFAULT_POSTAGE_DURATION_HOURS=25    # Stamp validity in hours (gateway only, mi
 DEFAULT_POSTAGE_AMOUNT=1000000000    # Legacy: for local backend
 ```
 
+## x402 Payment Mode (Optional)
+
+x402 enables pay-per-request payments using USDC on Base chain. When the gateway requires payment (HTTP 402), the CLI automatically handles the payment flow.
+
+### Quick Start
+
+```bash
+# Install with x402 support
+pip install -e .[x402]
+
+# Configure wallet (testnet)
+export SWARM_X402_PRIVATE_KEY=0x...  # Your wallet private key
+export X402_ENABLED=true
+export X402_NETWORK=base-sepolia     # Testnet (default)
+
+# Check x402 status
+swarm-prov-upload x402 status
+
+# Check USDC balance
+swarm-prov-upload x402 balance
+
+# Upload with x402 enabled (prompts for payment confirmation)
+swarm-prov-upload --x402 upload --file data.txt
+
+# Upload with auto-pay (no prompts, up to $1.00)
+swarm-prov-upload --x402 --auto-pay --max-pay 1.00 upload --file data.txt
+```
+
+### x402 Commands
+
+```bash
+# Show configuration status
+swarm-prov-upload x402 status
+
+# Check wallet USDC balance
+swarm-prov-upload x402 balance
+
+# Show setup instructions
+swarm-prov-upload x402 info
+```
+
+### x402 Configuration
+
+| Environment Variable | Description | Default |
+|---------------------|-------------|---------|
+| `X402_ENABLED` | Enable x402 payments | `false` |
+| `SWARM_X402_PRIVATE_KEY` | Wallet private key (keep secret!) | - |
+| `X402_NETWORK` | `base-sepolia` (testnet) or `base` (mainnet) | `base-sepolia` |
+| `X402_AUTO_PAY` | Auto-pay without prompts | `false` |
+| `X402_MAX_AUTO_PAY_USD` | Maximum auto-pay amount per request | `1.00` |
+| `X402_RPC_URL` | Custom RPC URL (optional) | Uses default |
+
+### Global Flags
+
+| Flag | Description |
+|------|-------------|
+| `--x402` / `--no-x402` | Enable/disable x402 for this command |
+| `--auto-pay` / `--no-auto-pay` | Enable/disable auto-pay |
+| `--max-pay FLOAT` | Maximum auto-pay amount in USD |
+| `--x402-network TEXT` | Network: `base-sepolia` or `base` |
+
+### Testnet Setup
+
+1. **Get testnet ETH** (for gas): https://www.alchemy.com/faucets/base-sepolia
+2. **Get testnet USDC**: https://faucet.circle.com/
+3. **Configure wallet**: Set `SWARM_X402_PRIVATE_KEY` with your wallet's private key
+
+See [docs/x402-setup.md](docs/x402-setup.md) for detailed setup instructions.
+
 ## Run Tests
 
 ### Unit Tests (Mocked)
@@ -197,12 +266,13 @@ Use `swarm-prov-upload --help` for all options.
 │  │ --backend       │  │ upload           │  │ health                          │ │
 │  │   gateway|local │  │ download         │  │ wallet (gateway)                │ │
 │  │ --gateway-url   │  │                  │  │ chequebook (gateway)            │ │
-│  │                 │  ├──────────────────┤  │                                 │ │
-│  │ Built with:     │  │ STAMPS COMMANDS  │  │                                 │ │
-│  │ • Typer CLI     │  │ (gateway only)   │  │                                 │ │
-│  │ • Rich output   │  │ stamps list      │  │                                 │ │
-│  │ • Auto help     │  │ stamps info      │  │                                 │ │
-│  │                 │  │ stamps extend    │  │                                 │ │
+│  │ --x402          │  ├──────────────────┤  │                                 │ │
+│  │ --auto-pay      │  │ STAMPS COMMANDS  │  ├─────────────────────────────────┤ │
+│  │ --max-pay       │  │ (gateway only)   │  │ x402 COMMANDS (optional)        │ │
+│  │                 │  │ stamps list      │  │ x402 status                     │ │
+│  │ Built with:     │  │ stamps info      │  │ x402 balance                    │ │
+│  │ • Typer CLI     │  │ stamps extend    │  │ x402 info                       │ │
+│  │ • Rich output   │  │                  │  │                                 │ │
 │  └─────────────────┘  └──────────────────┘  └─────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                         │
@@ -215,11 +285,16 @@ Use `swarm-prov-upload --help` for all options.
 │  │ • File I/O        │  │                 │  │ gateway_client.py (default)  │  │
 │  │ • SHA256 hashing  │  │ • Pydantic      │  │ • Gateway API wrapper        │  │
 │  │ • Base64 encode   │  │   validation    │  │ • Full feature support       │  │
-│  │ • Base64 decode   │  │ • JSON          │  │ • No local node needed       │  │
+│  │ • Base64 decode   │  │ • JSON          │  │ • x402 payment integration   │  │
 │  │ • Size calculation│  │   serialization │  │                              │  │
 │  │ • Error handling  │  │ • Metadata      │  │ swarm_client.py (local)      │  │
 │  │                   │  │   wrapping      │  │ • Direct Bee API             │  │
-│  │                   │  │                 │  │ • Local/self-hosted          │  │
+│  ├───────────────────┤  │                 │  │ • Local/self-hosted          │  │
+│  │ X402_CLIENT.PY    │  │                 │  │                              │  │
+│  │ (optional)        │  │                 │  │                              │  │
+│  │ • EIP-712 signing │  │                 │  │                              │  │
+│  │ • USDC on Base    │  │                 │  │                              │  │
+│  │ • 402 handling    │  │                 │  │                              │  │
 │  └───────────────────┘  └─────────────────┘  └──────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                         │
@@ -237,10 +312,12 @@ Use `swarm-prov-upload --help` for all options.
 │  │ │ • provenance_standard: str? │ │  │ • DEFAULT_POSTAGE_AMOUNT           │  │
 │  │ │ • encryption: str?          │ │  │ • .env file support                │  │
 │  │ └─────────────────────────────┘ │  │                                     │  │
-│  │                                 │  │                                     │  │
-│  │ • JSON schema validation        │  │                                     │  │
-│  │ • Auto serialization            │  │                                     │  │
-│  │ • Type hints throughout         │  │                                     │  │
+│  │                                 │  │ x402 Configuration:                 │  │
+│  │ x402 Payment Models:            │  │ • X402_ENABLED                      │  │
+│  │ • X402PaymentOption             │  │ • SWARM_X402_PRIVATE_KEY            │  │
+│  │ • X402PaymentRequirements       │  │ • X402_NETWORK                      │  │
+│  │ • X402PaymentPayload            │  │ • X402_AUTO_PAY                     │  │
+│  │                                 │  │ • X402_MAX_AUTO_PAY_USD             │  │
 │  └─────────────────────────────────┘  └─────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                         │
@@ -264,6 +341,24 @@ Use `swarm-prov-upload --help` for all options.
 │                              │ • 64-char hex   │                               │
 │                              │ • Success msg   │                               │
 │                              └─────────────────┘                               │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                             x402 PAYMENT FLOW (Optional)                        │
+│                                                                                 │
+│  When gateway returns HTTP 402 Payment Required:                               │
+│                                                                                 │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐     │
+│  │ 1. RECEIVE  │───▶│ 2. PARSE    │───▶│ 3. CONFIRM  │───▶│ 4. SIGN &   │     │
+│  │    402      │    │    OPTIONS  │    │    PAYMENT  │    │    RETRY    │     │
+│  │             │    │             │    │             │    │             │     │
+│  │ • HTTP 402  │    │ • Extract   │    │ • Auto-pay  │    │ • EIP-712   │     │
+│  │ • JSON body │    │   accepts[] │    │   or prompt │    │ • X-PAYMENT │     │
+│  │ • x402 hdr  │    │ • Match net │    │ • Check bal │    │ • Retry req │     │
+│  └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘     │
+│                                                                                 │
+│  Networks: Base Sepolia (testnet) | Base (mainnet)                             │
+│  Payment: USDC stablecoin via x402 facilitator (https://x402.org)              │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────────┐
@@ -334,11 +429,17 @@ Use `swarm-prov-upload --help` for all options.
 │  • Automatic stamp validation     • Progress indicators                       │
 │  • Configurable parameters        • Error context & suggestions               │
 │                                                                                 │
-│  🔀 DUAL BACKEND SUPPORT           🚀 GATEWAY FEATURES (NEW)                   │
+│  🔀 DUAL BACKEND SUPPORT           🚀 GATEWAY FEATURES                         │
 │  • Gateway backend (default)      • stamps list - View all stamps             │
 │  • Local Bee backend option       • stamps extend - Add TTL                   │
 │  • Seamless switching             • wallet - View BZZ balance                 │
 │  • Same CLI for both              • chequebook - View chequebook              │
+│                                                                                 │
+│  💳 x402 PAYMENTS (Optional)                                                   │
+│  • USDC on Base chain             • EIP-712 message signing                   │
+│  • Auto-pay mode                  • Testnet (Base Sepolia) support            │
+│  • Payment confirmation           • Balance checking                          │
+│  • Lazy dependency loading        • Interactive or automated                  │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────────┐
@@ -349,6 +450,8 @@ Use `swarm-prov-upload --help` for all options.
 │  • Modular architecture           • Pydantic v2 - Data validation             │
 │  • Type hints throughout          • Requests - HTTP client                    │
 │  • Async-ready design             • Python-dotenv - Config management         │
+│                                   • eth-account - Ethereum signing (optional) │
+│                                   • web3 - Blockchain interaction (optional)  │
 │                                                                                 │
 │  🔧 DEVELOPMENT TOOLS              🧪 TESTING FRAMEWORK                        │
 │  • Virtual environment            • Pytest - Test runner                      │
@@ -382,6 +485,8 @@ swarm_provenance_uploader/
 ├── pyproject.toml
 ├── README.md
 ├── CLAUDE.md
+├── docs/
+│   └── x402-setup.md            # x402 payment setup guide
 ├── swarm_provenance_uploader/
 │   ├── __init__.py
 │   ├── cli.py
@@ -393,11 +498,13 @@ swarm_provenance_uploader/
 │       ├── file_utils.py
 │       ├── gateway_client.py    # Gateway API client (default)
 │       ├── metadata_builder.py
-│       └── swarm_client.py      # Local Bee API client
+│       ├── swarm_client.py      # Local Bee API client
+│       └── x402_client.py       # x402 payment client (optional)
 └── tests/
     ├── __init__.py
     ├── test_cli.py              # CLI unit tests (mocked)
     ├── test_gateway_client.py   # GatewayClient unit tests (mocked)
-    └── test_integration.py      # Integration tests (real backends)
+    ├── test_integration.py      # Integration tests (real backends)
+    └── test_x402_client.py      # x402 unit tests (mocked)
 ```
 

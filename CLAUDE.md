@@ -131,6 +131,17 @@ swarm-prov-upload stamps extend <stamp_id> --amount 1000000
 # Wallet info (gateway only)
 swarm-prov-upload wallet
 swarm-prov-upload chequebook
+
+# x402 payment commands (optional)
+swarm-prov-upload x402 status
+swarm-prov-upload x402 balance
+swarm-prov-upload x402 info
+
+# Upload with x402 enabled
+swarm-prov-upload --x402 upload --file /path/to/data.txt
+
+# Upload with auto-pay
+swarm-prov-upload --x402 --auto-pay --max-pay 1.00 upload --file /path/to/data.txt
 ```
 
 ## Architecture
@@ -138,10 +149,11 @@ swarm-prov-upload chequebook
 ### Core Workflow
 The application follows a modular architecture with clear separation of concerns:
 
-1. **CLI Layer** (`cli.py`): Typer-based command interface with commands for upload, download, stamps, wallet, health
+1. **CLI Layer** (`cli.py`): Typer-based command interface with commands for upload, download, stamps, wallet, health, x402
 2. **Core Modules** (`core/`): Business logic split across specialized modules
    - `gateway_client.py`: Client for provenance-gateway API (default)
    - `swarm_client.py`: Client for local Bee node API
+   - `x402_client.py`: Client for x402 payment handling (optional)
    - `file_utils.py`: File I/O and encoding utilities
    - `metadata_builder.py`: Metadata construction
 3. **Data Models** (`models.py`): Pydantic v2 schemas for metadata and API responses
@@ -154,11 +166,19 @@ The application follows a modular architecture with clear separation of concerns
 - Default backend, requires no local infrastructure
 - Supports all features: stamps, wallet, chequebook, data upload/download
 - Uses provenance-gateway.datafund.io API
+- Integrated x402 payment handling when enabled
 
 **SwarmClient** (`core/swarm_client.py`):
 - For local Bee node communication
 - Subset of features (no stamp list, no extend, no wallet)
 - Used with `--backend local`
+
+**X402Client** (`core/x402_client.py`):
+- Optional client for x402 payment handling
+- Lazy-loads eth-account and web3 dependencies
+- Handles HTTP 402 Payment Required responses
+- EIP-712 message signing for USDC payments on Base chain
+- Supports Base Sepolia (testnet) and Base (mainnet)
 
 ### Key Components
 
@@ -173,6 +193,11 @@ The application follows a modular architecture with clear separation of concerns
 - `StampDetails`, `StampListResponse`, `StampPurchaseResponse`
 - `DataUploadResponse`, `DataDownloadResponse`
 - `WalletResponse`, `ChequebookResponse`
+
+**x402 Payment Models**: Schemas for x402 payment handling:
+- `X402PaymentOption`: Individual payment option from 402 response
+- `X402PaymentRequirements`: Parsed 402 response body with accepts array
+- `X402PaymentPayload`: Signed payment payload for X-PAYMENT header
 
 **Upload Process**:
 1. File reading and SHA256 hashing (`file_utils.py`)
@@ -206,6 +231,13 @@ Uses python-dotenv for environment configuration:
 - `DEFAULT_POSTAGE_DURATION_HOURS`: Stamp validity in hours (gateway only, default: 25)
 - `DEFAULT_POSTAGE_AMOUNT`: Legacy PLUR amount for local backend (default: 1000000000)
 
+**x402 Payment Configuration**:
+- `X402_ENABLED`: Enable x402 payment support (default: false)
+- `SWARM_X402_PRIVATE_KEY`: Wallet private key for signing payments
+- `X402_NETWORK`: `base-sepolia` (testnet) or `base` (mainnet)
+- `X402_AUTO_PAY`: Enable auto-pay without prompts (default: false)
+- `X402_MAX_AUTO_PAY_USD`: Maximum auto-pay amount per request (default: 1.00)
+
 ## Testing Approach
 
 The test suite has two layers:
@@ -213,6 +245,7 @@ The test suite has two layers:
 ### Unit Tests (Mocked)
 - `test_cli.py`: CLI command tests with mocked backends
 - `test_gateway_client.py`: GatewayClient tests with mocked HTTP
+- `test_x402_client.py`: X402Client tests with mocked eth-account/web3
 - Network calls mocked via `requests-mock`
 - File I/O operations mocked with `pytest-mock`
 - Do not require live services
