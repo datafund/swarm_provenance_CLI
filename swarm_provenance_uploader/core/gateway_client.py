@@ -3,13 +3,16 @@ Client for provenance-gateway.datafund.io API.
 
 This client interfaces with the gateway API which provides a simpler
 interface to Swarm without requiring a local Bee node.
+
+Supports x402 pay-per-request payments when enabled.
 """
 
 import requests
 import os
+from typing import Callable, Optional, Tuple
 from urllib.parse import urljoin
-from typing import Optional
 
+from ..exceptions import PaymentRequiredError
 from ..models import (
     StampDetails,
     StampListResponse,
@@ -22,20 +25,61 @@ from ..models import (
 
 
 class GatewayClient:
-    """Client for provenance-gateway.datafund.io API."""
+    """Client for provenance-gateway.datafund.io API.
+
+    Supports optional x402 payment integration for pay-per-request mode.
+    When x402 is enabled, protected endpoints (stamp purchase, data upload)
+    will automatically handle 402 Payment Required responses.
+    """
 
     DEFAULT_URL = "https://provenance-gateway.datafund.io"
 
-    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None):
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        x402_enabled: bool = False,
+        x402_private_key: Optional[str] = None,
+        x402_network: str = "base-sepolia",
+        x402_auto_pay: bool = False,
+        x402_max_auto_pay_usd: float = 1.00,
+        x402_payment_callback: Optional[Callable[[str, str], bool]] = None,
+    ):
         """
         Initialize the gateway client.
 
         Args:
             base_url: Gateway URL. Defaults to provenance-gateway.datafund.io
             api_key: Optional API key for authentication (future use)
+            x402_enabled: Enable x402 payment support
+            x402_private_key: Private key for signing payments
+            x402_network: Network for payments ('base-sepolia' or 'base')
+            x402_auto_pay: Auto-pay without prompting (up to max amount)
+            x402_max_auto_pay_usd: Maximum auto-pay amount in USD
+            x402_payment_callback: Optional callback for payment confirmation.
+                                   Called with (amount_usd, description) -> bool
         """
         self.base_url = (base_url or os.getenv("PROVENANCE_GATEWAY_URL", self.DEFAULT_URL)).rstrip("/")
         self.api_key = api_key or os.getenv("PROVENANCE_GATEWAY_API_KEY")
+
+        # x402 configuration
+        self.x402_enabled = x402_enabled
+        self._x402_private_key = x402_private_key
+        self._x402_network = x402_network
+        self._x402_auto_pay = x402_auto_pay
+        self._x402_max_auto_pay_usd = x402_max_auto_pay_usd
+        self._x402_payment_callback = x402_payment_callback
+        self._x402_client = None  # Lazy initialization
+
+    def _get_x402_client(self):
+        """Get or create the x402 client (lazy initialization)."""
+        if self._x402_client is None and self.x402_enabled:
+            from .x402_client import X402Client
+            self._x402_client = X402Client(
+                private_key=self._x402_private_key,
+                network=self._x402_network,
+            )
+        return self._x402_client
 
     def _get_headers(self) -> dict:
         """Get default headers for requests."""
@@ -47,6 +91,133 @@ class GatewayClient:
     def _make_url(self, path: str) -> str:
         """Construct full URL from path."""
         return urljoin(self.base_url + "/", path.lstrip("/"))
+
+    def _should_auto_pay(self, amount_usd: float) -> bool:
+        """Check if amount is within auto-pay limit."""
+        return self._x402_auto_pay and amount_usd <= self._x402_max_auto_pay_usd
+
+    def _handle_402_response(
+        self,
+        response: requests.Response,
+        verbose: bool = False,
+    ) -> Tuple[str, str]:
+        """
+        Handle a 402 Payment Required response.
+
+        Args:
+            response: The 402 response from the server
+            verbose: Enable debug output
+
+        Returns:
+            Tuple of (payment_header, amount_usd_formatted)
+
+        Raises:
+            PaymentRequiredError: If x402 not enabled or payment not confirmed
+        """
+        if not self.x402_enabled:
+            # Parse 402 response for useful error message
+            try:
+                body = response.json()
+                accepts = body.get("accepts", [])
+                if accepts:
+                    amounts = [opt.get("maxAmountRequired", "?") for opt in accepts]
+                    raise PaymentRequiredError(
+                        f"Payment required (amounts: {amounts}). "
+                        "Enable x402 with --x402 flag or X402_ENABLED=true",
+                        payment_options=accepts,
+                    )
+            except (ValueError, KeyError):
+                pass
+            raise PaymentRequiredError(
+                "Payment required. Enable x402 with --x402 flag or X402_ENABLED=true"
+            )
+
+        x402_client = self._get_x402_client()
+
+        # Parse the 402 response
+        try:
+            body = response.json()
+        except ValueError as e:
+            raise PaymentRequiredError(f"Invalid 402 response: {e}")
+
+        if verbose:
+            print(f"DEBUG: Received 402 Payment Required")
+            print(f"DEBUG: Payment options: {body}")
+
+        # Parse and select payment option
+        requirements = x402_client.parse_402_response(body)
+        option = x402_client.select_payment_option(requirements)
+        amount_usd = x402_client.format_amount_usd(option.maxAmountRequired)
+        amount_float = int(option.maxAmountRequired) / 1_000_000
+
+        if verbose:
+            print(f"DEBUG: Selected payment option: {amount_usd} on {option.network}")
+
+        # Check if we should auto-pay or need confirmation
+        if not self._should_auto_pay(amount_float):
+            if self._x402_payment_callback:
+                description = option.description or f"API request to {option.resource}"
+                if not self._x402_payment_callback(amount_usd, description):
+                    raise PaymentRequiredError(
+                        f"Payment of {amount_usd} declined by user",
+                        payment_options=[option.model_dump()],
+                    )
+            elif not self._x402_auto_pay:
+                # No callback and not auto-pay mode - raise for CLI to handle
+                raise PaymentRequiredError(
+                    f"Payment required: {amount_usd}. Use --auto-pay or confirm payment.",
+                    payment_options=[option.model_dump()],
+                )
+
+        # Sign and create payment header
+        payment_header = x402_client.sign_payment(option)
+
+        if verbose:
+            print(f"DEBUG: Payment signed, header length: {len(payment_header)}")
+
+        return payment_header, amount_usd
+
+    def _make_paid_request(
+        self,
+        method: str,
+        url: str,
+        verbose: bool = False,
+        **kwargs,
+    ) -> requests.Response:
+        """
+        Make a request with automatic 402 payment handling.
+
+        Args:
+            method: HTTP method (GET, POST, etc.)
+            url: Request URL
+            verbose: Enable debug output
+            **kwargs: Additional arguments for requests
+
+        Returns:
+            The response (after payment if needed)
+
+        Raises:
+            PaymentRequiredError: If payment required but not configured/confirmed
+        """
+        response = requests.request(method, url, **kwargs)
+
+        if response.status_code == 402:
+            payment_header, amount_usd = self._handle_402_response(response, verbose)
+
+            # Add payment header and retry
+            headers = kwargs.get("headers", {}).copy()
+            headers["X-PAYMENT"] = payment_header
+            kwargs["headers"] = headers
+
+            if verbose:
+                print(f"DEBUG: Retrying request with X-PAYMENT header ({amount_usd})")
+
+            response = requests.request(method, url, **kwargs)
+
+            if verbose:
+                print(f"DEBUG: Paid request status: {response.status_code}")
+
+        return response
 
     # --- Health ---
 
@@ -150,8 +321,14 @@ class GatewayClient:
             print(f"Payload: {payload}")
 
         try:
-            response = requests.post(
-                url, json=payload, headers=self._get_headers(), timeout=120
+            # Use _make_paid_request for x402 support
+            response = self._make_paid_request(
+                "POST",
+                url,
+                json=payload,
+                headers=self._get_headers(),
+                timeout=120,
+                verbose=verbose,
             )
             if verbose:
                 print(f"DEBUG: Purchase stamp status: {response.status_code}")
@@ -272,8 +449,15 @@ class GatewayClient:
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
 
-            response = requests.post(
-                url, params=params, files=files, headers=headers, timeout=60
+            # Use _make_paid_request for x402 support
+            response = self._make_paid_request(
+                "POST",
+                url,
+                params=params,
+                files=files,
+                headers=headers,
+                timeout=60,
+                verbose=verbose,
             )
             if verbose:
                 print(f"DEBUG: Upload status: {response.status_code}")
