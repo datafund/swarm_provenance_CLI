@@ -524,8 +524,9 @@ class TestVersionFlag:
 
         assert result.exit_code == 0
         assert "swarm-prov-upload" in result.stdout
-        # Version format: 0.2.0 or 0.2.0+git.abc1234
-        assert "0.2.0" in result.stdout
+        # Version format: X.Y.Z or X.Y.Z+git.abc1234
+        import re
+        assert re.search(r"\d+\.\d+\.\d+", result.stdout)
 
     def test_version_short_flag(self):
         """Tests -V flag shows version."""
@@ -533,8 +534,9 @@ class TestVersionFlag:
 
         assert result.exit_code == 0
         assert "swarm-prov-upload" in result.stdout
-        # Version format: 0.2.0 or 0.2.0+git.abc1234
-        assert "0.2.0" in result.stdout
+        # Version format: X.Y.Z or X.Y.Z+git.abc1234
+        import re
+        assert re.search(r"\d+\.\d+\.\d+", result.stdout)
 
 
 # =============================================================================
