@@ -39,7 +39,6 @@ def _import_x402_deps():
     if _eth_account is None:
         try:
             from eth_account import Account as _eth_account_module
-            from eth_account.messages import encode_typed_data
             from web3 import Web3 as _web3_module
             _eth_account = _eth_account_module
             _web3 = _web3_module
@@ -269,9 +268,9 @@ class X402Client:
             )
         return True
 
-    def _generate_nonce(self) -> str:
-        """Generate a random nonce for payment authorization."""
-        return "0x" + secrets.token_hex(32)
+    def _generate_nonce(self) -> bytes:
+        """Generate a random 32-byte nonce for payment authorization."""
+        return secrets.token_bytes(32)
 
     def sign_payment(
         self,
@@ -291,12 +290,12 @@ class X402Client:
         Raises:
             PaymentRejectedError: If signing fails.
         """
-        from eth_account.messages import encode_typed_data
-
         try:
             # Generate authorization data
+            valid_after = int(time.time()) - 60  # 60 seconds before now
             valid_before = int(time.time()) + timeout_seconds
-            nonce = self._generate_nonce()
+            nonce_bytes = self._generate_nonce()
+            nonce_hex = "0x" + nonce_bytes.hex()
             amount = payment_option.maxAmountRequired
 
             # Build EIP-712 typed data for USDC TransferWithAuthorization
@@ -304,53 +303,49 @@ class X402Client:
             if not domain:
                 raise X402NetworkError(f"No EIP-712 domain for network: {self.network}")
 
-            typed_data = {
-                "types": {
-                    "EIP712Domain": [
-                        {"name": "name", "type": "string"},
-                        {"name": "version", "type": "string"},
-                        {"name": "chainId", "type": "uint256"},
-                        {"name": "verifyingContract", "type": "address"},
-                    ],
-                    "TransferWithAuthorization": [
-                        {"name": "from", "type": "address"},
-                        {"name": "to", "type": "address"},
-                        {"name": "value", "type": "uint256"},
-                        {"name": "validAfter", "type": "uint256"},
-                        {"name": "validBefore", "type": "uint256"},
-                        {"name": "nonce", "type": "bytes32"},
-                    ],
-                },
-                "primaryType": "TransferWithAuthorization",
-                "domain": domain,
-                "message": {
-                    "from": self.address,
-                    "to": payment_option.payTo,
-                    "value": int(amount),
-                    "validAfter": 0,
-                    "validBefore": valid_before,
-                    "nonce": nonce,
-                },
+            # Use sign_typed_data which handles EIP-712 properly
+            message_types = {
+                "TransferWithAuthorization": [
+                    {"name": "from", "type": "address"},
+                    {"name": "to", "type": "address"},
+                    {"name": "value", "type": "uint256"},
+                    {"name": "validAfter", "type": "uint256"},
+                    {"name": "validBefore", "type": "uint256"},
+                    {"name": "nonce", "type": "bytes32"},
+                ],
             }
 
-            # Sign the typed data
-            signable = encode_typed_data(full_message=typed_data)
-            signed = self._account.sign_message(signable)
+            message_data = {
+                "from": self.address,
+                "to": payment_option.payTo,
+                "value": int(amount),
+                "validAfter": valid_after,
+                "validBefore": valid_before,
+                "nonce": nonce_bytes,  # Pass as bytes for signing
+            }
 
-            # Build the payment payload
+            # Sign using sign_typed_data (the correct API)
+            signed = self._account.sign_typed_data(
+                domain_data=domain,
+                message_types=message_types,
+                message_data=message_data,
+            )
+            signature = "0x" + signed.signature.hex()
+
+            # Build the payment payload with string values for timestamps
             payload = X402PaymentPayload(
                 x402Version=1,
                 scheme=payment_option.scheme,
                 network=self.network,
                 payload={
-                    "signature": signed.signature.hex(),
+                    "signature": signature,
                     "authorization": {
                         "from": self.address,
                         "to": payment_option.payTo,
                         "value": amount,
-                        "validAfter": 0,
-                        "validBefore": valid_before,
-                        "nonce": nonce,
+                        "validAfter": str(valid_after),
+                        "validBefore": str(valid_before),
+                        "nonce": nonce_hex,  # Hex string in payload
                     },
                 },
             )

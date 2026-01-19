@@ -471,16 +471,16 @@ class TestX402ClientNonce:
     """Tests for nonce generation."""
 
     def test_nonce_generation(self, mock_eth_deps):
-        """Tests that nonces are generated correctly."""
+        """Tests that nonces are generated as 32-byte values."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
         client = X402Client()
         nonce = client._generate_nonce()
 
-        # Should be hex string starting with 0x
-        assert nonce.startswith("0x")
-        # Should be 32 bytes = 64 hex chars + 2 for '0x'
-        assert len(nonce) == 66
+        # Should be bytes
+        assert isinstance(nonce, bytes)
+        # Should be 32 bytes
+        assert len(nonce) == 32
 
     def test_nonces_are_unique(self, mock_eth_deps):
         """Tests that each nonce is unique."""
