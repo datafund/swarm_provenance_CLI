@@ -248,11 +248,12 @@ class TestX402Integration:
 
         client = X402Client(network="base-sepolia")
         try:
-            balance = client.get_usdc_balance()
-            # Balance is a string representation of USDC amount
-            assert balance is not None
-            # Should be a valid decimal number
-            float(balance)
+            raw_balance, usdc_balance = client.get_usdc_balance()
+            # Raw balance is int (smallest units), usdc_balance is float
+            assert isinstance(raw_balance, int)
+            assert isinstance(usdc_balance, float)
+            assert raw_balance >= 0
+            assert usdc_balance >= 0
         except Exception as e:
             pytest.skip(f"Balance check failed (RPC issue?): {e}")
 
