@@ -381,13 +381,22 @@ class TestX402PaymentFlow:
         print(f"  Balance before: ${balance_before_usdc:.6f}")
         print(f"  Balance after: ${balance_after_usdc:.6f}")
 
-        # Verify payment if it was made
+        # Check if balance changed (payment was made via auto-pay)
+        balance_changed = balance_after_raw < balance_before_raw
+
         if payment_made["called"]:
-            print(f"  x402 Payment made: {payment_made['amount']}")
+            # Payment was made via callback
+            print(f"  x402 Payment made (via callback): {payment_made['amount']}")
             print(f"  Description: {payment_made['description']}")
-            # Balance should have decreased
-            assert balance_after_raw < balance_before_raw, \
+            assert balance_changed, \
                 f"Balance should decrease after payment. Before: {balance_before_raw}, After: {balance_after_raw}"
             print(f"  Balance difference: ${balance_before_usdc - balance_after_usdc:.6f}")
+        elif balance_changed:
+            # Payment was made via auto-pay (callback not called)
+            print(f"  x402 Payment made (via auto-pay)")
+            print(f"  Balance difference: ${balance_before_usdc - balance_after_usdc:.6f}")
         else:
-            print(f"  No x402 payment triggered (gateway may have free tier or x402 disabled)")
+            # No payment - check if 402 was even received
+            # Note: With EIP-3009, the on-chain transfer happens asynchronously
+            # The authorization is signed and sent, but the facilitator executes it later
+            print(f"  Balance unchanged (payment may be pending on-chain or gateway has free tier)")
