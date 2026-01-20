@@ -38,8 +38,8 @@ def local_bee_url():
 
 @pytest.fixture
 def gateway_url():
-    """Gateway URL."""
-    return "https://provenance-gateway.datafund.io"
+    """Gateway URL from environment or default."""
+    return os.getenv("PROVENANCE_GATEWAY_URL", "https://provenance-gateway.datafund.io")
 
 
 @pytest.fixture
@@ -299,8 +299,10 @@ class TestX402Integration:
             x402_auto_pay=False
         )
 
-        assert client._x402_enabled is True
-        assert client._x402_client is not None
+        assert client.x402_enabled is True
+        # x402 client is lazy-loaded, so access it via _get_x402_client()
+        x402_client = client._get_x402_client()
+        assert x402_client is not None
 
         # Health check should still work
         result = client.health_check()
