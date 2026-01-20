@@ -98,3 +98,17 @@ class X402NetworkError(X402Error):
         super().__init__(message)
         self.expected = expected
         self.actual = actual
+
+
+class PaymentTransactionFailedError(X402Error):
+    """Payment was signed but the on-chain transaction failed.
+
+    This occurs when the x402 facilitator could not execute the
+    TransferWithAuthorization on-chain. The gateway may have fallen
+    back to free tier.
+    """
+
+    def __init__(self, message: str, error_reason: str = None, payer: str = None):
+        super().__init__(message)
+        self.error_reason = error_reason
+        self.payer = payer

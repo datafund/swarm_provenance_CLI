@@ -133,3 +133,12 @@ class X402PaymentPayload(BaseModel):
     scheme: str = Field(default="exact", description="Payment scheme")
     network: str = Field(description="Network identifier")
     payload: dict = Field(description="Contains signature and authorization data")
+
+
+class X402PaymentResponse(BaseModel):
+    """Response from x-payment-response header after payment attempt."""
+    success: bool = Field(description="Whether the payment was successful")
+    errorReason: Optional[str] = Field(default=None, description="Error reason if payment failed")
+    transaction: Optional[str] = Field(default=None, description="Transaction hash if successful")
+    network: Optional[str] = Field(default=None, description="Network the payment was made on")
+    payer: Optional[str] = Field(default=None, description="Address of the payer")

@@ -7,12 +7,14 @@ interface to Swarm without requiring a local Bee node.
 Supports x402 pay-per-request payments when enabled.
 """
 
+import base64
+import json
 import requests
 import os
 from typing import Callable, Optional, Tuple
 from urllib.parse import urljoin
 
-from ..exceptions import PaymentRequiredError
+from ..exceptions import PaymentRequiredError, PaymentTransactionFailedError
 from ..models import (
     StampDetails,
     StampListResponse,
@@ -21,6 +23,7 @@ from ..models import (
     DataUploadResponse,
     WalletResponse,
     ChequebookResponse,
+    X402PaymentResponse,
 )
 
 
@@ -177,6 +180,39 @@ class GatewayClient:
 
         return payment_header, amount_usd
 
+    def _parse_payment_response(
+        self,
+        response: requests.Response,
+        verbose: bool = False,
+    ) -> Optional[X402PaymentResponse]:
+        """
+        Parse the x-payment-response header from a response.
+
+        The header value is base64-encoded JSON containing payment result.
+
+        Args:
+            response: The HTTP response
+            verbose: Enable debug output
+
+        Returns:
+            X402PaymentResponse if header present and valid, None otherwise
+        """
+        header_value = response.headers.get("x-payment-response")
+        if not header_value:
+            return None
+
+        try:
+            # Header is base64-encoded JSON
+            decoded = base64.b64decode(header_value)
+            data = json.loads(decoded)
+            if verbose:
+                print(f"DEBUG: x-payment-response: {data}")
+            return X402PaymentResponse.model_validate(data)
+        except (ValueError, json.JSONDecodeError) as e:
+            if verbose:
+                print(f"DEBUG: Failed to parse x-payment-response: {e}")
+            return None
+
     def _make_paid_request(
         self,
         method: str,
@@ -198,6 +234,7 @@ class GatewayClient:
 
         Raises:
             PaymentRequiredError: If payment required but not configured/confirmed
+            PaymentTransactionFailedError: If payment was signed but on-chain tx failed
         """
         response = requests.request(method, url, **kwargs)
 
@@ -216,6 +253,28 @@ class GatewayClient:
 
             if verbose:
                 print(f"DEBUG: Paid request status: {response.status_code}")
+
+            # Check x-payment-response header to verify payment actually succeeded
+            payment_result = self._parse_payment_response(response, verbose)
+            if payment_result:
+                if not payment_result.success:
+                    # Payment was signed but the on-chain transaction failed
+                    # Gateway may have fallen back to free tier
+                    error_msg = (
+                        f"Payment transaction failed: {payment_result.errorReason or 'unknown error'}. "
+                        "The gateway may have used free tier instead."
+                    )
+                    if verbose:
+                        print(f"WARNING: {error_msg}")
+                    raise PaymentTransactionFailedError(
+                        error_msg,
+                        error_reason=payment_result.errorReason,
+                        payer=payment_result.payer,
+                    )
+                else:
+                    if verbose:
+                        tx_hash = payment_result.transaction or "pending"
+                        print(f"DEBUG: Payment successful, tx: {tx_hash}")
 
         return response
 

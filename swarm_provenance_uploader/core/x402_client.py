@@ -61,16 +61,141 @@ RPC_ENDPOINTS = {
     "base": "https://mainnet.base.org",
 }
 
+# Chain IDs for supported networks
+CHAIN_IDS = {
+    "base-sepolia": 84532,
+    "base": 8453,
+}
+
+
+def compute_domain_separator(name: str, version: str, chain_id: int, contract_address: str) -> bytes:
+    """
+    Compute the EIP-712 DOMAIN_SEPARATOR for verification.
+
+    This allows us to validate that our configured domain matches
+    what the contract actually uses.
+
+    Args:
+        name: Token name (e.g., "USDC" or "USD Coin")
+        version: Contract version (e.g., "2")
+        chain_id: Chain ID (e.g., 84532 for Base Sepolia)
+        contract_address: Token contract address
+
+    Returns:
+        The computed DOMAIN_SEPARATOR as bytes32
+    """
+    _, Web3 = _import_x402_deps()
+    from eth_abi import encode
+
+    # EIP-712 domain type hash
+    type_hash = Web3.keccak(
+        text="EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    )
+
+    # Hash name and version strings
+    name_hash = Web3.keccak(text=name)
+    version_hash = Web3.keccak(text=version)
+
+    # Encode and hash to get DOMAIN_SEPARATOR
+    domain_data = encode(
+        ["bytes32", "bytes32", "bytes32", "uint256", "address"],
+        [type_hash, name_hash, version_hash, chain_id, contract_address]
+    )
+    return Web3.keccak(domain_data)
+
+
+def fetch_contract_domain_separator(web3_instance, contract_address: str) -> bytes:
+    """
+    Fetch the actual DOMAIN_SEPARATOR from a USDC contract.
+
+    Args:
+        web3_instance: Web3 instance connected to the right network
+        contract_address: Token contract address
+
+    Returns:
+        The contract's DOMAIN_SEPARATOR as bytes32
+    """
+    abi = [{"constant": True, "inputs": [], "name": "DOMAIN_SEPARATOR",
+            "outputs": [{"name": "", "type": "bytes32"}], "type": "function"}]
+    contract = web3_instance.eth.contract(
+        address=web3_instance.to_checksum_address(contract_address),
+        abi=abi
+    )
+    return contract.functions.DOMAIN_SEPARATOR().call()
+
+
+def validate_domain_config(
+    network: str,
+    name: str,
+    version: str,
+    web3_instance=None,
+) -> bool:
+    """
+    Validate that a domain configuration matches the on-chain contract.
+
+    This prevents signing with incorrect EIP-712 domains, which would
+    result in invalid signatures that fail on-chain.
+
+    Args:
+        network: Network identifier (e.g., "base-sepolia")
+        name: Token name to validate
+        version: Token version to validate
+        web3_instance: Optional Web3 instance (created if not provided)
+
+    Returns:
+        True if domain matches contract
+
+    Raises:
+        X402ConfigurationError: If domain doesn't match contract
+    """
+    _, Web3 = _import_x402_deps()
+
+    contract_address = USDC_CONTRACTS.get(network)
+    chain_id = CHAIN_IDS.get(network)
+
+    if not contract_address or not chain_id:
+        raise X402ConfigurationError(f"Unknown network: {network}")
+
+    # Create web3 instance if not provided
+    if web3_instance is None:
+        rpc_url = RPC_ENDPOINTS.get(network)
+        web3_instance = Web3(Web3.HTTPProvider(rpc_url))
+
+    # Compute what we think DOMAIN_SEPARATOR should be
+    computed = compute_domain_separator(name, version, chain_id, contract_address)
+
+    # Fetch actual DOMAIN_SEPARATOR from contract
+    try:
+        actual = fetch_contract_domain_separator(web3_instance, contract_address)
+    except Exception as e:
+        raise X402ConfigurationError(
+            f"Failed to fetch DOMAIN_SEPARATOR from contract on {network}: {e}"
+        ) from e
+
+    if computed != actual:
+        raise X402ConfigurationError(
+            f"EIP-712 domain mismatch on {network}! "
+            f"Configured name='{name}', version='{version}' produces "
+            f"DOMAIN_SEPARATOR {computed.hex()}, but contract has {actual.hex()}. "
+            f"Payments will fail on-chain. Check the token's actual domain name."
+        )
+
+    return True
+
+
 # EIP-712 domain for USDC permit
+# IMPORTANT: The domain name MUST match what the USDC contract uses for EIP-712 signing.
+# These values were verified against on-chain DOMAIN_SEPARATOR values.
+# Use validate_domain_config() to verify at runtime before signing payments.
 USDC_PERMIT_DOMAIN = {
     "base-sepolia": {
-        "name": "USD Coin",
+        "name": "USDC",  # Verified 2026-01-20: matches contract's DOMAIN_SEPARATOR
         "version": "2",
         "chainId": 84532,
         "verifyingContract": USDC_CONTRACTS["base-sepolia"],
     },
     "base": {
-        "name": "USD Coin",
+        "name": "USDC",  # Verified 2026-01-20: matches contract's DOMAIN_SEPARATOR
         "version": "2",
         "chainId": 8453,
         "verifyingContract": USDC_CONTRACTS["base"],
@@ -96,6 +221,7 @@ class X402Client:
         private_key: Optional[str] = None,
         network: str = "base-sepolia",
         rpc_url: Optional[str] = None,
+        skip_domain_validation: bool = False,
     ):
         """
         Initialize the x402 payment client.
@@ -105,6 +231,9 @@ class X402Client:
                          If None, reads from X402_PRIVATE_KEY env var.
             network: Network to use ('base-sepolia' or 'base').
             rpc_url: Custom RPC URL. If None, uses default for network.
+            skip_domain_validation: Skip runtime domain validation (for testing only).
+                                    WARNING: Do not use in production as it disables
+                                    protection against signing with wrong EIP-712 domain.
 
         Raises:
             X402ConfigurationError: If private key is missing or invalid.
@@ -145,10 +274,48 @@ class X402Client:
         # USDC contract address for this network
         self._usdc_address = USDC_CONTRACTS.get(network)
 
+        # Domain validation state (lazy validation on first payment)
+        # If skip_domain_validation=True, mark as already validated (for testing)
+        self._skip_domain_validation = skip_domain_validation
+        self._domain_validated = skip_domain_validation
+
     @property
     def wallet_address(self) -> str:
         """Get the wallet address derived from the private key."""
         return self.address
+
+    def validate_domain(self, force: bool = False) -> bool:
+        """
+        Validate that our EIP-712 domain configuration matches the on-chain contract.
+
+        This is called automatically before signing payments to ensure signatures
+        will be valid on-chain. Call with force=True to re-validate.
+
+        Args:
+            force: Re-validate even if already validated
+
+        Returns:
+            True if domain is valid
+
+        Raises:
+            X402ConfigurationError: If domain doesn't match contract
+        """
+        if self._domain_validated and not force:
+            return True
+
+        domain = USDC_PERMIT_DOMAIN.get(self.network)
+        if not domain:
+            raise X402ConfigurationError(f"No domain config for network: {self.network}")
+
+        validate_domain_config(
+            network=self.network,
+            name=domain["name"],
+            version=domain["version"],
+            web3_instance=self._web3,
+        )
+
+        self._domain_validated = True
+        return True
 
     def parse_402_response(self, response_body: dict) -> X402PaymentRequirements:
         """
@@ -289,7 +456,12 @@ class X402Client:
 
         Raises:
             PaymentRejectedError: If signing fails.
+            X402ConfigurationError: If EIP-712 domain doesn't match contract.
         """
+        # Validate domain configuration against on-chain contract BEFORE signing
+        # This prevents signing with an incorrect domain that would fail on-chain
+        self.validate_domain()
+
         try:
             # Generate authorization data
             valid_after = int(time.time()) - 60  # 60 seconds before now

@@ -109,7 +109,7 @@ class TestX402ClientInit:
         """Tests successful initialization with env var key."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
-        client = X402Client()
+        client = X402Client(skip_domain_validation=True)
 
         assert client.address == DUMMY_ADDRESS
         assert client.network == "base-sepolia"
@@ -138,7 +138,7 @@ class TestX402ClientParse402:
         """Tests parsing a valid 402 response."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
-        client = X402Client()
+        client = X402Client(skip_domain_validation=True)
         requirements = client.parse_402_response(SAMPLE_402_RESPONSE)
 
         assert isinstance(requirements, X402PaymentRequirements)
@@ -150,7 +150,7 @@ class TestX402ClientParse402:
         """Tests parsing an invalid 402 response raises error."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
-        client = X402Client()
+        client = X402Client(skip_domain_validation=True)
 
         with pytest.raises(PaymentRequiredError):
             client.parse_402_response({"invalid": "data"})
@@ -246,7 +246,7 @@ class TestX402ClientBalance:
         """Tests getting USDC balance."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
-        client = X402Client()
+        client = X402Client(skip_domain_validation=True)
         raw, usdc = client.get_usdc_balance()
 
         assert raw == 10_000_000  # Raw units
@@ -256,7 +256,7 @@ class TestX402ClientBalance:
         """Tests balance check when sufficient."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
-        client = X402Client()
+        client = X402Client(skip_domain_validation=True)
         result = client.check_balance_sufficient("50000")  # $0.05
 
         assert result is True
@@ -298,7 +298,7 @@ class TestX402ClientBalance:
 
                 from swarm_provenance_uploader.core.x402_client import X402Client
 
-                client = X402Client()
+                client = X402Client(skip_domain_validation=True)
 
                 with pytest.raises(InsufficientBalanceError) as exc_info:
                     client.check_balance_sufficient("50000")  # $0.05
@@ -314,7 +314,7 @@ class TestX402ClientSignPayment:
         """Tests signing a payment."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
-        client = X402Client()
+        client = X402Client(skip_domain_validation=True)
         option = X402PaymentOption(
             scheme="exact",
             network="base-sepolia",
@@ -343,7 +343,7 @@ class TestX402ClientCreatePaymentHeader:
         """Tests creating a complete payment header."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
-        client = X402Client()
+        client = X402Client(skip_domain_validation=True)
         header = client.create_payment_header(SAMPLE_402_RESPONSE)
 
         # Verify it's valid base64
@@ -357,7 +357,7 @@ class TestX402ClientCreatePaymentHeader:
         """Tests payment header creation with balance check enabled."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
-        client = X402Client()
+        client = X402Client(skip_domain_validation=True)
         header = client.create_payment_header(
             SAMPLE_402_RESPONSE,
             check_balance=True,
@@ -400,7 +400,7 @@ class TestX402ClientCreatePaymentHeader:
 
                 from swarm_provenance_uploader.core.x402_client import X402Client
 
-                client = X402Client()
+                client = X402Client(skip_domain_validation=True)
 
                 with pytest.raises(InsufficientBalanceError):
                     client.create_payment_header(
@@ -416,7 +416,7 @@ class TestX402ClientFormatting:
         """Tests formatting amount as USD."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
-        client = X402Client()
+        client = X402Client(skip_domain_validation=True)
 
         assert client.format_amount_usd("50000") == "$0.05"
         assert client.format_amount_usd("1000000") == "$1.00"
@@ -426,14 +426,14 @@ class TestX402ClientFormatting:
         """Tests formatting zero amount."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
-        client = X402Client()
+        client = X402Client(skip_domain_validation=True)
         assert client.format_amount_usd("0") == "$0.00"
 
     def test_format_amount_usd_small(self, mock_eth_deps):
         """Tests formatting very small amounts."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
-        client = X402Client()
+        client = X402Client(skip_domain_validation=True)
         # 1 smallest unit = $0.000001, rounds to $0.00
         assert client.format_amount_usd("1") == "$0.00"
         # 100 smallest units = $0.0001, rounds to $0.00
@@ -474,7 +474,7 @@ class TestX402ClientNonce:
         """Tests that nonces are generated as 32-byte values."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
-        client = X402Client()
+        client = X402Client(skip_domain_validation=True)
         nonce = client._generate_nonce()
 
         # Should be bytes
@@ -486,7 +486,7 @@ class TestX402ClientNonce:
         """Tests that each nonce is unique."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
-        client = X402Client()
+        client = X402Client(skip_domain_validation=True)
         nonces = [client._generate_nonce() for _ in range(10)]
 
         # All nonces should be unique
@@ -525,7 +525,7 @@ class TestX402ClientPrivateKeyFormat:
 
                 from swarm_provenance_uploader.core.x402_client import X402Client
 
-                client = X402Client()
+                client = X402Client(skip_domain_validation=True)
                 # Should have added 0x prefix internally
                 assert client._private_key == "0x" + key_without_prefix
 
@@ -568,7 +568,7 @@ class TestX402ClientErrorHandling:
 
                 from swarm_provenance_uploader.core.x402_client import X402Client
 
-                client = X402Client()
+                client = X402Client(skip_domain_validation=True)
 
                 with pytest.raises(X402ConfigurationError) as exc_info:
                     client.get_usdc_balance()
@@ -579,7 +579,7 @@ class TestX402ClientErrorHandling:
         """Tests creating payment header with balance check disabled."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
-        client = X402Client()
+        client = X402Client(skip_domain_validation=True)
         # Should not raise even if balance would be insufficient
         header = client.create_payment_header(
             SAMPLE_402_RESPONSE,
@@ -633,7 +633,7 @@ class TestX402ClientMultiplePaymentOptions:
         """Tests handling empty accepts array."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
-        client = X402Client()
+        client = X402Client(skip_domain_validation=True)
         requirements = X402PaymentRequirements(accepts=[])
 
         with pytest.raises(X402NetworkError):
