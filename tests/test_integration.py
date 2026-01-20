@@ -328,23 +328,31 @@ class TestX402PaymentFlow:
 
     @skip_if_no_x402
     @skip_if_no_gateway
-    @pytest.mark.skip(reason="Requires testnet USDC - run manually when needed")
     def test_stamp_purchase_with_x402(self, gateway_url):
         """Test purchasing a stamp with x402 payment.
 
-        This test makes a real payment on Base Sepolia.
-        Only run when you have testnet USDC and want to test the full flow.
+        This test makes a real payment on Base Sepolia if x402 is enabled on gateway.
+        Verifies:
+        - Stamp is purchased successfully
+        - If x402 payment triggered: CLI wallet balance decreases
+        - If no x402 (free tier): stamp still purchased successfully
         """
         from swarm_provenance_uploader.core.gateway_client import GatewayClient
+        from swarm_provenance_uploader.core.x402_client import X402Client
 
         private_key = os.getenv("SWARM_X402_PRIVATE_KEY")
 
+        # Get balance before payment
+        x402_client = X402Client(private_key=private_key, network="base-sepolia")
+        balance_before_raw, balance_before_usdc = x402_client.get_usdc_balance()
+
         # Track if payment callback was called
-        payment_made = {"called": False, "amount": None}
+        payment_made = {"called": False, "amount": None, "description": None}
 
         def payment_callback(amount_usd: str, description: str) -> bool:
             payment_made["called"] = True
             payment_made["amount"] = amount_usd
+            payment_made["description"] = description
             return True  # Auto-confirm for test
 
         client = GatewayClient(
@@ -352,17 +360,34 @@ class TestX402PaymentFlow:
             x402_enabled=True,
             x402_private_key=private_key,
             x402_network="base-sepolia",
-            x402_auto_pay=False,
+            x402_auto_pay=True,  # Auto-pay to complete the flow
+            x402_max_auto_pay_usd=1.00,
             x402_payment_callback=payment_callback
         )
 
-        try:
-            # Attempt stamp purchase - may trigger 402
-            result = client.purchase_stamp(duration_hours=24)
-            assert result is not None
-            assert hasattr(result, 'batchID')
-        except Exception as e:
-            # If 402 and payment made, that's still a successful test
-            if payment_made["called"]:
-                pytest.skip(f"Payment callback triggered but failed: {e}")
-            raise
+        # Attempt stamp purchase - may or may not trigger 402 depending on gateway config
+        # Note: Some gateways don't support duration_hours parameter, so use defaults
+        result = client.purchase_stamp(verbose=True)
+        assert result is not None
+        # Result is a string (batch ID)
+        assert isinstance(result, str)
+        assert len(result) == 64  # Batch ID is 64 hex chars
+
+        # Get balance after
+        balance_after_raw, balance_after_usdc = x402_client.get_usdc_balance()
+
+        print(f"\nStamp purchase result:")
+        print(f"  Batch ID: {result}")
+        print(f"  Balance before: ${balance_before_usdc:.6f}")
+        print(f"  Balance after: ${balance_after_usdc:.6f}")
+
+        # Verify payment if it was made
+        if payment_made["called"]:
+            print(f"  x402 Payment made: {payment_made['amount']}")
+            print(f"  Description: {payment_made['description']}")
+            # Balance should have decreased
+            assert balance_after_raw < balance_before_raw, \
+                f"Balance should decrease after payment. Before: {balance_before_raw}, After: {balance_after_raw}"
+            print(f"  Balance difference: ${balance_before_usdc - balance_after_usdc:.6f}")
+        else:
+            print(f"  No x402 payment triggered (gateway may have free tier or x402 disabled)")
