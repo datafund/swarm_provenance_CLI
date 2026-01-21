@@ -36,6 +36,12 @@ swarm-prov-upload upload --file /path/to/data.txt --stamp-id <existing_stamp_id>
 
 # Download and verify
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads
+
+# Upload with notary signing (gateway only)
+swarm-prov-upload upload --file /path/to/data.txt --sign notary
+
+# Download with signature verification
+swarm-prov-upload download <swarm_hash> --output-dir ./downloads --verify
 ```
 
 ## Setup
@@ -227,6 +233,7 @@ swarm-prov-upload download <swarm_hash> --output-dir ./downloads --verbose
 | `--depth` | Technical depth parameter (16-32) |
 | `--stamp-id`, `-s` | Use existing stamp (skip purchase) |
 | `--usePool` | Acquire stamp from pool instead of purchasing (gateway only, faster) |
+| `--sign` | Sign document with notary service (value: `notary`, gateway only) |
 | `--amount` | Legacy: PLUR amount (local backend) |
 
 ### Stamp Management (Gateway only)
@@ -353,6 +360,97 @@ Try again later, use a different size, or use regular purchase (without --usePoo
 - **Automatic fallback**: Larger stamps substituted if exact size unavailable
 - **Same pricing**: x402 costs are identical to regular purchases
 
+### Notary Signing (Gateway only)
+
+The notary service adds cryptographic signatures to uploaded data, providing proof of authenticity and integrity.
+
+#### How It Works
+
+When you upload with `--sign notary`, the gateway's notary service:
+1. Receives your data payload
+2. Signs a hash of the data + timestamp using EIP-191 (Ethereum signed messages)
+3. Adds the signature to a `signatures` array in the document
+4. Returns the signed document stored on Swarm
+
+The signature can be verified locally using standard Ethereum signature recovery.
+
+#### Usage
+
+```bash
+# Upload with notary signing
+swarm-prov-upload upload --file data.txt --sign notary
+
+# Check notary service status
+swarm-prov-upload notary info
+
+# Quick status check
+swarm-prov-upload notary status
+
+# Verify a signed document file
+swarm-prov-upload notary verify --file signed_document.json
+```
+
+#### Verification on Download
+
+```bash
+# Download and automatically verify signature
+swarm-prov-upload download <swarm_hash> --output-dir ./downloads --verify
+
+# If verification fails, you'll see an error with details
+```
+
+#### Signature Structure
+
+The notary adds a signature entry in the following format:
+
+```json
+{
+  "data": { ... },
+  "signatures": [
+    {
+      "type": "notary",
+      "signer": "0x...",
+      "timestamp": "2026-01-21T16:30:00+00:00",
+      "data_hash": "sha256...",
+      "signature": "0x...",
+      "signed_fields": ["data"]
+    }
+  ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `type` | Always `notary` |
+| `signer` | Ethereum address of the notary |
+| `timestamp` | ISO 8601 timestamp when signed |
+| `data_hash` | SHA256 hash of canonical JSON of `data` field |
+| `signature` | EIP-191 signature of `{data_hash}|{timestamp}` |
+| `signed_fields` | Fields that were included in the signature |
+
+#### Verifying Signatures Manually
+
+The signature can be verified with any Ethereum library:
+
+1. Compute canonical JSON of `data` field (sorted keys, no whitespace)
+2. Hash with SHA256
+3. Construct message: `{data_hash}|{timestamp}`
+4. Verify EIP-191 signature recovers to expected address
+
+```python
+# Example using eth-account
+from eth_account import Account
+from eth_account.messages import encode_defunct
+import json, hashlib
+
+data_json = json.dumps(document["data"], sort_keys=True, separators=(",", ":"))
+data_hash = hashlib.sha256(data_json.encode()).hexdigest()
+message = f"{data_hash}|{signature['timestamp']}"
+signable = encode_defunct(text=message)
+recovered = Account.recover_message(signable, signature=signature["signature"])
+assert recovered.lower() == expected_address.lower()
+```
+
 ### Information Commands
 
 ```bash
@@ -386,12 +484,15 @@ Use `swarm-prov-upload --help` for all options.
 │  │ --gateway-url   │  │                  │  │ chequebook (gateway)            │ │
 │  │ --x402          │  ├──────────────────┤  │                                 │ │
 │  │ --auto-pay      │  │ STAMPS COMMANDS  │  ├─────────────────────────────────┤ │
-│  │ --max-pay       │  │ (gateway only)   │  │ x402 COMMANDS (optional)        │ │
-│  │ --usePool       │  │ stamps list      │  │ x402 status                     │ │
-│  │                 │  │ stamps info      │  │ x402 balance                    │ │
-│  │ Built with:     │  │ stamps extend    │  │ x402 info                       │ │
-│  │ • Typer CLI     │  │ stamps check     │  │                                 │ │
-│  │ • Rich output   │  │ stamps pool-stat │  │                                 │ │
+│  │ --max-pay       │  │ (gateway only)   │  │ NOTARY COMMANDS (gateway only)  │ │
+│  │ --usePool       │  │ stamps list      │  │ notary info                     │ │
+│  │ --sign          │  │ stamps info      │  │ notary status                   │ │
+│  │ --verify        │  │ stamps extend    │  │ notary verify                   │ │
+│  │                 │  │ stamps check     │  │                                 │ │
+│  │ Built with:     │  │ stamps pool-stat │  ├─────────────────────────────────┤ │
+│  │ • Rich output   │  │                  │  │ x402 status                     │ │
+│  │                 │  │                  │  │ x402 balance                    │ │
+│  │                 │  │                  │  │ x402 info                       │ │
 │  └─────────────────┘  └──────────────────┘  └─────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                         │
@@ -554,11 +655,12 @@ Use `swarm-prov-upload --help` for all options.
 │  • Seamless switching             • wallet - View BZZ balance                 │
 │  • Same CLI for both              • chequebook - View chequebook              │
 │                                                                                 │
-│  💳 x402 PAYMENTS (Optional)                                                   │
-│  • USDC on Base chain             • EIP-712 message signing                   │
-│  • Auto-pay mode                  • Testnet (Base Sepolia) support            │
-│  • Payment confirmation           • Balance checking                          │
-│  • Lazy dependency loading        • Interactive or automated                  │
+│  💳 x402 PAYMENTS (Optional)       🔏 NOTARY SIGNING (Gateway only)            │
+│  • USDC on Base chain             • EIP-191 message signatures                │
+│  • Auto-pay mode                  • Cryptographic proof of authenticity       │
+│  • Payment confirmation           • Verifiable timestamps                     │
+│  • Lazy dependency loading        • Local signature verification              │
+│  • Balance checking               • Ethereum address recovery                 │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────────┐
@@ -617,6 +719,7 @@ swarm_provenance_uploader/
 │       ├── file_utils.py
 │       ├── gateway_client.py    # Gateway API client (default)
 │       ├── metadata_builder.py
+│       ├── notary_utils.py      # Notary signature verification
 │       ├── swarm_client.py      # Local Bee API client
 │       └── x402_client.py       # x402 payment client (optional)
 └── tests/
@@ -624,6 +727,7 @@ swarm_provenance_uploader/
     ├── test_cli.py              # CLI unit tests (mocked)
     ├── test_gateway_client.py   # GatewayClient unit tests (mocked)
     ├── test_integration.py      # Integration tests (real backends)
+    ├── test_notary_utils.py     # Notary utils unit tests (mocked)
     └── test_x402_client.py      # x402 unit tests (mocked)
 ```
 
