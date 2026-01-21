@@ -145,3 +145,39 @@ class PoolAcquisitionError(PoolError):
     def __init__(self, message: str, available_count: int = 0):
         super().__init__(message)
         self.available_count = available_count
+
+
+# --- Notary Signing Exceptions ---
+
+class NotaryError(ProvenanceError):
+    """Base exception for notary signing errors."""
+    pass
+
+
+class NotaryNotEnabledError(NotaryError):
+    """Notary signing is not enabled on this gateway."""
+    pass
+
+
+class NotaryNotConfiguredError(NotaryError):
+    """Notary is enabled but private key not configured on gateway."""
+    pass
+
+
+class InvalidDocumentFormatError(NotaryError):
+    """Document is not valid JSON or missing required 'data' field."""
+    pass
+
+
+class SignatureVerificationError(NotaryError):
+    """Signature verification failed.
+
+    This can occur when:
+    - Data hash doesn't match
+    - Signer address doesn't match expected
+    - Signature is invalid or corrupted
+    """
+
+    def __init__(self, message: str, reason: str = None):
+        super().__init__(message)
+        self.reason = reason
