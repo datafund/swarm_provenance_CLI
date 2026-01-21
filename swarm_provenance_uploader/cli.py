@@ -134,6 +134,7 @@ def upload(
     stamp_check_retries: Annotated[int, typer.Option("--stamp-retries", help="Number of times to check for stamp usability.")] = 12,
     stamp_check_interval: Annotated[int, typer.Option("--stamp-interval", help="Seconds to wait between stamp usability checks.")] = 20,
     use_pool: Annotated[bool, typer.Option("--usePool", help="Acquire stamp from pool instead of purchasing (gateway only, faster ~5s vs >1min).")] = False,
+    sign: Annotated[Optional[str], typer.Option("--sign", help="Sign document with notary service. Value: 'notary' (gateway only).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False
 ):
     """
@@ -145,11 +146,23 @@ def upload(
     Use --duration to specify validity in hours (min 24).
     Use --size for preset sizes: small, medium, large.
     Use --usePool to acquire from pool (faster, gateway only).
+    Use --sign notary to add a notary signature (gateway only).
     """
     # Determine which backend to use
     use_gateway = _backend_config["backend"] == "gateway"
     gateway_url = _backend_config["gateway_url"]
     local_bee_url = bee_url or _backend_config["bee_url"]
+
+    # Validate --sign option
+    use_signing = False
+    if sign:
+        if sign.lower() != "notary":
+            typer.secho(f"ERROR: Invalid --sign value '{sign}'. Use 'notary'.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        if not use_gateway:
+            typer.secho("ERROR: --sign requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        use_signing = True
 
     # Show warning for local backend
     if not use_gateway:
@@ -176,6 +189,8 @@ def upload(
         typer.echo(f"    Stamp Check Interval: {stamp_check_interval}s")
         if use_pool:
             typer.echo(f"    Use Pool: Yes (acquire from pool instead of purchasing)")
+        if use_signing:
+            typer.echo(f"    Sign: notary (document will be signed by gateway notary)")
     else:
         typer.echo(f"Processing file: {file.name}...")
 
@@ -393,16 +408,40 @@ def upload(
         typer.echo(f"    Final Metadata Object created with stamp_id: {final_metadata_obj.stamp_id}")
         typer.echo(f"    Preview of final_payload_bytes (first 100): {final_payload_bytes[:100].decode('utf-8', errors='replace')}...")
 
-    # 8 & 9. Upload "Provenance Metadata" JSON
-    typer.echo(f"Uploading data to Swarm...")
+    # 8 & 9. Upload "Provenance Metadata" JSON (with optional signing)
+    if use_signing:
+        typer.echo(f"Uploading data to Swarm with notary signature...")
+    else:
+        typer.echo(f"Uploading data to Swarm...")
     if verbose:
         typer.echo(f"    (Using stamp_id: {stamp_id.lower()} in header)")
+
+    signed_document = None
     try:
         if use_gateway:
             gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
-            swarm_ref_hash = gw_client.upload_data(final_payload_bytes, stamp_id, verbose=verbose)
+            if use_signing:
+                # Upload with notary signing
+                result = gw_client.upload_data_with_signing(
+                    final_payload_bytes, stamp_id, sign="notary", verbose=verbose
+                )
+                swarm_ref_hash = result.reference
+                signed_document = result.signed_document
+            else:
+                swarm_ref_hash = gw_client.upload_data(final_payload_bytes, stamp_id, verbose=verbose)
         else:
             swarm_ref_hash = swarm_client.upload_data(local_bee_url, final_payload_bytes, stamp_id, verbose=verbose)
+    except exceptions.NotaryNotEnabledError:
+        typer.secho(f"\nERROR: Notary signing is not enabled on this gateway.", fg=typer.colors.RED, err=True)
+        typer.echo("Remove --sign option or use a gateway with notary enabled.")
+        raise typer.Exit(code=1)
+    except exceptions.NotaryNotConfiguredError:
+        typer.secho(f"\nERROR: Notary is enabled but not configured on this gateway.", fg=typer.colors.RED, err=True)
+        typer.echo("Contact the gateway operator or remove --sign option.")
+        raise typer.Exit(code=1)
+    except exceptions.InvalidDocumentFormatError as e:
+        typer.secho(f"\nERROR: Invalid document format for signing: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
     except exceptions.PaymentRequiredError as e:
         typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
         typer.echo("Use --x402 to enable x402 payments, or use a gateway without x402 mode.")
@@ -417,6 +456,27 @@ def upload(
     typer.secho(f"\nSUCCESS! Upload complete.", fg=typer.colors.GREEN, bold=True)
     typer.echo("Swarm Reference Hash:")
     typer.secho(f"{swarm_ref_hash}", fg=typer.colors.CYAN)
+
+    # Display signature info if signing was used
+    if use_signing and signed_document:
+        signatures = signed_document.get("signatures", [])
+        notary_sig = None
+        for sig in signatures:
+            if sig.get("type") == "notary":
+                notary_sig = sig
+                break
+
+        if notary_sig:
+            typer.echo("\nSignature added:")
+            signer = notary_sig.get("signer", "")
+            signer_short = f"{signer[:10]}...{signer[-4:]}" if len(signer) > 14 else signer
+            typer.echo(f"  Type:      {notary_sig.get('type', 'notary')}")
+            typer.echo(f"  Signer:    {signer_short}")
+            typer.echo(f"  Timestamp: {notary_sig.get('timestamp', 'N/A')}")
+            if verbose:
+                typer.echo(f"  Data hash: {notary_sig.get('data_hash', 'N/A')}")
+    elif use_signing:
+        typer.secho("\nNote: Signature requested but signed document not returned by gateway.", fg=typer.colors.YELLOW)
 
 @app.command()
 def download(
