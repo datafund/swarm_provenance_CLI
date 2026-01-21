@@ -1085,3 +1085,543 @@ class TestUploadWithPool:
         assert result.exit_code == 1
         assert "not enabled" in result.stdout.lower()
         assert "without --usePool" in result.stdout
+
+
+# =============================================================================
+# NOTARY COMMANDS TESTS
+# =============================================================================
+
+class TestNotaryInfoCommand:
+    """Tests for notary info command."""
+
+    def test_notary_info_enabled(self, mocker):
+        """Tests notary info when notary is enabled and available."""
+        from swarm_provenance_uploader.models import NotaryInfoResponse
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_notary_info.return_value = NotaryInfoResponse(
+            enabled=True,
+            available=True,
+            address="0x1234567890abcdef1234567890abcdef12345678",
+            message="Notary service is operational",
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(app, ["notary", "info"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Notary Service" in result.stdout
+        assert "Enabled:" in result.stdout and "Yes" in result.stdout
+        assert "Available:" in result.stdout
+        assert "0x1234567890abcdef" in result.stdout
+
+    def test_notary_info_disabled(self, mocker):
+        """Tests notary info when notary is not enabled."""
+        from swarm_provenance_uploader.models import NotaryInfoResponse
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_notary_info.return_value = NotaryInfoResponse(
+            enabled=False,
+            available=False,
+            address=None,
+            message="Notary signing is not enabled on this gateway",
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(app, ["notary", "info"])
+
+        assert result.exit_code == 0
+        assert "Enabled:" in result.stdout and "No" in result.stdout
+
+    def test_notary_info_requires_gateway(self):
+        """Tests notary info fails with local backend."""
+        result = runner.invoke(app, ["--backend", "local", "notary", "info"])
+
+        assert result.exit_code == 1
+        assert "requires gateway backend" in result.stdout
+
+
+class TestNotaryStatusCommand:
+    """Tests for notary status command."""
+
+    def test_notary_status_success(self, mocker):
+        """Tests notary status command."""
+        from swarm_provenance_uploader.models import NotaryStatusResponse
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_notary_status.return_value = NotaryStatusResponse(
+            enabled=True,
+            available=True,
+            address="0xabcdef1234567890abcdef1234567890abcdef12",
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(app, ["notary", "status"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Notary" in result.stdout
+        assert "Available" in result.stdout or "Enabled" in result.stdout
+
+    def test_notary_status_requires_gateway(self):
+        """Tests notary status fails with local backend."""
+        result = runner.invoke(app, ["--backend", "local", "notary", "status"])
+
+        assert result.exit_code == 1
+        assert "requires gateway backend" in result.stdout
+
+
+class TestNotaryVerifyCommand:
+    """Tests for notary verify command."""
+
+    def test_notary_verify_success(self, mocker, tmp_path):
+        """Tests notary verify command with valid signature."""
+        import json
+        from swarm_provenance_uploader.models import NotaryInfoResponse
+
+        # Create a test signed document file
+        signed_doc = {
+            "data": {"content": "test", "value": 123},
+            "signatures": [
+                {
+                    "type": "notary",
+                    "signer": "0x1234567890abcdef1234567890abcdef12345678",
+                    "timestamp": "2026-01-21T16:30:00+00:00",
+                    "data_hash": "abc123",
+                    "signature": "0x" + "ab" * 65,
+                    "signed_fields": ["data"],
+                }
+            ],
+        }
+        test_file = tmp_path / "signed.json"
+        test_file.write_text(json.dumps(signed_doc))
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_notary_info.return_value = NotaryInfoResponse(
+            enabled=True,
+            available=True,
+            address="0x1234567890abcdef1234567890abcdef12345678",
+            message=None,
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        # Mock verify function at the source module level
+        mocker.patch(
+            "swarm_provenance_uploader.core.notary_utils.verify_notary_signature",
+            return_value=(True, None)
+        )
+
+        result = runner.invoke(app, ["notary", "verify", "--file", str(test_file)])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "VERIFIED" in result.stdout or "verified" in result.stdout.lower()
+
+    def test_notary_verify_invalid_signature(self, mocker, tmp_path):
+        """Tests notary verify with invalid signature."""
+        import json
+        from swarm_provenance_uploader.models import NotaryInfoResponse
+
+        signed_doc = {
+            "data": {"content": "test"},
+            "signatures": [
+                {
+                    "type": "notary",
+                    "signer": "0x1234567890abcdef1234567890abcdef12345678",
+                    "timestamp": "2026-01-21T16:30:00+00:00",
+                    "data_hash": "wrong_hash",
+                    "signature": "0x" + "00" * 65,
+                    "signed_fields": ["data"],
+                }
+            ],
+        }
+        test_file = tmp_path / "bad_sig.json"
+        test_file.write_text(json.dumps(signed_doc))
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_notary_info.return_value = NotaryInfoResponse(
+            enabled=True,
+            available=True,
+            address="0x1234567890abcdef1234567890abcdef12345678",
+            message=None,
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.core.notary_utils.verify_notary_signature",
+            return_value=(False, "Data hash mismatch")
+        )
+
+        result = runner.invoke(app, ["notary", "verify", "--file", str(test_file)])
+
+        assert result.exit_code == 1
+        assert "FAILED" in result.stdout or "failed" in result.stdout.lower()
+
+    def test_notary_verify_requires_gateway(self, mocker, tmp_path):
+        """Tests notary verify fails with local backend when no --address provided."""
+        import json
+        signed_doc = {
+            "data": {"content": "test"},
+            "signatures": [
+                {
+                    "type": "notary",
+                    "signer": "0x1234",
+                    "timestamp": "2026-01-21T16:30:00+00:00",
+                    "data_hash": "abc",
+                    "signature": "0x" + "ab" * 65,
+                    "signed_fields": ["data"],
+                }
+            ],
+        }
+        test_file = tmp_path / "test.json"
+        test_file.write_text(json.dumps(signed_doc))
+
+        result = runner.invoke(app, ["--backend", "local", "notary", "verify", "--file", str(test_file)])
+
+        assert result.exit_code == 1
+        # Should fail because no --address and local backend can't fetch
+        assert "address" in result.stdout.lower() or "gateway" in result.stdout.lower()
+
+    def test_notary_verify_file_not_found(self):
+        """Tests notary verify fails with non-existent file."""
+        result = runner.invoke(app, ["notary", "verify", "--file", "/nonexistent/file.json"])
+
+        assert result.exit_code != 0
+
+
+class TestUploadWithSign:
+    """Tests for upload command with --sign option."""
+
+    def test_upload_with_sign_notary(self, mocker, tmp_path):
+        """Tests upload with --sign notary option."""
+        from swarm_provenance_uploader.models import (
+            SignedDocumentResponse,
+            NotaryInfoResponse,
+            StampDetails,
+        )
+
+        test_file = tmp_path / "data.txt"
+        test_file.write_text("test provenance data")
+
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.return_value = DUMMY_STAMP
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=DUMMY_STAMP,
+            usable=True,
+            exists=True,
+            depth=17,
+            amount="1000000000",
+            bucketDepth=16,
+            blockNumber=12345,
+            immutableFlag=False,
+            batchTTL=3600,
+            utilization=0,
+        )
+        mock_client.get_notary_info.return_value = NotaryInfoResponse(
+            enabled=True,
+            available=True,
+            address="0x1234567890abcdef1234567890abcdef12345678",
+            message=None,
+        )
+        mock_client.upload_data_with_signing.return_value = SignedDocumentResponse(
+            reference=DUMMY_SWARM_REF,
+            signed_document={
+                "data": "base64data",
+                "signatures": [
+                    {
+                        "type": "notary",
+                        "signer": "0x1234567890abcdef1234567890abcdef12345678",
+                        "timestamp": "2026-01-21T16:30:00+00:00",
+                        "data_hash": "abc123",
+                        "signature": "0x" + "ab" * 65,
+                        "signed_fields": ["data"],
+                    }
+                ],
+            },
+            message="Document signed successfully",
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(
+            app,
+            ["upload", "--file", str(test_file), "--sign", "notary"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert DUMMY_SWARM_REF in result.stdout
+        assert "signed" in result.stdout.lower() or "Signature" in result.stdout
+        mock_client.upload_data_with_signing.assert_called_once()
+        # Should NOT call regular upload_data
+        mock_client.upload_data.assert_not_called()
+
+    def test_upload_sign_requires_gateway(self, tmp_path):
+        """Tests --sign option fails with local backend."""
+        test_file = tmp_path / "data.txt"
+        test_file.write_text("test data")
+
+        result = runner.invoke(
+            app,
+            ["--backend", "local", "upload", "--file", str(test_file), "--sign", "notary"]
+        )
+
+        assert result.exit_code == 1
+        assert "requires gateway backend" in result.stdout
+
+    def test_upload_sign_notary_not_available(self, mocker, tmp_path):
+        """Tests --sign notary fails when notary not available."""
+        from swarm_provenance_uploader.models import StampDetails
+        from swarm_provenance_uploader.exceptions import NotaryNotEnabledError
+
+        test_file = tmp_path / "data.txt"
+        test_file.write_text("test data")
+
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.return_value = DUMMY_STAMP
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=DUMMY_STAMP,
+            usable=True,
+            exists=True,
+            depth=17,
+            amount="1000000000",
+            bucketDepth=16,
+            blockNumber=12345,
+            immutableFlag=False,
+            batchTTL=3600,
+            utilization=0,
+        )
+        # upload_data_with_signing raises NotaryNotEnabledError
+        mock_client.upload_data_with_signing.side_effect = NotaryNotEnabledError("Notary not enabled")
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(
+            app,
+            ["upload", "--file", str(test_file), "--sign", "notary"]
+        )
+
+        assert result.exit_code == 1
+        assert "not enabled" in result.stdout.lower()
+
+
+class TestDownloadWithVerify:
+    """Tests for download command with --verify flag."""
+
+    def test_download_with_verify_success(self, mocker, tmp_path):
+        """Tests download with --verify flag and valid signature."""
+        import json
+        import base64
+        import hashlib
+        from swarm_provenance_uploader.models import NotaryInfoResponse
+
+        original_data = b"test provenance data"
+        b64_data = base64.b64encode(original_data).decode()
+        content_hash = hashlib.sha256(original_data).hexdigest()
+
+        metadata = {
+            "data": b64_data,
+            "content_hash": content_hash,
+            "stamp_id": DUMMY_STAMP,
+            "provenance_standard": "TEST-V1",
+            "encryption": None,
+            "signatures": [
+                {
+                    "type": "notary",
+                    "signer": "0x1234567890abcdef1234567890abcdef12345678",
+                    "timestamp": "2026-01-21T16:30:00+00:00",
+                    "data_hash": "abc123",
+                    "signature": "0x" + "ab" * 65,
+                    "signed_fields": ["data"],
+                }
+            ],
+        }
+
+        mock_client = mocker.MagicMock()
+        mock_client.download_data.return_value = json.dumps(metadata).encode()
+        mock_client.get_notary_info.return_value = NotaryInfoResponse(
+            enabled=True,
+            available=True,
+            address="0x1234567890abcdef1234567890abcdef12345678",
+            message=None,
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.core.notary_utils.verify_notary_signature",
+            return_value=(True, None)
+        )
+
+        result = runner.invoke(
+            app,
+            ["download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--verify"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        # Looking for "Verified" in the signature verification output
+        assert "verified" in result.stdout.lower() or "Verified" in result.stdout
+
+    def test_download_verify_fails_invalid_signature(self, mocker, tmp_path):
+        """Tests download with --verify fails when signature is invalid."""
+        import json
+        import base64
+        import hashlib
+        from swarm_provenance_uploader.models import NotaryInfoResponse
+
+        original_data = b"test provenance data"
+        b64_data = base64.b64encode(original_data).decode()
+        content_hash = hashlib.sha256(original_data).hexdigest()
+
+        metadata = {
+            "data": b64_data,
+            "content_hash": content_hash,
+            "stamp_id": DUMMY_STAMP,
+            "provenance_standard": "TEST-V1",
+            "signatures": [
+                {
+                    "type": "notary",
+                    "signer": "0x1234567890abcdef1234567890abcdef12345678",
+                    "timestamp": "2026-01-21T16:30:00+00:00",
+                    "data_hash": "wrong_hash",
+                    "signature": "0x" + "00" * 65,
+                    "signed_fields": ["data"],
+                }
+            ],
+        }
+
+        mock_client = mocker.MagicMock()
+        mock_client.download_data.return_value = json.dumps(metadata).encode()
+        mock_client.get_notary_info.return_value = NotaryInfoResponse(
+            enabled=True,
+            available=True,
+            address="0x1234567890abcdef1234567890abcdef12345678",
+            message=None,
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.core.notary_utils.verify_notary_signature",
+            return_value=(False, "Signature recovery mismatch")
+        )
+
+        result = runner.invoke(
+            app,
+            ["download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--verify"]
+        )
+
+        # Download should still succeed (files downloaded) but with a warning about failed signature
+        # The exit code is 0 because the download itself succeeded
+        assert result.exit_code == 0
+        assert "FAILED" in result.stdout or "failed" in result.stdout.lower()
+
+    def test_download_verify_no_signature_found(self, mocker, tmp_path):
+        """Tests download with --verify warns when no signature found."""
+        import json
+        import base64
+        import hashlib
+
+        original_data = b"test provenance data"
+        b64_data = base64.b64encode(original_data).decode()
+        content_hash = hashlib.sha256(original_data).hexdigest()
+
+        # Metadata without signatures
+        metadata = {
+            "data": b64_data,
+            "content_hash": content_hash,
+            "stamp_id": DUMMY_STAMP,
+            "provenance_standard": "TEST-V1",
+        }
+
+        mock_client = mocker.MagicMock()
+        mock_client.download_data.return_value = json.dumps(metadata).encode()
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        # No need to patch has_notary_signature - the metadata doesn't have signatures
+        # so the actual function will correctly return False
+
+        result = runner.invoke(
+            app,
+            ["download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--verify"]
+        )
+
+        # Should still succeed (download works) but show message about no signatures
+        assert result.exit_code == 0
+        assert "No notary signatures" in result.stdout or "no notary" in result.stdout.lower()
+
+    def test_download_verify_local_backend_warns(self, mocker, tmp_path):
+        """Tests --verify with local backend still downloads but can't verify."""
+        import json
+        import base64
+        import hashlib
+
+        original_data = b"test provenance data"
+        b64_data = base64.b64encode(original_data).decode()
+        content_hash = hashlib.sha256(original_data).hexdigest()
+
+        # Metadata with signature
+        metadata = {
+            "data": b64_data,
+            "content_hash": content_hash,
+            "stamp_id": DUMMY_STAMP,
+            "provenance_standard": "TEST-V1",
+            "signatures": [
+                {
+                    "type": "notary",
+                    "signer": "0x1234567890abcdef1234567890abcdef12345678",
+                    "timestamp": "2026-01-21T16:30:00+00:00",
+                    "data_hash": "abc123",
+                    "signature": "0x" + "ab" * 65,
+                    "signed_fields": ["data"],
+                }
+            ],
+        }
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.swarm_client.download_data_from_swarm",
+            return_value=json.dumps(metadata).encode()
+        )
+
+        result = runner.invoke(
+            app,
+            ["--backend", "local", "download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--verify"]
+        )
+
+        # Download should still succeed
+        assert result.exit_code == 0
+        # But should warn about not being able to verify
+        assert "Cannot verify" in result.stdout or "No notary address" in result.stdout
