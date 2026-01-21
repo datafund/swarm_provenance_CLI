@@ -22,6 +22,9 @@ swarm-prov-upload health
 # Upload data (purchases stamp with 25 hour validity)
 swarm-prov-upload upload --file /path/to/data.txt
 
+# Upload using pooled stamp (faster, ~5s vs >1min)
+swarm-prov-upload upload --file /path/to/data.txt --usePool
+
 # Upload with custom duration (hours)
 swarm-prov-upload upload --file /path/to/data.txt --duration 48
 
@@ -209,6 +212,9 @@ swarm-prov-upload upload --file /path/to/data.txt --size large
 # Upload with existing stamp (cost savings, faster)
 swarm-prov-upload upload --file /path/to/data.txt --stamp-id <existing_stamp_id>
 
+# Upload using pooled stamp (instant ~5s vs >1min for purchase)
+swarm-prov-upload upload --file /path/to/data.txt --usePool
+
 # Download and verify data
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads --verbose
 ```
@@ -220,6 +226,7 @@ swarm-prov-upload download <swarm_hash> --output-dir ./downloads --verbose
 | `--size` | Size preset: `small`, `medium`, `large` (gateway only) |
 | `--depth` | Technical depth parameter (16-32) |
 | `--stamp-id`, `-s` | Use existing stamp (skip purchase) |
+| `--usePool` | Acquire stamp from pool instead of purchasing (gateway only, faster) |
 | `--amount` | Legacy: PLUR amount (local backend) |
 
 ### Stamp Management (Gateway only)
@@ -233,7 +240,118 @@ swarm-prov-upload stamps info <stamp_id>
 
 # Extend stamp TTL
 swarm-prov-upload stamps extend <stamp_id> --amount 1000000
+
+# Check stamp health (can it be used for uploads?)
+swarm-prov-upload stamps check <stamp_id>
+
+# View stamp pool status
+swarm-prov-upload stamps pool-status
 ```
+
+#### Stamp Health Check
+
+The `stamps check` command performs a detailed health check on a stamp:
+
+```bash
+swarm-prov-upload stamps check <stamp_id>
+```
+
+**Output example:**
+```
+Stamp Health Check:
+--------------------------------------------------
+  Stamp ID:   13be53a5...fc0d3c80
+  Can upload: Yes
+
+  Warnings:
+    [LOW_TTL] TTL is below 24 hours
+```
+
+**Possible issues:**
+
+| Code | Type | Meaning |
+|------|------|---------|
+| `EXPIRED` | Error | Stamp has expired, cannot upload |
+| `NOT_USABLE` | Error | Stamp exists but is not usable |
+| `NOT_FOUND` | Error | Stamp does not exist |
+| `LOW_TTL` | Warning | TTL below 24 hours, consider extending |
+| `HIGH_UTILIZATION` | Warning | Stamp is nearly full |
+
+Use `-v` (verbose) for detailed metrics including TTL, utilization percentage, and expiration date.
+
+### Stamp Pool (Gateway only)
+
+#### What is a Stamp Pool?
+
+Normally, purchasing a postage stamp on Swarm takes >1 minute because the transaction must be confirmed on-chain and the stamp must sync across the network. The gateway maintains a **pool of pre-purchased stamps** that can be acquired instantly (~5 seconds).
+
+#### When to Use `--usePool`
+
+| Scenario | Recommendation |
+|----------|----------------|
+| Quick uploads, testing, demos | Use `--usePool` |
+| Production with predictable volume | Use `--usePool` |
+| Pool is empty (check with `stamps pool-status`) | Use regular purchase (omit `--usePool`) |
+| Need specific stamp configuration | Use regular purchase with `--duration`/`--depth` |
+
+#### Size Presets
+
+Stamps come in three sizes based on storage capacity:
+
+| Size | Depth | Typical Use |
+|------|-------|-------------|
+| `small` (default) | 17 | Small files (<1MB) |
+| `medium` | 20 | Medium files (1-100MB) |
+| `large` | 22 | Large files (>100MB) |
+
+#### Usage Examples
+
+```bash
+# Upload using a pooled stamp (uses 'small' size by default)
+swarm-prov-upload upload --file data.txt --usePool
+
+# Upload with specific size from pool
+swarm-prov-upload upload --file data.txt --usePool --size medium
+
+# Check pool availability before uploading
+swarm-prov-upload stamps pool-status
+```
+
+#### Pool Status Output
+
+```
+Stamp Pool Status:
+--------------------------------------------------
+  Status:       Enabled
+  Total stamps: 3
+
+  Availability by size:
+    small    (depth 17): 1 available / 1 total (target: 1)
+    medium   (depth 20): 2 available / 2 total (target: 1)
+```
+
+- **Enabled/Disabled**: Whether the pool feature is active on this gateway
+- **Available**: Stamps ready for immediate acquisition
+- **Total**: All stamps in pool (including recently acquired ones being replenished)
+- **Target**: The gateway's target reserve level for each size
+
+#### Error Handling
+
+If the pool is empty or unavailable, the CLI provides helpful guidance:
+
+```
+ERROR: No stamps available in pool for requested size/depth.
+Try again later, use a different size, or use regular purchase (without --usePool).
+```
+
+**Fallback behavior**: If your requested size isn't available but a larger size is, the pool will automatically substitute a larger stamp and notify you.
+
+#### Benefits
+
+- **Speed**: ~5 seconds vs >1 minute for regular purchase
+- **No waiting**: Pooled stamps are already usable (no sync delay)
+- **Automatic fallback**: Larger stamps substituted if exact size unavailable
+- **Same pricing**: x402 costs are identical to regular purchases
 
 ### Information Commands
 
@@ -269,10 +387,11 @@ Use `swarm-prov-upload --help` for all options.
 │  │ --x402          │  ├──────────────────┤  │                                 │ │
 │  │ --auto-pay      │  │ STAMPS COMMANDS  │  ├─────────────────────────────────┤ │
 │  │ --max-pay       │  │ (gateway only)   │  │ x402 COMMANDS (optional)        │ │
-│  │                 │  │ stamps list      │  │ x402 status                     │ │
-│  │ Built with:     │  │ stamps info      │  │ x402 balance                    │ │
-│  │ • Typer CLI     │  │ stamps extend    │  │ x402 info                       │ │
-│  │ • Rich output   │  │                  │  │                                 │ │
+│  │ --usePool       │  │ stamps list      │  │ x402 status                     │ │
+│  │                 │  │ stamps info      │  │ x402 balance                    │ │
+│  │ Built with:     │  │ stamps extend    │  │ x402 info                       │ │
+│  │ • Typer CLI     │  │ stamps check     │  │                                 │ │
+│  │ • Rich output   │  │ stamps pool-stat │  │                                 │ │
 │  └─────────────────┘  └──────────────────┘  └─────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                         │

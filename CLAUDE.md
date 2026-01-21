@@ -117,6 +117,9 @@ swarm-prov-upload upload --file /path/to/data.txt --size medium
 # Upload with existing stamp (skips purchase)
 swarm-prov-upload upload --file /path/to/data.txt --stamp-id <existing_stamp_id>
 
+# Upload using pooled stamp (faster, ~5s vs >1min)
+swarm-prov-upload upload --file /path/to/data.txt --usePool
+
 # Upload with local Bee backend (uses legacy amount)
 swarm-prov-upload --backend local upload --file /path/to/data.txt --amount 1000000000
 
@@ -127,6 +130,8 @@ swarm-prov-upload download <swarm_hash> --output-dir ./downloads
 swarm-prov-upload stamps list
 swarm-prov-upload stamps info <stamp_id>
 swarm-prov-upload stamps extend <stamp_id> --amount 1000000
+swarm-prov-upload stamps check <stamp_id>     # Health check
+swarm-prov-upload stamps pool-status          # Pool availability
 
 # Wallet info (gateway only)
 swarm-prov-upload wallet

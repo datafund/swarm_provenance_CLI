@@ -809,3 +809,279 @@ class TestX402StatusDetails:
         assert result.exit_code == 0
         assert "Enabled" in result.stdout
         assert "10.00" in result.stdout or "$10.00" in result.stdout
+
+
+# =============================================================================
+# POOL TESTS
+# =============================================================================
+
+class TestStampsPoolCommands:
+    """Tests for stamps pool commands."""
+
+    SAMPLE_POOL_STATUS = {
+        "enabled": True,
+        "reserve_config": {"17": 5, "20": 3, "22": 2},
+        "current_levels": {"17": 4, "20": 2, "22": 1},
+        "available_stamps": {
+            "17": ["a" * 64, "b" * 64],
+            "20": ["c" * 64],
+            "22": [],
+        },
+        "total_stamps": 7,
+        "low_reserve_warning": False,
+        "last_check": "2024-01-15T10:00:00Z",
+        "next_check": "2024-01-15T11:00:00Z",
+        "errors": [],
+    }
+
+    def test_pool_status_success(self, mocker):
+        """Tests stamps pool-status command."""
+        from swarm_provenance_uploader.models import PoolStatusResponse
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_pool_status.return_value = PoolStatusResponse(**self.SAMPLE_POOL_STATUS)
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(app, ["stamps", "pool-status"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Stamp Pool Status" in result.stdout
+        assert "Enabled" in result.stdout
+        assert "Total stamps: 7" in result.stdout
+
+    def test_pool_status_requires_gateway(self):
+        """Tests pool-status fails with local backend."""
+        result = runner.invoke(app, ["--backend", "local", "stamps", "pool-status"])
+
+        assert result.exit_code == 1
+        assert "requires gateway backend" in result.stdout
+
+    def test_pool_status_not_enabled(self, mocker):
+        """Tests stamps pool-status when pool not enabled."""
+        from swarm_provenance_uploader.exceptions import PoolNotEnabledError
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_pool_status.side_effect = PoolNotEnabledError("Pool not enabled")
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(app, ["stamps", "pool-status"])
+
+        assert result.exit_code == 0  # Not a hard error, just informational
+        assert "not enabled" in result.stdout.lower()
+
+    def test_stamps_check_success(self, mocker):
+        """Tests stamps check command."""
+        from swarm_provenance_uploader.models import StampHealthCheckResponse, StampHealthIssue
+
+        mock_client = mocker.MagicMock()
+        mock_client.check_stamp_health.return_value = StampHealthCheckResponse(
+            stamp_id="a" * 64,
+            can_upload=True,
+            errors=[],
+            warnings=[StampHealthIssue(code="LOW_TTL", message="TTL is below 24 hours")],
+            status={"ttl": 43200},
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(app, ["stamps", "check", "a" * 64])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Health Check" in result.stdout
+        assert "Can upload: Yes" in result.stdout
+        assert "LOW_TTL" in result.stdout
+
+    def test_stamps_check_not_usable(self, mocker):
+        """Tests stamps check when stamp cannot upload."""
+        from swarm_provenance_uploader.models import StampHealthCheckResponse, StampHealthIssue
+
+        mock_client = mocker.MagicMock()
+        mock_client.check_stamp_health.return_value = StampHealthCheckResponse(
+            stamp_id="a" * 64,
+            can_upload=False,
+            errors=[StampHealthIssue(code="EXPIRED", message="Stamp has expired")],
+            warnings=[],
+            status=None,
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(app, ["stamps", "check", "a" * 64])
+
+        assert result.exit_code == 1
+        assert "Can upload: No" in result.stdout
+        assert "EXPIRED" in result.stdout
+
+    def test_stamps_check_requires_gateway(self):
+        """Tests stamps check fails with local backend."""
+        result = runner.invoke(app, ["--backend", "local", "stamps", "check", "a" * 64])
+
+        assert result.exit_code == 1
+        assert "requires gateway backend" in result.stdout
+
+
+class TestUploadWithPool:
+    """Tests for upload command with --usePool flag."""
+
+    def test_usepool_requires_gateway(self, mocker, tmp_path):
+        """Tests --usePool fails with local backend."""
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("test content")
+
+        result = runner.invoke(
+            app,
+            ["--backend", "local", "upload", "--file", str(test_file), "--usePool"]
+        )
+
+        assert result.exit_code == 1
+        assert "requires gateway backend" in result.stdout
+
+    def test_usepool_acquires_from_pool(self, mocker, tmp_path):
+        """Tests --usePool acquires stamp from pool instead of purchasing."""
+        from swarm_provenance_uploader.models import AcquireStampResponse
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("test content")
+
+        mock_client = mocker.MagicMock()
+        # Pool availability check
+        mock_client.get_pool_available_count.return_value = 2
+
+        # Pool acquisition
+        mock_client.acquire_stamp_from_pool.return_value = AcquireStampResponse(
+            success=True,
+            batch_id="a" * 64,
+            depth=17,
+            size_name="small",
+            message="Stamp acquired successfully",
+            fallback_used=False,
+        )
+
+        # Stamp usability check (mark as usable immediately)
+        mock_stamp = mocker.MagicMock()
+        mock_stamp.exists = True
+        mock_stamp.usable = True
+        mock_stamp.batchTTL = 86400
+        mock_client.get_stamp.return_value = mock_stamp
+
+        # Upload success
+        mock_client.upload_data.return_value = "swarmref" * 8
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli._get_gateway_client_with_x402",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(
+            app,
+            ["upload", "--file", str(test_file), "--usePool"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Acquiring stamp from pool" in result.stdout
+        assert "acquired from pool" in result.stdout.lower()
+        # Should NOT have called purchase_stamp
+        mock_client.purchase_stamp.assert_not_called()
+        # Should have called acquire_stamp_from_pool
+        mock_client.acquire_stamp_from_pool.assert_called_once()
+
+    def test_usepool_shows_fallback_message(self, mocker, tmp_path):
+        """Tests --usePool shows fallback message when larger stamp used."""
+        from swarm_provenance_uploader.models import AcquireStampResponse
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("test content")
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_pool_available_count.return_value = 1
+
+        mock_client.acquire_stamp_from_pool.return_value = AcquireStampResponse(
+            success=True,
+            batch_id="a" * 64,
+            depth=20,
+            size_name="medium",
+            message="Larger stamp substituted",
+            fallback_used=True,
+        )
+
+        mock_stamp = mocker.MagicMock()
+        mock_stamp.usable = True
+        mock_stamp.batchTTL = 86400
+        mock_client.get_stamp.return_value = mock_stamp
+
+        mock_client.upload_data.return_value = "swarmref" * 8
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli._get_gateway_client_with_x402",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(
+            app,
+            ["upload", "--file", str(test_file), "--usePool", "--size", "small"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "fallback" in result.stdout.lower()
+
+    def test_usepool_pool_empty_error(self, mocker, tmp_path):
+        """Tests --usePool fails gracefully when pool is empty."""
+        from swarm_provenance_uploader.exceptions import PoolEmptyError
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("test content")
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_pool_available_count.return_value = 0
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli._get_gateway_client_with_x402",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(
+            app,
+            ["upload", "--file", str(test_file), "--usePool"]
+        )
+
+        assert result.exit_code == 1
+        assert "No stamps available" in result.stdout
+        assert "retry later" in result.stdout.lower() or "without --usePool" in result.stdout
+
+    def test_usepool_pool_not_enabled(self, mocker, tmp_path):
+        """Tests --usePool fails when pool not enabled."""
+        from swarm_provenance_uploader.exceptions import PoolNotEnabledError
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("test content")
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_pool_available_count.side_effect = PoolNotEnabledError("Pool not enabled")
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli._get_gateway_client_with_x402",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(
+            app,
+            ["upload", "--file", str(test_file), "--usePool"]
+        )
+
+        assert result.exit_code == 1
+        assert "not enabled" in result.stdout.lower()
+        assert "without --usePool" in result.stdout

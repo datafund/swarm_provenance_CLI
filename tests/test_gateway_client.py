@@ -648,3 +648,263 @@ class TestGatewayClientX402:
 
         with pytest.raises(PaymentRequiredError):
             client.purchase_stamp()
+
+
+class TestGatewayClientPool:
+    """Tests for stamp pool functionality."""
+
+    SAMPLE_POOL_STATUS = {
+        "enabled": True,
+        "reserve_config": {"17": 5, "20": 3, "22": 2},
+        "current_levels": {"17": 4, "20": 2, "22": 1},
+        "available_stamps": {
+            "17": [DUMMY_STAMP, "b" * 64],
+            "20": ["c" * 64],
+            "22": [],
+        },
+        "total_stamps": 7,
+        "low_reserve_warning": False,
+        "last_check": "2024-01-15T10:00:00Z",
+        "next_check": "2024-01-15T11:00:00Z",
+        "errors": [],
+    }
+
+    SAMPLE_ACQUIRE_RESPONSE = {
+        "success": True,
+        "batch_id": DUMMY_STAMP,
+        "depth": 17,
+        "size_name": "small",
+        "message": "Stamp acquired successfully",
+        "fallback_used": False,
+    }
+
+    SAMPLE_HEALTH_CHECK = {
+        "stamp_id": DUMMY_STAMP,
+        "can_upload": True,
+        "errors": [],
+        "warnings": [
+            {
+                "code": "LOW_TTL",
+                "message": "TTL is below 24 hours",
+                "details": {"ttl_hours": 12},
+            }
+        ],
+        "status": {"ttl": 43200, "depth": 17, "utilization": 25},
+    }
+
+    def test_get_pool_status_success(self, requests_mock):
+        """Tests getting pool status."""
+        requests_mock.get(
+            "https://test.gateway.io/api/v1/pool/status",
+            json=self.SAMPLE_POOL_STATUS,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        status = client.get_pool_status()
+
+        assert status.enabled is True
+        assert status.total_stamps == 7
+        assert status.low_reserve_warning is False
+        assert len(status.available_stamps["17"]) == 2
+        assert status.reserve_config["17"] == 5
+
+    def test_get_pool_status_disabled(self, requests_mock):
+        """Tests getting pool status when pool is disabled."""
+        from swarm_provenance_uploader.exceptions import PoolNotEnabledError
+
+        requests_mock.get(
+            "https://test.gateway.io/api/v1/pool/status",
+            status_code=404,
+            json={"error": "Pool not enabled"},
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+
+        with pytest.raises(PoolNotEnabledError):
+            client.get_pool_status()
+
+    def test_get_pool_available_count_by_size(self, requests_mock):
+        """Tests getting available stamp count by size."""
+        requests_mock.get(
+            "https://test.gateway.io/api/v1/pool/status",
+            json=self.SAMPLE_POOL_STATUS,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        count = client.get_pool_available_count(size="small")
+
+        assert count == 2  # From SAMPLE_POOL_STATUS available_stamps["17"]
+
+    def test_get_pool_available_count_by_depth(self, requests_mock):
+        """Tests getting available stamp count by depth."""
+        requests_mock.get(
+            "https://test.gateway.io/api/v1/pool/status",
+            json=self.SAMPLE_POOL_STATUS,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        count = client.get_pool_available_count(depth=20)
+
+        assert count == 1  # From SAMPLE_POOL_STATUS available_stamps["20"]
+
+    def test_get_pool_available_count_default(self, requests_mock):
+        """Tests getting available stamp count with default size."""
+        requests_mock.get(
+            "https://test.gateway.io/api/v1/pool/status",
+            json=self.SAMPLE_POOL_STATUS,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        count = client.get_pool_available_count()
+
+        assert count == 2  # Defaults to small (depth 17)
+
+    def test_acquire_stamp_from_pool_success(self, requests_mock):
+        """Tests acquiring stamp from pool."""
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/pool/acquire",
+            json=self.SAMPLE_ACQUIRE_RESPONSE,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        result = client.acquire_stamp_from_pool(size="small")
+
+        assert result.success is True
+        assert result.batch_id == DUMMY_STAMP
+        assert result.depth == 17
+        assert result.size_name == "small"
+        assert result.fallback_used is False
+
+    def test_acquire_stamp_from_pool_with_fallback(self, requests_mock):
+        """Tests acquiring stamp from pool with fallback."""
+        fallback_response = {
+            "success": True,
+            "batch_id": DUMMY_STAMP,
+            "depth": 20,
+            "size_name": "medium",
+            "message": "Larger stamp substituted",
+            "fallback_used": True,
+        }
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/pool/acquire",
+            json=fallback_response,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        result = client.acquire_stamp_from_pool(size="small")
+
+        assert result.success is True
+        assert result.fallback_used is True
+        assert result.size_name == "medium"
+
+    def test_acquire_stamp_acquisition_fails(self, requests_mock):
+        """Tests handling acquisition failure."""
+        from swarm_provenance_uploader.exceptions import PoolAcquisitionError
+
+        # Acquisition fails
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/pool/acquire",
+            json={
+                "success": False,
+                "batch_id": None,
+                "message": "No stamps available",
+                "fallback_used": False,
+            },
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+
+        with pytest.raises(PoolAcquisitionError):
+            client.acquire_stamp_from_pool(size="small")
+
+    def test_list_pool_stamps(self, requests_mock):
+        """Tests listing stamps in the pool."""
+        stamps_response = {
+            "stamps": [
+                {
+                    "batch_id": DUMMY_STAMP,
+                    "depth": 17,
+                    "size_name": "small",
+                    "created_at": "2024-01-15T08:00:00Z",
+                    "ttl_at_creation": 86400,
+                },
+                {
+                    "batch_id": "b" * 64,
+                    "depth": 20,
+                    "size_name": "medium",
+                    "created_at": "2024-01-15T09:00:00Z",
+                    "ttl_at_creation": 172800,
+                },
+            ],
+            "count": 2,
+        }
+        requests_mock.get(
+            "https://test.gateway.io/api/v1/pool/stamps",
+            json=stamps_response,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        stamps = client.list_pool_stamps()
+
+        assert len(stamps) == 2
+        assert stamps[0].batch_id == DUMMY_STAMP
+        assert stamps[0].depth == 17
+        assert stamps[1].size_name == "medium"
+
+    def test_check_stamp_health_success(self, requests_mock):
+        """Tests stamp health check."""
+        requests_mock.get(
+            f"https://test.gateway.io/api/v1/stamps/{DUMMY_STAMP}/check",
+            json=self.SAMPLE_HEALTH_CHECK,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        health = client.check_stamp_health(DUMMY_STAMP)
+
+        assert health.stamp_id == DUMMY_STAMP
+        assert health.can_upload is True
+        assert len(health.errors) == 0
+        assert len(health.warnings) == 1
+        assert health.warnings[0].code == "LOW_TTL"
+
+    def test_check_stamp_health_not_usable(self, requests_mock):
+        """Tests stamp health check when stamp is not usable."""
+        unhealthy_response = {
+            "stamp_id": DUMMY_STAMP,
+            "can_upload": False,
+            "errors": [
+                {
+                    "code": "EXPIRED",
+                    "message": "Stamp has expired",
+                    "details": {"expired_at": "2024-01-10T00:00:00Z"},
+                }
+            ],
+            "warnings": [],
+            "status": None,
+        }
+        requests_mock.get(
+            f"https://test.gateway.io/api/v1/stamps/{DUMMY_STAMP}/check",
+            json=unhealthy_response,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        health = client.check_stamp_health(DUMMY_STAMP)
+
+        assert health.can_upload is False
+        assert len(health.errors) == 1
+        assert health.errors[0].code == "EXPIRED"
+
+    def test_check_stamp_health_not_found(self, requests_mock):
+        """Tests stamp health check when stamp not found."""
+        from swarm_provenance_uploader.exceptions import StampNotFoundError
+
+        requests_mock.get(
+            f"https://test.gateway.io/api/v1/stamps/{DUMMY_STAMP}/check",
+            status_code=404,
+            json={"error": "Stamp not found"},
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+
+        with pytest.raises(StampNotFoundError):
+            client.check_stamp_health(DUMMY_STAMP)

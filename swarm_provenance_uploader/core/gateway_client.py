@@ -11,10 +11,17 @@ import base64
 import json
 import requests
 import os
-from typing import Callable, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 from urllib.parse import urljoin
 
-from ..exceptions import PaymentRequiredError, PaymentTransactionFailedError
+from ..exceptions import (
+    PaymentRequiredError,
+    PaymentTransactionFailedError,
+    PoolNotEnabledError,
+    PoolEmptyError,
+    PoolAcquisitionError,
+    StampNotFoundError,
+)
 from ..models import (
     StampDetails,
     StampListResponse,
@@ -24,6 +31,10 @@ from ..models import (
     WalletResponse,
     ChequebookResponse,
     X402PaymentResponse,
+    PoolStatusResponse,
+    AcquireStampResponse,
+    PoolStampInfo,
+    StampHealthCheckResponse,
 )
 
 
@@ -611,3 +622,243 @@ class GatewayClient:
             if verbose:
                 print(f"ERROR: Get chequebook failed: {e}")
             raise ConnectionError(f"Failed to get chequebook info: {e}") from e
+
+    # --- Stamp Pool ---
+
+    # Mapping from size name to depth
+    SIZE_TO_DEPTH = {
+        "small": 17,
+        "medium": 20,
+        "large": 22,
+    }
+
+    def get_pool_status(self, verbose: bool = False) -> PoolStatusResponse:
+        """
+        Get current stamp pool status.
+
+        Returns:
+            PoolStatusResponse with pool state and available stamps.
+
+        Raises:
+            PoolNotEnabledError: If pool is not enabled on this gateway
+        """
+        url = self._make_url("/api/v1/pool/status")
+        if verbose:
+            print(f"--- DEBUG: Get Pool Status ---")
+            print(f"URL: GET {url}")
+
+        try:
+            response = requests.get(url, headers=self._get_headers(), timeout=10)
+            if verbose:
+                print(f"DEBUG: Pool status response: {response.status_code}")
+
+            if response.status_code == 404:
+                raise PoolNotEnabledError("Stamp pool is not enabled on this gateway.")
+
+            response.raise_for_status()
+            data = response.json()
+            return PoolStatusResponse.model_validate(data)
+        except PoolNotEnabledError:
+            raise
+        except requests.exceptions.RequestException as e:
+            if verbose:
+                print(f"ERROR: Get pool status failed: {e}")
+            raise ConnectionError(f"Failed to get pool status: {e}") from e
+
+    def get_pool_available_count(
+        self,
+        size: Optional[str] = None,
+        depth: Optional[int] = None,
+        verbose: bool = False,
+    ) -> int:
+        """
+        Get count of available stamps in pool for given size/depth.
+
+        Args:
+            size: Size preset ('small', 'medium', 'large')
+            depth: Specific depth (overrides size)
+            verbose: Enable debug output
+
+        Returns:
+            Number of available stamps matching the criteria.
+
+        Raises:
+            PoolNotEnabledError: If pool is not enabled on this gateway
+        """
+        status = self.get_pool_status(verbose=verbose)
+
+        if not status.enabled:
+            raise PoolNotEnabledError("Stamp pool is not enabled on this gateway.")
+
+        # Determine target depth
+        target_depth = depth
+        if target_depth is None and size:
+            target_depth = self.SIZE_TO_DEPTH.get(size.lower())
+        if target_depth is None:
+            # Default to small if neither specified
+            target_depth = self.SIZE_TO_DEPTH["small"]
+
+        # Count stamps for specific depth
+        depth_str = str(target_depth)
+        return len(status.available_stamps.get(depth_str, []))
+
+    def list_pool_stamps(self, verbose: bool = False) -> List[PoolStampInfo]:
+        """
+        List all stamps currently available in the pool.
+
+        Returns:
+            List of PoolStampInfo objects.
+
+        Raises:
+            PoolNotEnabledError: If pool is not enabled on this gateway
+        """
+        url = self._make_url("/api/v1/pool/stamps")
+        if verbose:
+            print(f"--- DEBUG: List Pool Stamps ---")
+            print(f"URL: GET {url}")
+
+        try:
+            response = requests.get(url, headers=self._get_headers(), timeout=10)
+            if verbose:
+                print(f"DEBUG: List pool stamps response: {response.status_code}")
+
+            if response.status_code == 404:
+                raise PoolNotEnabledError("Stamp pool is not enabled on this gateway.")
+
+            response.raise_for_status()
+            data = response.json()
+            # Response contains {"stamps": [...], "count": n}
+            stamps_data = data.get("stamps", data)
+            if isinstance(stamps_data, list):
+                return [PoolStampInfo.model_validate(item) for item in stamps_data]
+            return []
+        except PoolNotEnabledError:
+            raise
+        except requests.exceptions.RequestException as e:
+            if verbose:
+                print(f"ERROR: List pool stamps failed: {e}")
+            raise ConnectionError(f"Failed to list pool stamps: {e}") from e
+
+    def acquire_stamp_from_pool(
+        self,
+        size: Optional[str] = None,
+        depth: Optional[int] = None,
+        verbose: bool = False,
+    ) -> AcquireStampResponse:
+        """
+        Acquire a stamp from the pool for immediate use.
+
+        This is much faster than purchasing a new stamp (~5 seconds vs >1 minute).
+
+        Args:
+            size: Preferred size ('small', 'medium', 'large')
+            depth: Specific depth (overrides size)
+            verbose: Enable debug output
+
+        Returns:
+            AcquireStampResponse with batch_id, depth, size_name, fallback_used.
+
+        Raises:
+            PoolNotEnabledError: If pool is not enabled on this gateway
+            PoolEmptyError: If no stamps available for requested size/depth
+            PoolAcquisitionError: If acquisition fails despite availability
+        """
+        size_desc = size or "default"
+        if depth:
+            size_desc = f"depth {depth}"
+
+        # Attempt acquisition
+        url = self._make_url("/api/v1/pool/acquire")
+        payload = {}
+        if size:
+            payload["size"] = size
+        if depth:
+            payload["depth"] = depth
+
+        if verbose:
+            print(f"--- DEBUG: Acquire Stamp from Pool ---")
+            print(f"URL: POST {url}")
+            print(f"Payload: {payload}")
+
+        try:
+            response = self._make_paid_request(
+                "POST",
+                url,
+                json=payload,
+                headers=self._get_headers(),
+                timeout=30,
+                verbose=verbose,
+            )
+            if verbose:
+                print(f"DEBUG: Acquire response: {response.status_code}")
+            response.raise_for_status()
+            data = response.json()
+            result = AcquireStampResponse.model_validate(data)
+
+            if not result.success:
+                raise PoolAcquisitionError(
+                    f"Failed to acquire stamp from pool: {result.message}. "
+                    "Retry may succeed.",
+                    available_count=0,
+                )
+
+            if verbose:
+                print(f"DEBUG: Acquired stamp: {result.batch_id} (size={result.size_name}, depth={result.depth})")
+                if result.fallback_used:
+                    print(f"DEBUG: Note: A larger stamp was used as fallback")
+
+            return result
+
+        except (PoolNotEnabledError, PoolEmptyError, PoolAcquisitionError):
+            raise
+        except requests.exceptions.RequestException as e:
+            if verbose:
+                print(f"ERROR: Acquire stamp failed: {e}")
+            raise PoolAcquisitionError(
+                f"Failed to acquire stamp from pool: {e}",
+                available_count=0,
+            ) from e
+
+    def check_stamp_health(
+        self,
+        stamp_id: str,
+        verbose: bool = False,
+    ) -> StampHealthCheckResponse:
+        """
+        Perform health check on a specific stamp.
+
+        Checks if the stamp can be used for uploads and reports
+        any errors or warnings.
+
+        Args:
+            stamp_id: The stamp batch ID to check
+            verbose: Enable debug output
+
+        Returns:
+            StampHealthCheckResponse with health status.
+
+        Raises:
+            StampNotFoundError: If the stamp does not exist
+        """
+        url = self._make_url(f"/api/v1/stamps/{stamp_id.lower()}/check")
+        if verbose:
+            print(f"--- DEBUG: Check Stamp Health ---")
+            print(f"URL: GET {url}")
+
+        try:
+            response = requests.get(url, headers=self._get_headers(), timeout=10)
+            if verbose:
+                print(f"DEBUG: Stamp health check response: {response.status_code}")
+
+            if response.status_code == 404:
+                raise StampNotFoundError(f"Stamp {stamp_id} not found.")
+
+            response.raise_for_status()
+            data = response.json()
+            return StampHealthCheckResponse.model_validate(data)
+        except StampNotFoundError:
+            raise
+        except requests.exceptions.RequestException as e:
+            if verbose:
+                print(f"ERROR: Stamp health check failed: {e}")
+            raise ConnectionError(f"Failed to check stamp health: {e}") from e

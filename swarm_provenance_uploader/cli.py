@@ -131,6 +131,7 @@ def upload(
     stamp_amount: Annotated[Optional[int], typer.Option("--amount", help="Legacy: PLUR amount (local backend or deprecated).")] = None,
     stamp_check_retries: Annotated[int, typer.Option("--stamp-retries", help="Number of times to check for stamp usability.")] = 12,
     stamp_check_interval: Annotated[int, typer.Option("--stamp-interval", help="Seconds to wait between stamp usability checks.")] = 20,
+    use_pool: Annotated[bool, typer.Option("--usePool", help="Acquire stamp from pool instead of purchasing (gateway only, faster ~5s vs >1min).")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False
 ):
     """
@@ -141,6 +142,7 @@ def upload(
     Use --stamp-id to reuse an existing stamp.
     Use --duration to specify validity in hours (min 24).
     Use --size for preset sizes: small, medium, large.
+    Use --usePool to acquire from pool (faster, gateway only).
     """
     # Determine which backend to use
     use_gateway = _backend_config["backend"] == "gateway"
@@ -170,6 +172,8 @@ def upload(
             typer.echo(f"    Stamp Depth: {stamp_depth}")
         typer.echo(f"    Stamp Check Retries: {stamp_check_retries}")
         typer.echo(f"    Stamp Check Interval: {stamp_check_interval}s")
+        if use_pool:
+            typer.echo(f"    Use Pool: Yes (acquire from pool instead of purchasing)")
     else:
         typer.echo(f"Processing file: {file.name}...")
 
@@ -198,14 +202,77 @@ def upload(
        typer.secho(f"ERROR: Failed preparing metadata structure: {e}", fg=typer.colors.RED, err=True)
        raise typer.Exit(code=1)
 
-    # 5 & 6. Request postage stamp OR use existing one
+    # 5 & 6. Request postage stamp OR use existing one OR acquire from pool
     used_existing_stamp = False
+    acquired_from_pool = False
     if stamp_id:
         # User provided an existing stamp ID
         used_existing_stamp = True
         typer.echo(f"Using existing stamp: ...{stamp_id[-12:]}")
         if verbose:
             typer.echo(f"    Stamp ID: {stamp_id}")
+    elif use_pool:
+        # Acquire stamp from pool (gateway only)
+        if not use_gateway:
+            typer.secho("ERROR: --usePool requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+
+        typer.echo(f"Acquiring stamp from pool...")
+        if verbose:
+            typer.echo(f"    (Size: {size or 'default'}, Depth: {stamp_depth or 'default'} from {gateway_url})")
+
+        try:
+            gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
+
+            # First check pool availability
+            available_count = gw_client.get_pool_available_count(size=size, depth=stamp_depth, verbose=verbose)
+            if verbose:
+                typer.echo(f"    Pool has {available_count} stamps available for requested size/depth")
+
+            if available_count == 0:
+                typer.secho("ERROR: No stamps available in pool for requested size/depth.", fg=typer.colors.RED, err=True)
+                typer.echo("Try again later, use a different size, or use regular purchase (without --usePool).")
+                raise typer.Exit(code=1)
+
+            # Acquire stamp from pool
+            acquire_result = gw_client.acquire_stamp_from_pool(size=size, depth=stamp_depth, verbose=verbose)
+            stamp_id = acquire_result.batch_id
+            acquired_from_pool = True
+
+            if verbose:
+                typer.echo(f"    Stamp ID Received: {stamp_id} (Length: {len(stamp_id)})")
+                typer.echo(f"    Depth: {acquire_result.depth}, Size: {acquire_result.size_name}")
+                if acquire_result.fallback_used:
+                    typer.secho(f"    Note: Larger stamp substituted (fallback used)", fg=typer.colors.YELLOW)
+            else:
+                msg = f"Stamp acquired from pool (ID: ...{stamp_id[-12:]})"
+                if acquire_result.fallback_used:
+                    msg += " [fallback size]"
+                typer.echo(msg)
+
+        except exceptions.PoolNotEnabledError:
+            typer.secho("ERROR: Stamp pool is not enabled on this gateway.", fg=typer.colors.RED, err=True)
+            typer.echo("Use regular purchase (without --usePool) instead.")
+            raise typer.Exit(code=1)
+        except exceptions.PoolEmptyError as e:
+            typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+            typer.echo("Try again later, use a different size, or use regular purchase (without --usePool).")
+            raise typer.Exit(code=1)
+        except exceptions.PoolAcquisitionError as e:
+            typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+            if e.available_count > 0:
+                typer.echo(f"Pool shows {e.available_count} stamps available - this may be a race condition.")
+                typer.echo("Try again immediately, or use regular purchase (without --usePool).")
+            raise typer.Exit(code=1)
+        except exceptions.PaymentRequiredError as e:
+            typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
+            typer.echo("Use --x402 to enable x402 payments, or use a gateway without x402 mode.")
+            if hasattr(e, 'payment_options') and e.payment_options:
+                typer.echo(f"Payment options: {e.payment_options}")
+            raise typer.Exit(code=1)
+        except Exception as e:
+            typer.secho(f"ERROR: Failed acquiring stamp from pool: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
     else:
         # Purchase a new stamp
         typer.echo(f"Purchasing postage stamp...")
@@ -252,6 +319,8 @@ def upload(
     # Poll for stamp existence and usability
     if used_existing_stamp:
         typer.echo(f"Verifying stamp is usable...")
+    elif acquired_from_pool:
+        typer.echo(f"Verifying pooled stamp is usable...")
     else:
         typer.echo(f"Waiting for stamp to become usable (up to {stamp_check_retries * stamp_check_interval // 60} minutes)...")
     stamp_is_ready_for_upload = False
@@ -642,6 +711,139 @@ def stamps_extend(
         typer.echo(f"Batch ID: {result_id}")
     except Exception as e:
         typer.secho(f"ERROR: Failed to extend stamp: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@stamps_app.command("pool-status")
+def stamps_pool_status(
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
+):
+    """
+    Show stamp pool status and availability. (Gateway only)
+    """
+    if _backend_config["backend"] != "gateway":
+        typer.secho("ERROR: 'stamps pool-status' requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    gateway_url = _backend_config["gateway_url"]
+    if verbose:
+        typer.echo(f"Getting pool status from {gateway_url}...")
+
+    try:
+        gw_client = GatewayClient(base_url=gateway_url)
+        status = gw_client.get_pool_status(verbose=verbose)
+
+        typer.echo(f"\nStamp Pool Status:")
+        typer.echo("-" * 50)
+
+        # Enabled status
+        enabled_str = typer.style("Enabled", fg=typer.colors.GREEN) if status.enabled else typer.style("Disabled", fg=typer.colors.RED)
+        typer.echo(f"  Status:       {enabled_str}")
+
+        if not status.enabled:
+            typer.echo("\nPool is not enabled on this gateway.")
+            return
+
+        # Total stamps
+        typer.echo(f"  Total stamps: {status.total_stamps}")
+
+        # Low reserve warning
+        if status.low_reserve_warning:
+            typer.secho(f"  Warning:      Pool is below target reserve levels", fg=typer.colors.YELLOW)
+
+        # Available stamps by depth/size
+        typer.echo(f"\n  Availability by size:")
+        size_names = {"17": "small", "20": "medium", "22": "large"}
+        for depth_str, count in status.current_levels.items():
+            size_name = size_names.get(depth_str, f"depth-{depth_str}")
+            target = status.reserve_config.get(depth_str, 0)
+            available = len(status.available_stamps.get(depth_str, []))
+            status_color = typer.colors.GREEN if available > 0 else typer.colors.RED
+            typer.echo(f"    {size_name:<8} (depth {depth_str}): {typer.style(str(available), fg=status_color)} available / {count} total (target: {target})")
+
+        # Maintenance info
+        if status.last_check:
+            typer.echo(f"\n  Last check:   {status.last_check}")
+        if status.next_check:
+            typer.echo(f"  Next check:   {status.next_check}")
+
+        # Errors
+        if status.errors:
+            typer.echo(f"\n  Errors:")
+            for error in status.errors:
+                typer.secho(f"    - {error}", fg=typer.colors.RED)
+
+    except exceptions.PoolNotEnabledError:
+        typer.secho("Pool is not enabled on this gateway.", fg=typer.colors.YELLOW)
+    except Exception as e:
+        typer.secho(f"ERROR: Failed to get pool status: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@stamps_app.command("check")
+def stamps_check(
+    stamp_id: Annotated[str, typer.Argument(help="Stamp batch ID to check.")],
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
+):
+    """
+    Check if a stamp can be used for uploads. (Gateway only)
+
+    Returns detailed health check including errors and warnings.
+    """
+    if _backend_config["backend"] != "gateway":
+        typer.secho("ERROR: 'stamps check' requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    gateway_url = _backend_config["gateway_url"]
+    if verbose:
+        typer.echo(f"Checking stamp health from {gateway_url}...")
+
+    try:
+        gw_client = GatewayClient(base_url=gateway_url)
+        health = gw_client.check_stamp_health(stamp_id, verbose=verbose)
+
+        typer.echo(f"\nStamp Health Check:")
+        typer.echo("-" * 50)
+        typer.echo(f"  Stamp ID:   {health.stamp_id[:16]}...{health.stamp_id[-8:]}")
+
+        # Can upload status
+        if health.can_upload:
+            typer.secho(f"  Can upload: Yes", fg=typer.colors.GREEN)
+        else:
+            typer.secho(f"  Can upload: No", fg=typer.colors.RED)
+
+        # Errors (blocking issues)
+        if health.errors:
+            typer.echo(f"\n  Errors (blocking):")
+            for issue in health.errors:
+                typer.secho(f"    [{issue.code}] {issue.message}", fg=typer.colors.RED)
+                if issue.details and verbose:
+                    for key, value in issue.details.items():
+                        typer.echo(f"      {key}: {value}")
+
+        # Warnings (non-blocking)
+        if health.warnings:
+            typer.echo(f"\n  Warnings:")
+            for issue in health.warnings:
+                typer.secho(f"    [{issue.code}] {issue.message}", fg=typer.colors.YELLOW)
+                if issue.details and verbose:
+                    for key, value in issue.details.items():
+                        typer.echo(f"      {key}: {value}")
+
+        # Detailed status (verbose only)
+        if health.status and verbose:
+            typer.echo(f"\n  Detailed status:")
+            for key, value in health.status.items():
+                typer.echo(f"    {key}: {value}")
+
+        # Exit with error code if can't upload
+        if not health.can_upload:
+            raise typer.Exit(code=1)
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        typer.secho(f"ERROR: Failed to check stamp health: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
 

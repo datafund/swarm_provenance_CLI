@@ -112,3 +112,36 @@ class PaymentTransactionFailedError(X402Error):
         super().__init__(message)
         self.error_reason = error_reason
         self.payer = payer
+
+
+# --- Stamp Pool Exceptions ---
+
+class PoolError(ProvenanceError):
+    """Base exception for stamp pool errors."""
+    pass
+
+
+class PoolNotEnabledError(PoolError):
+    """Stamp pool is not enabled on this gateway."""
+    pass
+
+
+class PoolEmptyError(PoolError):
+    """No stamps available in the pool for the requested size/depth."""
+
+    def __init__(self, message: str, size: str = None, depth: int = None):
+        super().__init__(message)
+        self.size = size
+        self.depth = depth
+
+
+class PoolAcquisitionError(PoolError):
+    """Failed to acquire stamp from pool despite availability.
+
+    This can happen due to race conditions when multiple clients
+    try to acquire the same stamp simultaneously.
+    """
+
+    def __init__(self, message: str, available_count: int = 0):
+        super().__init__(message)
+        self.available_count = available_count
