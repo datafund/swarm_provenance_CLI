@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, ValidationError
-from typing import Dict, Optional, List
+from typing import Any, Dict, Optional, List
 
 class ProvenanceMetadata(BaseModel):
     """
@@ -198,3 +198,43 @@ class StampHealthCheckResponse(BaseModel):
     errors: List[StampHealthIssue] = Field(default_factory=list, description="Blocking issues")
     warnings: List[StampHealthIssue] = Field(default_factory=list, description="Non-blocking warnings")
     status: Optional[Dict] = Field(default=None, description="Detailed status metrics")
+
+
+# --- Notary Signing Models ---
+
+class NotaryInfoResponse(BaseModel):
+    """Response from GET /api/v1/notary/info endpoint."""
+    enabled: bool = Field(description="Whether notary signing is enabled on this gateway")
+    available: bool = Field(description="Whether notary signing is currently available (enabled + configured)")
+    address: Optional[str] = Field(default=None, description="Ethereum address of the notary signer")
+    message: Optional[str] = Field(default=None, description="Human-readable status message")
+
+
+class NotaryStatusResponse(BaseModel):
+    """Response from GET /api/v1/notary/status endpoint (simplified health check)."""
+    enabled: bool = Field(description="Whether notary signing is enabled")
+    available: bool = Field(description="Whether notary signing is available")
+    address: Optional[str] = Field(default=None, description="Notary signer address")
+
+
+class NotarySignature(BaseModel):
+    """A notary signature within a signed document."""
+    type: str = Field(description="Signature type, e.g., 'notary'")
+    signer: str = Field(description="Ethereum address of the signer")
+    timestamp: str = Field(description="ISO 8601 timestamp when signature was created")
+    data_hash: str = Field(description="SHA256 hash of the canonical JSON of the data field")
+    signature: str = Field(description="EIP-191 signature (hex string, may include 0x prefix)")
+    signed_fields: List[str] = Field(description="List of field names that were signed (typically ['data'])")
+
+
+class SignedDocumentResponse(BaseModel):
+    """Response when uploading with sign=notary parameter.
+
+    Contains both the Swarm reference and the full signed document.
+    """
+    reference: str = Field(description="Swarm reference hash")
+    signed_document: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="The full signed document including data and signatures array"
+    )
+    message: Optional[str] = Field(default=None, description="Status message")
