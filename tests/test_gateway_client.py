@@ -366,3 +366,545 @@ class TestGatewayClientErrorHandling:
         client.list_stamps()
 
         assert adapter.last_request.headers.get("Authorization") == "Bearer secret-key"
+
+
+# =============================================================================
+# x402 PAYMENT HANDLING TESTS
+# =============================================================================
+
+class TestGatewayClientX402:
+    """Tests for x402 payment handling."""
+
+    # Sample 402 response
+    SAMPLE_402_RESPONSE = {
+        "x402Version": 1,
+        "accepts": [
+            {
+                "scheme": "exact",
+                "network": "base-sepolia",
+                "maxAmountRequired": "50000",
+                "resource": "/api/v1/stamps/",
+                "description": "Stamp purchase",
+                "payTo": "0x1234567890AbcdEF1234567890aBcDeF12345678",
+                "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+            }
+        ],
+    }
+
+    def test_402_without_x402_enabled_raises_error(self, requests_mock):
+        """Tests that 402 response raises PaymentRequiredError when x402 disabled."""
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/stamps/",
+            status_code=402,
+            json=self.SAMPLE_402_RESPONSE,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io", x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError) as exc_info:
+            client.purchase_stamp(duration_hours=24)
+
+        assert "x402" in str(exc_info.value).lower() or "payment required" in str(exc_info.value).lower()
+
+    def test_402_error_includes_payment_options(self, requests_mock):
+        """Tests that PaymentRequiredError includes payment options."""
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/stamps/",
+            status_code=402,
+            json=self.SAMPLE_402_RESPONSE,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io", x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError) as exc_info:
+            client.purchase_stamp()
+
+        # Should have payment options in the exception
+        assert exc_info.value.payment_options is not None
+
+    def test_x402_init_parameters(self):
+        """Tests x402 initialization parameters are stored."""
+        client = GatewayClient(
+            base_url="https://test.gateway.io",
+            x402_enabled=True,
+            x402_network="base",
+            x402_auto_pay=True,
+            x402_max_auto_pay_usd=5.00,
+        )
+
+        assert client.x402_enabled is True
+        assert client._x402_network == "base"
+        assert client._x402_auto_pay is True
+        assert client._x402_max_auto_pay_usd == 5.00
+
+    def test_should_auto_pay_within_limit(self):
+        """Tests auto-pay check when within limit."""
+        client = GatewayClient(
+            base_url="https://test.gateway.io",
+            x402_enabled=True,
+            x402_auto_pay=True,
+            x402_max_auto_pay_usd=1.00,
+        )
+
+        assert client._should_auto_pay(0.50) is True
+        assert client._should_auto_pay(1.00) is True
+        assert client._should_auto_pay(1.01) is False
+
+    def test_should_auto_pay_disabled(self):
+        """Tests auto-pay check when disabled."""
+        client = GatewayClient(
+            base_url="https://test.gateway.io",
+            x402_enabled=True,
+            x402_auto_pay=False,
+            x402_max_auto_pay_usd=10.00,
+        )
+
+        assert client._should_auto_pay(0.50) is False
+
+    def test_upload_data_402_without_x402(self, requests_mock):
+        """Tests that upload_data handles 402 when x402 disabled."""
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/data/",
+            status_code=402,
+            json=self.SAMPLE_402_RESPONSE,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io", x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError):
+            client.upload_data(data=b"test", stamp_id=DUMMY_STAMP)
+
+    def test_payment_callback_called(self, requests_mock):
+        """Tests that payment callback is called for confirmation."""
+        from unittest.mock import MagicMock, patch
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        # First request returns 402
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/stamps/",
+            [
+                {"status_code": 402, "json": self.SAMPLE_402_RESPONSE},
+                {"status_code": 201, "json": {"batchID": DUMMY_STAMP}},
+            ],
+        )
+
+        callback = MagicMock(return_value=False)  # User declines
+
+        client = GatewayClient(
+            base_url="https://test.gateway.io",
+            x402_enabled=True,
+            x402_private_key="0x" + "a" * 64,
+            x402_auto_pay=False,
+            x402_payment_callback=callback,
+        )
+
+        # Mock the x402 client
+        with patch.object(client, '_get_x402_client') as mock_get_client:
+            mock_x402 = MagicMock()
+            mock_x402.parse_402_response.return_value = MagicMock(accepts=[MagicMock(
+                scheme="exact",
+                network="base-sepolia",
+                maxAmountRequired="50000",
+                resource="/api/v1/stamps/",
+                description="Stamp purchase",
+                model_dump=lambda: {},
+            )])
+            mock_x402.select_payment_option.return_value = MagicMock(
+                maxAmountRequired="50000",
+                network="base-sepolia",
+                description="Stamp purchase",
+                resource="/api/v1/stamps/",
+                model_dump=lambda: {},
+            )
+            mock_x402.format_amount_usd.return_value = "$0.05"
+            mock_get_client.return_value = mock_x402
+
+            with pytest.raises(PaymentRequiredError) as exc_info:
+                client.purchase_stamp()
+
+            # Callback should have been called
+            callback.assert_called_once()
+            assert "declined" in str(exc_info.value).lower()
+
+    def test_auto_pay_skips_callback(self, requests_mock):
+        """Tests that auto-pay bypasses callback when within limit."""
+        from unittest.mock import MagicMock, patch
+
+        # First request returns 402, second succeeds
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/stamps/",
+            [
+                {"status_code": 402, "json": self.SAMPLE_402_RESPONSE},
+                {"status_code": 201, "json": {"batchID": DUMMY_STAMP}},
+            ],
+        )
+
+        callback = MagicMock(return_value=True)
+
+        client = GatewayClient(
+            base_url="https://test.gateway.io",
+            x402_enabled=True,
+            x402_private_key="0x" + "a" * 64,
+            x402_auto_pay=True,
+            x402_max_auto_pay_usd=1.00,  # $1 limit, payment is $0.05
+            x402_payment_callback=callback,
+        )
+
+        # Mock the x402 client
+        with patch.object(client, '_get_x402_client') as mock_get_client:
+            mock_x402 = MagicMock()
+            mock_x402.parse_402_response.return_value = MagicMock(accepts=[MagicMock(
+                maxAmountRequired="50000",  # $0.05
+            )])
+            mock_x402.select_payment_option.return_value = MagicMock(
+                maxAmountRequired="50000",
+                network="base-sepolia",
+                description="Stamp purchase",
+            )
+            mock_x402.format_amount_usd.return_value = "$0.05"
+            # Return a valid string for the payment header
+            mock_x402.sign_payment.return_value = "ZHVtbXlfcGF5bWVudF9oZWFkZXI="  # base64 encoded
+            mock_get_client.return_value = mock_x402
+
+            # Should succeed without calling callback (auto-pay within limit)
+            result = client.purchase_stamp()
+
+            # Callback should NOT be called since auto-pay handles it
+            callback.assert_not_called()
+            assert result is not None
+
+    def test_auto_pay_exceeds_limit_calls_callback(self, requests_mock):
+        """Tests that auto-pay calls callback when payment exceeds limit."""
+        from unittest.mock import MagicMock, patch
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/stamps/",
+            [
+                {"status_code": 402, "json": self.SAMPLE_402_RESPONSE},
+            ],
+        )
+
+        callback = MagicMock(return_value=False)  # User declines
+
+        client = GatewayClient(
+            base_url="https://test.gateway.io",
+            x402_enabled=True,
+            x402_private_key="0x" + "a" * 64,
+            x402_auto_pay=True,
+            x402_max_auto_pay_usd=0.01,  # $0.01 limit, payment is $0.05
+            x402_payment_callback=callback,
+        )
+
+        with patch.object(client, '_get_x402_client') as mock_get_client:
+            mock_x402 = MagicMock()
+            mock_x402.parse_402_response.return_value = MagicMock(accepts=[MagicMock(
+                maxAmountRequired="50000",  # $0.05 exceeds $0.01 limit
+            )])
+            mock_x402.select_payment_option.return_value = MagicMock(
+                maxAmountRequired="50000",
+                network="base-sepolia",
+                description="Stamp purchase",
+            )
+            mock_x402.format_amount_usd.return_value = "$0.05"
+            mock_get_client.return_value = mock_x402
+
+            with pytest.raises(PaymentRequiredError):
+                client.purchase_stamp()
+
+            # Callback SHOULD be called since payment exceeds auto-pay limit
+            callback.assert_called_once()
+
+    def test_x402_disabled_by_default(self):
+        """Tests that x402 is disabled by default."""
+        client = GatewayClient(base_url="https://test.gateway.io")
+        assert client.x402_enabled is False
+
+    def test_x402_default_network_is_base_sepolia(self):
+        """Tests default x402 network is base-sepolia."""
+        client = GatewayClient(
+            base_url="https://test.gateway.io",
+            x402_enabled=True,
+        )
+        assert client._x402_network == "base-sepolia"
+
+    def test_402_non_json_response(self, requests_mock):
+        """Tests handling of 402 with non-JSON response body."""
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/stamps/",
+            status_code=402,
+            text="Payment Required",
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io", x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError):
+            client.purchase_stamp()
+
+
+class TestGatewayClientPool:
+    """Tests for stamp pool functionality."""
+
+    SAMPLE_POOL_STATUS = {
+        "enabled": True,
+        "reserve_config": {"17": 5, "20": 3, "22": 2},
+        "current_levels": {"17": 4, "20": 2, "22": 1},
+        "available_stamps": {
+            "17": [DUMMY_STAMP, "b" * 64],
+            "20": ["c" * 64],
+            "22": [],
+        },
+        "total_stamps": 7,
+        "low_reserve_warning": False,
+        "last_check": "2024-01-15T10:00:00Z",
+        "next_check": "2024-01-15T11:00:00Z",
+        "errors": [],
+    }
+
+    SAMPLE_ACQUIRE_RESPONSE = {
+        "success": True,
+        "batch_id": DUMMY_STAMP,
+        "depth": 17,
+        "size_name": "small",
+        "message": "Stamp acquired successfully",
+        "fallback_used": False,
+    }
+
+    SAMPLE_HEALTH_CHECK = {
+        "stamp_id": DUMMY_STAMP,
+        "can_upload": True,
+        "errors": [],
+        "warnings": [
+            {
+                "code": "LOW_TTL",
+                "message": "TTL is below 24 hours",
+                "details": {"ttl_hours": 12},
+            }
+        ],
+        "status": {"ttl": 43200, "depth": 17, "utilization": 25},
+    }
+
+    def test_get_pool_status_success(self, requests_mock):
+        """Tests getting pool status."""
+        requests_mock.get(
+            "https://test.gateway.io/api/v1/pool/status",
+            json=self.SAMPLE_POOL_STATUS,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        status = client.get_pool_status()
+
+        assert status.enabled is True
+        assert status.total_stamps == 7
+        assert status.low_reserve_warning is False
+        assert len(status.available_stamps["17"]) == 2
+        assert status.reserve_config["17"] == 5
+
+    def test_get_pool_status_disabled(self, requests_mock):
+        """Tests getting pool status when pool is disabled."""
+        from swarm_provenance_uploader.exceptions import PoolNotEnabledError
+
+        requests_mock.get(
+            "https://test.gateway.io/api/v1/pool/status",
+            status_code=404,
+            json={"error": "Pool not enabled"},
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+
+        with pytest.raises(PoolNotEnabledError):
+            client.get_pool_status()
+
+    def test_get_pool_available_count_by_size(self, requests_mock):
+        """Tests getting available stamp count by size."""
+        requests_mock.get(
+            "https://test.gateway.io/api/v1/pool/status",
+            json=self.SAMPLE_POOL_STATUS,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        count = client.get_pool_available_count(size="small")
+
+        assert count == 2  # From SAMPLE_POOL_STATUS available_stamps["17"]
+
+    def test_get_pool_available_count_by_depth(self, requests_mock):
+        """Tests getting available stamp count by depth."""
+        requests_mock.get(
+            "https://test.gateway.io/api/v1/pool/status",
+            json=self.SAMPLE_POOL_STATUS,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        count = client.get_pool_available_count(depth=20)
+
+        assert count == 1  # From SAMPLE_POOL_STATUS available_stamps["20"]
+
+    def test_get_pool_available_count_default(self, requests_mock):
+        """Tests getting available stamp count with default size."""
+        requests_mock.get(
+            "https://test.gateway.io/api/v1/pool/status",
+            json=self.SAMPLE_POOL_STATUS,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        count = client.get_pool_available_count()
+
+        assert count == 2  # Defaults to small (depth 17)
+
+    def test_acquire_stamp_from_pool_success(self, requests_mock):
+        """Tests acquiring stamp from pool."""
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/pool/acquire",
+            json=self.SAMPLE_ACQUIRE_RESPONSE,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        result = client.acquire_stamp_from_pool(size="small")
+
+        assert result.success is True
+        assert result.batch_id == DUMMY_STAMP
+        assert result.depth == 17
+        assert result.size_name == "small"
+        assert result.fallback_used is False
+
+    def test_acquire_stamp_from_pool_with_fallback(self, requests_mock):
+        """Tests acquiring stamp from pool with fallback."""
+        fallback_response = {
+            "success": True,
+            "batch_id": DUMMY_STAMP,
+            "depth": 20,
+            "size_name": "medium",
+            "message": "Larger stamp substituted",
+            "fallback_used": True,
+        }
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/pool/acquire",
+            json=fallback_response,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        result = client.acquire_stamp_from_pool(size="small")
+
+        assert result.success is True
+        assert result.fallback_used is True
+        assert result.size_name == "medium"
+
+    def test_acquire_stamp_acquisition_fails(self, requests_mock):
+        """Tests handling acquisition failure."""
+        from swarm_provenance_uploader.exceptions import PoolAcquisitionError
+
+        # Acquisition fails
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/pool/acquire",
+            json={
+                "success": False,
+                "batch_id": None,
+                "message": "No stamps available",
+                "fallback_used": False,
+            },
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+
+        with pytest.raises(PoolAcquisitionError):
+            client.acquire_stamp_from_pool(size="small")
+
+    def test_list_pool_stamps(self, requests_mock):
+        """Tests listing stamps in the pool."""
+        stamps_response = {
+            "stamps": [
+                {
+                    "batch_id": DUMMY_STAMP,
+                    "depth": 17,
+                    "size_name": "small",
+                    "created_at": "2024-01-15T08:00:00Z",
+                    "ttl_at_creation": 86400,
+                },
+                {
+                    "batch_id": "b" * 64,
+                    "depth": 20,
+                    "size_name": "medium",
+                    "created_at": "2024-01-15T09:00:00Z",
+                    "ttl_at_creation": 172800,
+                },
+            ],
+            "count": 2,
+        }
+        requests_mock.get(
+            "https://test.gateway.io/api/v1/pool/stamps",
+            json=stamps_response,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        stamps = client.list_pool_stamps()
+
+        assert len(stamps) == 2
+        assert stamps[0].batch_id == DUMMY_STAMP
+        assert stamps[0].depth == 17
+        assert stamps[1].size_name == "medium"
+
+    def test_check_stamp_health_success(self, requests_mock):
+        """Tests stamp health check."""
+        requests_mock.get(
+            f"https://test.gateway.io/api/v1/stamps/{DUMMY_STAMP}/check",
+            json=self.SAMPLE_HEALTH_CHECK,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        health = client.check_stamp_health(DUMMY_STAMP)
+
+        assert health.stamp_id == DUMMY_STAMP
+        assert health.can_upload is True
+        assert len(health.errors) == 0
+        assert len(health.warnings) == 1
+        assert health.warnings[0].code == "LOW_TTL"
+
+    def test_check_stamp_health_not_usable(self, requests_mock):
+        """Tests stamp health check when stamp is not usable."""
+        unhealthy_response = {
+            "stamp_id": DUMMY_STAMP,
+            "can_upload": False,
+            "errors": [
+                {
+                    "code": "EXPIRED",
+                    "message": "Stamp has expired",
+                    "details": {"expired_at": "2024-01-10T00:00:00Z"},
+                }
+            ],
+            "warnings": [],
+            "status": None,
+        }
+        requests_mock.get(
+            f"https://test.gateway.io/api/v1/stamps/{DUMMY_STAMP}/check",
+            json=unhealthy_response,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        health = client.check_stamp_health(DUMMY_STAMP)
+
+        assert health.can_upload is False
+        assert len(health.errors) == 1
+        assert health.errors[0].code == "EXPIRED"
+
+    def test_check_stamp_health_not_found(self, requests_mock):
+        """Tests stamp health check when stamp not found."""
+        from swarm_provenance_uploader.exceptions import StampNotFoundError
+
+        requests_mock.get(
+            f"https://test.gateway.io/api/v1/stamps/{DUMMY_STAMP}/check",
+            status_code=404,
+            json={"error": "Stamp not found"},
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+
+        with pytest.raises(StampNotFoundError):
+            client.check_stamp_health(DUMMY_STAMP)

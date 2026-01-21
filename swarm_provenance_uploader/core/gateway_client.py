@@ -3,13 +3,25 @@ Client for provenance-gateway.datafund.io API.
 
 This client interfaces with the gateway API which provides a simpler
 interface to Swarm without requiring a local Bee node.
+
+Supports x402 pay-per-request payments when enabled.
 """
 
+import base64
+import json
 import requests
 import os
+from typing import Callable, List, Optional, Tuple
 from urllib.parse import urljoin
-from typing import Optional
 
+from ..exceptions import (
+    PaymentRequiredError,
+    PaymentTransactionFailedError,
+    PoolNotEnabledError,
+    PoolEmptyError,
+    PoolAcquisitionError,
+    StampNotFoundError,
+)
 from ..models import (
     StampDetails,
     StampListResponse,
@@ -18,24 +30,70 @@ from ..models import (
     DataUploadResponse,
     WalletResponse,
     ChequebookResponse,
+    X402PaymentResponse,
+    PoolStatusResponse,
+    AcquireStampResponse,
+    PoolStampInfo,
+    StampHealthCheckResponse,
 )
 
 
 class GatewayClient:
-    """Client for provenance-gateway.datafund.io API."""
+    """Client for provenance-gateway.datafund.io API.
+
+    Supports optional x402 payment integration for pay-per-request mode.
+    When x402 is enabled, protected endpoints (stamp purchase, data upload)
+    will automatically handle 402 Payment Required responses.
+    """
 
     DEFAULT_URL = "https://provenance-gateway.datafund.io"
 
-    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None):
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        x402_enabled: bool = False,
+        x402_private_key: Optional[str] = None,
+        x402_network: str = "base-sepolia",
+        x402_auto_pay: bool = False,
+        x402_max_auto_pay_usd: float = 1.00,
+        x402_payment_callback: Optional[Callable[[str, str], bool]] = None,
+    ):
         """
         Initialize the gateway client.
 
         Args:
             base_url: Gateway URL. Defaults to provenance-gateway.datafund.io
             api_key: Optional API key for authentication (future use)
+            x402_enabled: Enable x402 payment support
+            x402_private_key: Private key for signing payments
+            x402_network: Network for payments ('base-sepolia' or 'base')
+            x402_auto_pay: Auto-pay without prompting (up to max amount)
+            x402_max_auto_pay_usd: Maximum auto-pay amount in USD
+            x402_payment_callback: Optional callback for payment confirmation.
+                                   Called with (amount_usd, description) -> bool
         """
         self.base_url = (base_url or os.getenv("PROVENANCE_GATEWAY_URL", self.DEFAULT_URL)).rstrip("/")
         self.api_key = api_key or os.getenv("PROVENANCE_GATEWAY_API_KEY")
+
+        # x402 configuration
+        self.x402_enabled = x402_enabled
+        self._x402_private_key = x402_private_key
+        self._x402_network = x402_network
+        self._x402_auto_pay = x402_auto_pay
+        self._x402_max_auto_pay_usd = x402_max_auto_pay_usd
+        self._x402_payment_callback = x402_payment_callback
+        self._x402_client = None  # Lazy initialization
+
+    def _get_x402_client(self):
+        """Get or create the x402 client (lazy initialization)."""
+        if self._x402_client is None and self.x402_enabled:
+            from .x402_client import X402Client
+            self._x402_client = X402Client(
+                private_key=self._x402_private_key,
+                network=self._x402_network,
+            )
+        return self._x402_client
 
     def _get_headers(self) -> dict:
         """Get default headers for requests."""
@@ -47,6 +105,189 @@ class GatewayClient:
     def _make_url(self, path: str) -> str:
         """Construct full URL from path."""
         return urljoin(self.base_url + "/", path.lstrip("/"))
+
+    def _should_auto_pay(self, amount_usd: float) -> bool:
+        """Check if amount is within auto-pay limit."""
+        return self._x402_auto_pay and amount_usd <= self._x402_max_auto_pay_usd
+
+    def _handle_402_response(
+        self,
+        response: requests.Response,
+        verbose: bool = False,
+    ) -> Tuple[str, str]:
+        """
+        Handle a 402 Payment Required response.
+
+        Args:
+            response: The 402 response from the server
+            verbose: Enable debug output
+
+        Returns:
+            Tuple of (payment_header, amount_usd_formatted)
+
+        Raises:
+            PaymentRequiredError: If x402 not enabled or payment not confirmed
+        """
+        if not self.x402_enabled:
+            # Parse 402 response for useful error message
+            try:
+                body = response.json()
+                accepts = body.get("accepts", [])
+                if accepts:
+                    amounts = [opt.get("maxAmountRequired", "?") for opt in accepts]
+                    raise PaymentRequiredError(
+                        f"Payment required (amounts: {amounts}). "
+                        "Enable x402 with --x402 flag or X402_ENABLED=true",
+                        payment_options=accepts,
+                    )
+            except (ValueError, KeyError):
+                pass
+            raise PaymentRequiredError(
+                "Payment required. Enable x402 with --x402 flag or X402_ENABLED=true"
+            )
+
+        x402_client = self._get_x402_client()
+
+        # Parse the 402 response
+        try:
+            body = response.json()
+        except ValueError as e:
+            raise PaymentRequiredError(f"Invalid 402 response: {e}")
+
+        if verbose:
+            print(f"DEBUG: Received 402 Payment Required")
+            print(f"DEBUG: Payment options: {body}")
+
+        # Parse and select payment option
+        requirements = x402_client.parse_402_response(body)
+        option = x402_client.select_payment_option(requirements)
+        amount_usd = x402_client.format_amount_usd(option.maxAmountRequired)
+        amount_float = int(option.maxAmountRequired) / 1_000_000
+
+        if verbose:
+            print(f"DEBUG: Selected payment option: {amount_usd} on {option.network}")
+
+        # Check if we should auto-pay or need confirmation
+        if not self._should_auto_pay(amount_float):
+            if self._x402_payment_callback:
+                description = option.description or f"API request to {option.resource}"
+                if not self._x402_payment_callback(amount_usd, description):
+                    raise PaymentRequiredError(
+                        f"Payment of {amount_usd} declined by user",
+                        payment_options=[option.model_dump()],
+                    )
+            elif not self._x402_auto_pay:
+                # No callback and not auto-pay mode - raise for CLI to handle
+                raise PaymentRequiredError(
+                    f"Payment required: {amount_usd}. Use --auto-pay or confirm payment.",
+                    payment_options=[option.model_dump()],
+                )
+
+        # Sign and create payment header
+        payment_header = x402_client.sign_payment(option)
+
+        if verbose:
+            print(f"DEBUG: Payment signed, header length: {len(payment_header)}")
+
+        return payment_header, amount_usd
+
+    def _parse_payment_response(
+        self,
+        response: requests.Response,
+        verbose: bool = False,
+    ) -> Optional[X402PaymentResponse]:
+        """
+        Parse the x-payment-response header from a response.
+
+        The header value is base64-encoded JSON containing payment result.
+
+        Args:
+            response: The HTTP response
+            verbose: Enable debug output
+
+        Returns:
+            X402PaymentResponse if header present and valid, None otherwise
+        """
+        header_value = response.headers.get("x-payment-response")
+        if not header_value:
+            return None
+
+        try:
+            # Header is base64-encoded JSON
+            decoded = base64.b64decode(header_value)
+            data = json.loads(decoded)
+            if verbose:
+                print(f"DEBUG: x-payment-response: {data}")
+            return X402PaymentResponse.model_validate(data)
+        except (ValueError, json.JSONDecodeError) as e:
+            if verbose:
+                print(f"DEBUG: Failed to parse x-payment-response: {e}")
+            return None
+
+    def _make_paid_request(
+        self,
+        method: str,
+        url: str,
+        verbose: bool = False,
+        **kwargs,
+    ) -> requests.Response:
+        """
+        Make a request with automatic 402 payment handling.
+
+        Args:
+            method: HTTP method (GET, POST, etc.)
+            url: Request URL
+            verbose: Enable debug output
+            **kwargs: Additional arguments for requests
+
+        Returns:
+            The response (after payment if needed)
+
+        Raises:
+            PaymentRequiredError: If payment required but not configured/confirmed
+            PaymentTransactionFailedError: If payment was signed but on-chain tx failed
+        """
+        response = requests.request(method, url, **kwargs)
+
+        if response.status_code == 402:
+            payment_header, amount_usd = self._handle_402_response(response, verbose)
+
+            # Add payment header and retry
+            headers = kwargs.get("headers", {}).copy()
+            headers["X-PAYMENT"] = payment_header
+            kwargs["headers"] = headers
+
+            if verbose:
+                print(f"DEBUG: Retrying request with X-PAYMENT header ({amount_usd})")
+
+            response = requests.request(method, url, **kwargs)
+
+            if verbose:
+                print(f"DEBUG: Paid request status: {response.status_code}")
+
+            # Check x-payment-response header to verify payment actually succeeded
+            payment_result = self._parse_payment_response(response, verbose)
+            if payment_result:
+                if not payment_result.success:
+                    # Payment was signed but the on-chain transaction failed
+                    # Gateway may have fallen back to free tier
+                    error_msg = (
+                        f"Payment transaction failed: {payment_result.errorReason or 'unknown error'}. "
+                        "The gateway may have used free tier instead."
+                    )
+                    if verbose:
+                        print(f"WARNING: {error_msg}")
+                    raise PaymentTransactionFailedError(
+                        error_msg,
+                        error_reason=payment_result.errorReason,
+                        payer=payment_result.payer,
+                    )
+                else:
+                    if verbose:
+                        tx_hash = payment_result.transaction or "pending"
+                        print(f"DEBUG: Payment successful, tx: {tx_hash}")
+
+        return response
 
     # --- Health ---
 
@@ -150,8 +391,14 @@ class GatewayClient:
             print(f"Payload: {payload}")
 
         try:
-            response = requests.post(
-                url, json=payload, headers=self._get_headers(), timeout=120
+            # Use _make_paid_request for x402 support
+            response = self._make_paid_request(
+                "POST",
+                url,
+                json=payload,
+                headers=self._get_headers(),
+                timeout=120,
+                verbose=verbose,
             )
             if verbose:
                 print(f"DEBUG: Purchase stamp status: {response.status_code}")
@@ -272,8 +519,15 @@ class GatewayClient:
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
 
-            response = requests.post(
-                url, params=params, files=files, headers=headers, timeout=60
+            # Use _make_paid_request for x402 support
+            response = self._make_paid_request(
+                "POST",
+                url,
+                params=params,
+                files=files,
+                headers=headers,
+                timeout=60,
+                verbose=verbose,
             )
             if verbose:
                 print(f"DEBUG: Upload status: {response.status_code}")
@@ -368,3 +622,243 @@ class GatewayClient:
             if verbose:
                 print(f"ERROR: Get chequebook failed: {e}")
             raise ConnectionError(f"Failed to get chequebook info: {e}") from e
+
+    # --- Stamp Pool ---
+
+    # Mapping from size name to depth
+    SIZE_TO_DEPTH = {
+        "small": 17,
+        "medium": 20,
+        "large": 22,
+    }
+
+    def get_pool_status(self, verbose: bool = False) -> PoolStatusResponse:
+        """
+        Get current stamp pool status.
+
+        Returns:
+            PoolStatusResponse with pool state and available stamps.
+
+        Raises:
+            PoolNotEnabledError: If pool is not enabled on this gateway
+        """
+        url = self._make_url("/api/v1/pool/status")
+        if verbose:
+            print(f"--- DEBUG: Get Pool Status ---")
+            print(f"URL: GET {url}")
+
+        try:
+            response = requests.get(url, headers=self._get_headers(), timeout=10)
+            if verbose:
+                print(f"DEBUG: Pool status response: {response.status_code}")
+
+            if response.status_code == 404:
+                raise PoolNotEnabledError("Stamp pool is not enabled on this gateway.")
+
+            response.raise_for_status()
+            data = response.json()
+            return PoolStatusResponse.model_validate(data)
+        except PoolNotEnabledError:
+            raise
+        except requests.exceptions.RequestException as e:
+            if verbose:
+                print(f"ERROR: Get pool status failed: {e}")
+            raise ConnectionError(f"Failed to get pool status: {e}") from e
+
+    def get_pool_available_count(
+        self,
+        size: Optional[str] = None,
+        depth: Optional[int] = None,
+        verbose: bool = False,
+    ) -> int:
+        """
+        Get count of available stamps in pool for given size/depth.
+
+        Args:
+            size: Size preset ('small', 'medium', 'large')
+            depth: Specific depth (overrides size)
+            verbose: Enable debug output
+
+        Returns:
+            Number of available stamps matching the criteria.
+
+        Raises:
+            PoolNotEnabledError: If pool is not enabled on this gateway
+        """
+        status = self.get_pool_status(verbose=verbose)
+
+        if not status.enabled:
+            raise PoolNotEnabledError("Stamp pool is not enabled on this gateway.")
+
+        # Determine target depth
+        target_depth = depth
+        if target_depth is None and size:
+            target_depth = self.SIZE_TO_DEPTH.get(size.lower())
+        if target_depth is None:
+            # Default to small if neither specified
+            target_depth = self.SIZE_TO_DEPTH["small"]
+
+        # Count stamps for specific depth
+        depth_str = str(target_depth)
+        return len(status.available_stamps.get(depth_str, []))
+
+    def list_pool_stamps(self, verbose: bool = False) -> List[PoolStampInfo]:
+        """
+        List all stamps currently available in the pool.
+
+        Returns:
+            List of PoolStampInfo objects.
+
+        Raises:
+            PoolNotEnabledError: If pool is not enabled on this gateway
+        """
+        url = self._make_url("/api/v1/pool/stamps")
+        if verbose:
+            print(f"--- DEBUG: List Pool Stamps ---")
+            print(f"URL: GET {url}")
+
+        try:
+            response = requests.get(url, headers=self._get_headers(), timeout=10)
+            if verbose:
+                print(f"DEBUG: List pool stamps response: {response.status_code}")
+
+            if response.status_code == 404:
+                raise PoolNotEnabledError("Stamp pool is not enabled on this gateway.")
+
+            response.raise_for_status()
+            data = response.json()
+            # Response contains {"stamps": [...], "count": n}
+            stamps_data = data.get("stamps", data)
+            if isinstance(stamps_data, list):
+                return [PoolStampInfo.model_validate(item) for item in stamps_data]
+            return []
+        except PoolNotEnabledError:
+            raise
+        except requests.exceptions.RequestException as e:
+            if verbose:
+                print(f"ERROR: List pool stamps failed: {e}")
+            raise ConnectionError(f"Failed to list pool stamps: {e}") from e
+
+    def acquire_stamp_from_pool(
+        self,
+        size: Optional[str] = None,
+        depth: Optional[int] = None,
+        verbose: bool = False,
+    ) -> AcquireStampResponse:
+        """
+        Acquire a stamp from the pool for immediate use.
+
+        This is much faster than purchasing a new stamp (~5 seconds vs >1 minute).
+
+        Args:
+            size: Preferred size ('small', 'medium', 'large')
+            depth: Specific depth (overrides size)
+            verbose: Enable debug output
+
+        Returns:
+            AcquireStampResponse with batch_id, depth, size_name, fallback_used.
+
+        Raises:
+            PoolNotEnabledError: If pool is not enabled on this gateway
+            PoolEmptyError: If no stamps available for requested size/depth
+            PoolAcquisitionError: If acquisition fails despite availability
+        """
+        size_desc = size or "default"
+        if depth:
+            size_desc = f"depth {depth}"
+
+        # Attempt acquisition
+        url = self._make_url("/api/v1/pool/acquire")
+        payload = {}
+        if size:
+            payload["size"] = size
+        if depth:
+            payload["depth"] = depth
+
+        if verbose:
+            print(f"--- DEBUG: Acquire Stamp from Pool ---")
+            print(f"URL: POST {url}")
+            print(f"Payload: {payload}")
+
+        try:
+            response = self._make_paid_request(
+                "POST",
+                url,
+                json=payload,
+                headers=self._get_headers(),
+                timeout=30,
+                verbose=verbose,
+            )
+            if verbose:
+                print(f"DEBUG: Acquire response: {response.status_code}")
+            response.raise_for_status()
+            data = response.json()
+            result = AcquireStampResponse.model_validate(data)
+
+            if not result.success:
+                raise PoolAcquisitionError(
+                    f"Failed to acquire stamp from pool: {result.message}. "
+                    "Retry may succeed.",
+                    available_count=0,
+                )
+
+            if verbose:
+                print(f"DEBUG: Acquired stamp: {result.batch_id} (size={result.size_name}, depth={result.depth})")
+                if result.fallback_used:
+                    print(f"DEBUG: Note: A larger stamp was used as fallback")
+
+            return result
+
+        except (PoolNotEnabledError, PoolEmptyError, PoolAcquisitionError):
+            raise
+        except requests.exceptions.RequestException as e:
+            if verbose:
+                print(f"ERROR: Acquire stamp failed: {e}")
+            raise PoolAcquisitionError(
+                f"Failed to acquire stamp from pool: {e}",
+                available_count=0,
+            ) from e
+
+    def check_stamp_health(
+        self,
+        stamp_id: str,
+        verbose: bool = False,
+    ) -> StampHealthCheckResponse:
+        """
+        Perform health check on a specific stamp.
+
+        Checks if the stamp can be used for uploads and reports
+        any errors or warnings.
+
+        Args:
+            stamp_id: The stamp batch ID to check
+            verbose: Enable debug output
+
+        Returns:
+            StampHealthCheckResponse with health status.
+
+        Raises:
+            StampNotFoundError: If the stamp does not exist
+        """
+        url = self._make_url(f"/api/v1/stamps/{stamp_id.lower()}/check")
+        if verbose:
+            print(f"--- DEBUG: Check Stamp Health ---")
+            print(f"URL: GET {url}")
+
+        try:
+            response = requests.get(url, headers=self._get_headers(), timeout=10)
+            if verbose:
+                print(f"DEBUG: Stamp health check response: {response.status_code}")
+
+            if response.status_code == 404:
+                raise StampNotFoundError(f"Stamp {stamp_id} not found.")
+
+            response.raise_for_status()
+            data = response.json()
+            return StampHealthCheckResponse.model_validate(data)
+        except StampNotFoundError:
+            raise
+        except requests.exceptions.RequestException as e:
+            if verbose:
+                print(f"ERROR: Stamp health check failed: {e}")
+            raise ConnectionError(f"Failed to check stamp health: {e}") from e
