@@ -491,11 +491,14 @@ def download(
         default_factory=lambda: Path.cwd()  # Default to current working directory
     )],
     bee_url: Annotated[Optional[str], typer.Option("--bee-url", help="Bee Gateway URL (when backend=local).")] = None,
+    verify: Annotated[bool, typer.Option("--verify", help="Verify notary signature if present (gateway only for address lookup).")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False
 ):
     """
     Downloads Provenance Metadata from Swarm, decodes the wrapped data,
     verifies its integrity, and saves both files.
+
+    Use --verify to verify notary signatures if present.
     """
     # Determine which backend to use
     use_gateway = _backend_config["backend"] == "gateway"
@@ -563,6 +566,63 @@ def download(
     # 4. Validate expected JSON structure (Pydantic does this on parsing)
     #    and check for essential fields if not using Pydantic or for extra safety.
     #    Pydantic model already ensures 'data' and 'content_hash' exist if parsing succeeds.
+
+    # 4.5 Verify notary signature if requested
+    if verify:
+        from .core.notary_utils import verify_notary_signature, has_notary_signature
+
+        # Parse the raw metadata to check for signatures
+        try:
+            raw_document = json.loads(metadata_str)
+        except json.JSONDecodeError:
+            raw_document = {}
+
+        if has_notary_signature(raw_document):
+            typer.echo("\nSignature Verification:")
+            typer.echo("-" * 50)
+
+            # Get expected notary address from gateway
+            expected_address = None
+            if use_gateway:
+                try:
+                    gw_client = GatewayClient(base_url=gateway_url)
+                    notary_info = gw_client.get_notary_info(verbose=verbose)
+                    expected_address = notary_info.address
+                    if verbose:
+                        typer.echo(f"    Fetched notary address: {expected_address}")
+                except exceptions.NotaryNotEnabledError:
+                    typer.secho("  Warning: Could not fetch notary address (notary not enabled on gateway)", fg=typer.colors.YELLOW)
+                except Exception as e:
+                    typer.secho(f"  Warning: Could not fetch notary address: {e}", fg=typer.colors.YELLOW)
+
+            if expected_address:
+                # Extract signature info for display
+                signatures = raw_document.get("signatures", [])
+                notary_sig = None
+                for sig in signatures:
+                    if sig.get("type") == "notary":
+                        notary_sig = sig
+                        break
+
+                if notary_sig:
+                    signer = notary_sig.get("signer", "")
+                    signer_short = f"{signer[:10]}...{signer[-4:]}" if len(signer) > 14 else signer
+                    typer.echo(f"  Type:      {notary_sig.get('type', 'unknown')}")
+                    typer.echo(f"  Signer:    {signer_short}")
+                    typer.echo(f"  Timestamp: {notary_sig.get('timestamp', 'unknown')}")
+
+                # Verify signature
+                is_valid, error_msg = verify_notary_signature(raw_document, expected_address)
+
+                if is_valid:
+                    typer.secho(f"  Signature: ✓ Verified", fg=typer.colors.GREEN)
+                else:
+                    typer.secho(f"  Signature: ✗ FAILED - {error_msg}", fg=typer.colors.RED)
+            else:
+                typer.secho("  Cannot verify: No notary address available", fg=typer.colors.YELLOW)
+                typer.echo("  Use gateway backend or run 'notary verify' manually with --address")
+        else:
+            typer.echo("\nNo notary signatures found in document.")
 
     # 5. Extract Base64 encoded data
     b64_encoded_original_data = provenance_metadata_obj.data
