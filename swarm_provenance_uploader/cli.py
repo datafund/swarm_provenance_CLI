@@ -18,6 +18,8 @@ stamps_app = typer.Typer(help="Manage postage stamps.")
 app.add_typer(stamps_app, name="stamps")
 x402_app = typer.Typer(help="x402 payment configuration and status.")
 app.add_typer(x402_app, name="x402")
+notary_app = typer.Typer(help="Notary signing service commands.")
+app.add_typer(notary_app, name="notary")
 
 
 def _version_callback(value: bool):
@@ -1086,6 +1088,193 @@ def x402_info():
     typer.echo("   swarm-prov-upload x402 status   # Check configuration")
     typer.echo("   swarm-prov-upload x402 balance  # Check USDC balance")
     typer.echo("")
+
+
+# --- Notary Subcommands ---
+
+@notary_app.command("info")
+def notary_info(
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
+):
+    """
+    Get notary service status and signer address. (Gateway only)
+    """
+    if _backend_config["backend"] != "gateway":
+        typer.secho("ERROR: 'notary info' requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    gateway_url = _backend_config["gateway_url"]
+    if verbose:
+        typer.echo(f"Getting notary info from {gateway_url}...")
+
+    try:
+        gw_client = GatewayClient(base_url=gateway_url)
+        info = gw_client.get_notary_info(verbose=verbose)
+
+        typer.echo(f"\nNotary Service:")
+        typer.echo("-" * 40)
+
+        # Enabled status
+        enabled_str = typer.style("Yes", fg=typer.colors.GREEN) if info.enabled else typer.style("No", fg=typer.colors.RED)
+        typer.echo(f"  Enabled:   {enabled_str}")
+
+        # Available status
+        available_str = typer.style("Yes", fg=typer.colors.GREEN) if info.available else typer.style("No", fg=typer.colors.YELLOW)
+        typer.echo(f"  Available: {available_str}")
+
+        # Address
+        if info.address:
+            typer.echo(f"  Address:   {info.address}")
+        else:
+            typer.echo(f"  Address:   {typer.style('Not configured', fg=typer.colors.YELLOW)}")
+
+        # Message
+        if info.message:
+            typer.echo(f"  Message:   {info.message}")
+
+        typer.echo("")
+
+    except exceptions.NotaryNotEnabledError:
+        typer.secho("Notary signing is not enabled on this gateway.", fg=typer.colors.YELLOW)
+    except Exception as e:
+        typer.secho(f"ERROR: Failed to get notary info: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@notary_app.command("status")
+def notary_status(
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
+):
+    """
+    Quick health check for notary service. (Gateway only)
+    """
+    if _backend_config["backend"] != "gateway":
+        typer.secho("ERROR: 'notary status' requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    gateway_url = _backend_config["gateway_url"]
+    if verbose:
+        typer.echo(f"Checking notary status from {gateway_url}...")
+
+    try:
+        gw_client = GatewayClient(base_url=gateway_url)
+        status = gw_client.get_notary_status(verbose=verbose)
+
+        if status.available:
+            typer.secho(f"✓ Notary service: Available", fg=typer.colors.GREEN)
+            if status.address:
+                addr_short = f"{status.address[:10]}...{status.address[-4:]}"
+                typer.echo(f"  Address: {addr_short}")
+        else:
+            typer.secho(f"✗ Notary service: Not available", fg=typer.colors.RED)
+            if not status.enabled:
+                typer.echo("  Reason: Not enabled on this gateway")
+            else:
+                typer.echo("  Reason: Enabled but not configured")
+            raise typer.Exit(code=1)
+
+    except exceptions.NotaryNotEnabledError:
+        typer.secho(f"✗ Notary service: Not enabled", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        typer.secho(f"✗ Notary service: Error - {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@notary_app.command("verify")
+def notary_verify(
+    file: Annotated[Path, typer.Option(
+        "--file", "-f",
+        help="Path to the signed JSON document to verify.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+    )],
+    address: Annotated[Optional[str], typer.Option(
+        "--address", "-a",
+        help="Expected signer address (fetched from gateway if not provided)."
+    )] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
+):
+    """
+    Verify a notary signature on a local JSON file. (Gateway only for address lookup)
+    """
+    from .core.notary_utils import verify_notary_signature, extract_notary_signature
+
+    # Read and parse the file
+    try:
+        content = file.read_text(encoding="utf-8")
+        document = json.loads(content)
+    except json.JSONDecodeError as e:
+        typer.secho(f"ERROR: File is not valid JSON: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"ERROR: Failed to read file: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    # Check if document has a notary signature
+    notary_sig = extract_notary_signature(document)
+    if not notary_sig:
+        typer.secho("No notary signature found in document.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+
+    # Get expected address
+    expected_address = address
+    if not expected_address:
+        if _backend_config["backend"] != "gateway":
+            typer.secho("ERROR: No --address provided and gateway backend not configured.", fg=typer.colors.RED, err=True)
+            typer.echo("Provide --address or use --backend gateway to fetch address from gateway.")
+            raise typer.Exit(code=1)
+
+        gateway_url = _backend_config["gateway_url"]
+        if verbose:
+            typer.echo(f"Fetching notary address from {gateway_url}...")
+
+        try:
+            gw_client = GatewayClient(base_url=gateway_url)
+            info = gw_client.get_notary_info(verbose=verbose)
+            expected_address = info.address
+            if not expected_address:
+                typer.secho("ERROR: Gateway notary has no address configured.", fg=typer.colors.RED, err=True)
+                raise typer.Exit(code=1)
+        except exceptions.NotaryNotEnabledError:
+            typer.secho("ERROR: Notary not enabled on gateway. Provide --address manually.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        except Exception as e:
+            typer.secho(f"ERROR: Failed to get notary address: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+
+    # Display signature info
+    typer.echo(f"\nSignature Verification:")
+    typer.echo("-" * 50)
+    typer.echo(f"  Type:      {notary_sig.get('type', 'unknown')}")
+
+    signer = notary_sig.get("signer", "")
+    signer_short = f"{signer[:10]}...{signer[-4:]}" if len(signer) > 14 else signer
+    typer.echo(f"  Signer:    {signer_short}")
+    typer.echo(f"  Timestamp: {notary_sig.get('timestamp', 'unknown')}")
+
+    if verbose:
+        typer.echo(f"  Data hash: {notary_sig.get('data_hash', 'unknown')}")
+        sig_value = notary_sig.get("signature", "")
+        sig_short = f"{sig_value[:20]}...{sig_value[-8:]}" if len(sig_value) > 28 else sig_value
+        typer.echo(f"  Signature: {sig_short}")
+
+    # Verify
+    is_valid, error_msg = verify_notary_signature(document, expected_address)
+
+    if is_valid:
+        typer.secho(f"\n  Result:    ✓ VERIFIED", fg=typer.colors.GREEN, bold=True)
+        if signer.lower() == expected_address.lower():
+            typer.echo(f"             Signer matches gateway notary")
+    else:
+        typer.secho(f"\n  Result:    ✗ FAILED", fg=typer.colors.RED, bold=True)
+        typer.echo(f"             {error_msg}")
+        raise typer.Exit(code=1)
 
 
 @app.callback()
