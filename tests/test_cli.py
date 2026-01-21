@@ -1,6 +1,6 @@
 import pytest
 from typer.testing import CliRunner
-from swarm_provenance_uploader.cli import app, _backend_config
+from swarm_provenance_uploader.cli import app, _backend_config, _x402_config
 from swarm_provenance_uploader.models import (
     StampDetails,
     StampListResponse,
@@ -24,11 +24,19 @@ def reset_backend_config():
     _backend_config["backend"] = "gateway"
     _backend_config["gateway_url"] = "https://provenance-gateway.datafund.io"
     _backend_config["bee_url"] = "http://localhost:1633"
+    _x402_config["enabled"] = False
+    _x402_config["auto_pay"] = False
+    _x402_config["max_auto_pay_usd"] = 1.00
+    _x402_config["network"] = "base-sepolia"
     yield
     # Reset again after test
     _backend_config["backend"] = "gateway"
     _backend_config["gateway_url"] = "https://provenance-gateway.datafund.io"
     _backend_config["bee_url"] = "http://localhost:1633"
+    _x402_config["enabled"] = False
+    _x402_config["auto_pay"] = False
+    _x402_config["max_auto_pay_usd"] = 1.00
+    _x402_config["network"] = "base-sepolia"
 
 
 # =============================================================================
@@ -524,8 +532,9 @@ class TestVersionFlag:
 
         assert result.exit_code == 0
         assert "swarm-prov-upload" in result.stdout
-        # Version format: 0.2.0 or 0.2.0+git.abc1234
-        assert "0.2.0" in result.stdout
+        # Version format: X.Y.Z or X.Y.Z+git.abc1234
+        import re
+        assert re.search(r"\d+\.\d+\.\d+", result.stdout)
 
     def test_version_short_flag(self):
         """Tests -V flag shows version."""
@@ -533,8 +542,9 @@ class TestVersionFlag:
 
         assert result.exit_code == 0
         assert "swarm-prov-upload" in result.stdout
-        # Version format: 0.2.0 or 0.2.0+git.abc1234
-        assert "0.2.0" in result.stdout
+        # Version format: X.Y.Z or X.Y.Z+git.abc1234
+        import re
+        assert re.search(r"\d+\.\d+\.\d+", result.stdout)
 
 
 # =============================================================================
@@ -658,3 +668,420 @@ class TestLocalBackendWarning:
 
         assert result.exit_code == 0
         assert "Local Bee backend" not in result.stdout
+
+
+# =============================================================================
+# x402 COMMAND TESTS
+# =============================================================================
+
+class TestX402StatusCommand:
+    """Tests for x402 status command."""
+
+    def test_x402_status_shows_disabled(self):
+        """Tests x402 status shows disabled by default."""
+        result = runner.invoke(app, ["x402", "status"])
+
+        assert result.exit_code == 0
+        assert "x402 Payment Configuration" in result.stdout
+        assert "Disabled" in result.stdout
+
+    def test_x402_status_shows_network(self):
+        """Tests x402 status shows configured network."""
+        result = runner.invoke(app, ["x402", "status"])
+
+        assert result.exit_code == 0
+        assert "base-sepolia" in result.stdout
+
+    def test_x402_status_shows_auto_pay_settings(self):
+        """Tests x402 status shows auto-pay settings."""
+        result = runner.invoke(app, ["x402", "status"])
+
+        assert result.exit_code == 0
+        assert "Auto-pay" in result.stdout
+        assert "Max auto-pay" in result.stdout
+
+    def test_x402_status_shows_no_private_key(self):
+        """Tests x402 status shows private key not set."""
+        result = runner.invoke(app, ["x402", "status"])
+
+        assert result.exit_code == 0
+        assert "Not set" in result.stdout
+
+
+class TestX402InfoCommand:
+    """Tests for x402 info command."""
+
+    def test_x402_info_shows_setup_guide(self):
+        """Tests x402 info shows setup guide."""
+        result = runner.invoke(app, ["x402", "info"])
+
+        assert result.exit_code == 0
+        assert "x402 Payment Setup Guide" in result.stdout
+        assert "SWARM_X402_PRIVATE_KEY" in result.stdout
+        assert "faucet" in result.stdout.lower()
+
+
+class TestX402BalanceCommand:
+    """Tests for x402 balance command."""
+
+    def test_x402_balance_fails_without_private_key(self):
+        """Tests x402 balance fails when no private key configured."""
+        result = runner.invoke(app, ["x402", "balance"])
+
+        assert result.exit_code == 1
+        assert "No private key" in result.stdout or "ERROR" in result.stdout
+
+
+class TestX402GlobalFlags:
+    """Tests for x402 global CLI flags."""
+
+    def test_x402_flag_enables_payments(self):
+        """Tests --x402 flag enables x402 payments."""
+        # Just test that the flag is recognized
+        result = runner.invoke(app, ["--x402", "x402", "status"])
+
+        assert result.exit_code == 0
+        # After the flag, x402 should be enabled in config
+        assert "Enabled" in result.stdout or "x402" in result.stdout
+
+    def test_auto_pay_flag_recognized(self):
+        """Tests --auto-pay flag is recognized."""
+        result = runner.invoke(app, ["--auto-pay", "x402", "status"])
+
+        assert result.exit_code == 0
+
+    def test_max_pay_flag_recognized(self):
+        """Tests --max-pay flag is recognized."""
+        result = runner.invoke(app, ["--max-pay", "5.00", "x402", "status"])
+
+        assert result.exit_code == 0
+
+    def test_x402_network_flag_recognized(self):
+        """Tests --x402-network flag is recognized."""
+        result = runner.invoke(app, ["--x402-network", "base", "x402", "status"])
+
+        assert result.exit_code == 0
+        assert "base" in result.stdout
+
+    def test_invalid_x402_network_rejected(self):
+        """Tests invalid x402 network is rejected."""
+        result = runner.invoke(app, ["--x402-network", "ethereum", "x402", "status"])
+
+        assert result.exit_code == 1
+        assert "Invalid x402 network" in result.stdout
+
+    def test_max_pay_flag_updates_config(self):
+        """Tests --max-pay flag updates the auto-pay limit."""
+        result = runner.invoke(app, ["--max-pay", "2.50", "x402", "status"])
+
+        assert result.exit_code == 0
+        # Should show the updated max pay value
+        assert "2.50" in result.stdout or "$2.50" in result.stdout
+
+
+class TestX402StatusDetails:
+    """Additional tests for x402 status command."""
+
+    def test_x402_status_shows_max_auto_pay(self):
+        """Tests x402 status shows max auto-pay amount."""
+        result = runner.invoke(app, ["--max-pay", "3.50", "x402", "status"])
+
+        assert result.exit_code == 0
+        assert "3.50" in result.stdout or "$3.50" in result.stdout
+
+    def test_x402_status_network_after_flag(self):
+        """Tests that --x402-network flag changes displayed network."""
+        result = runner.invoke(app, ["--x402-network", "base", "x402", "status"])
+
+        assert result.exit_code == 0
+        # Should show 'base' not 'base-sepolia'
+        assert "base" in result.stdout.lower()
+        # Mainnet warning might appear
+        # (no assertion as warning may or may not be present)
+
+    def test_x402_status_with_all_flags(self):
+        """Tests x402 status with multiple flags combined."""
+        result = runner.invoke(
+            app,
+            ["--x402", "--auto-pay", "--max-pay", "10.00", "--x402-network", "base-sepolia", "x402", "status"]
+        )
+
+        assert result.exit_code == 0
+        assert "Enabled" in result.stdout
+        assert "10.00" in result.stdout or "$10.00" in result.stdout
+
+
+# =============================================================================
+# POOL TESTS
+# =============================================================================
+
+class TestStampsPoolCommands:
+    """Tests for stamps pool commands."""
+
+    SAMPLE_POOL_STATUS = {
+        "enabled": True,
+        "reserve_config": {"17": 5, "20": 3, "22": 2},
+        "current_levels": {"17": 4, "20": 2, "22": 1},
+        "available_stamps": {
+            "17": ["a" * 64, "b" * 64],
+            "20": ["c" * 64],
+            "22": [],
+        },
+        "total_stamps": 7,
+        "low_reserve_warning": False,
+        "last_check": "2024-01-15T10:00:00Z",
+        "next_check": "2024-01-15T11:00:00Z",
+        "errors": [],
+    }
+
+    def test_pool_status_success(self, mocker):
+        """Tests stamps pool-status command."""
+        from swarm_provenance_uploader.models import PoolStatusResponse
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_pool_status.return_value = PoolStatusResponse(**self.SAMPLE_POOL_STATUS)
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(app, ["stamps", "pool-status"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Stamp Pool Status" in result.stdout
+        assert "Enabled" in result.stdout
+        assert "Total stamps: 7" in result.stdout
+
+    def test_pool_status_requires_gateway(self):
+        """Tests pool-status fails with local backend."""
+        result = runner.invoke(app, ["--backend", "local", "stamps", "pool-status"])
+
+        assert result.exit_code == 1
+        assert "requires gateway backend" in result.stdout
+
+    def test_pool_status_not_enabled(self, mocker):
+        """Tests stamps pool-status when pool not enabled."""
+        from swarm_provenance_uploader.exceptions import PoolNotEnabledError
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_pool_status.side_effect = PoolNotEnabledError("Pool not enabled")
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(app, ["stamps", "pool-status"])
+
+        assert result.exit_code == 0  # Not a hard error, just informational
+        assert "not enabled" in result.stdout.lower()
+
+    def test_stamps_check_success(self, mocker):
+        """Tests stamps check command."""
+        from swarm_provenance_uploader.models import StampHealthCheckResponse, StampHealthIssue
+
+        mock_client = mocker.MagicMock()
+        mock_client.check_stamp_health.return_value = StampHealthCheckResponse(
+            stamp_id="a" * 64,
+            can_upload=True,
+            errors=[],
+            warnings=[StampHealthIssue(code="LOW_TTL", message="TTL is below 24 hours")],
+            status={"ttl": 43200},
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(app, ["stamps", "check", "a" * 64])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Health Check" in result.stdout
+        assert "Can upload: Yes" in result.stdout
+        assert "LOW_TTL" in result.stdout
+
+    def test_stamps_check_not_usable(self, mocker):
+        """Tests stamps check when stamp cannot upload."""
+        from swarm_provenance_uploader.models import StampHealthCheckResponse, StampHealthIssue
+
+        mock_client = mocker.MagicMock()
+        mock_client.check_stamp_health.return_value = StampHealthCheckResponse(
+            stamp_id="a" * 64,
+            can_upload=False,
+            errors=[StampHealthIssue(code="EXPIRED", message="Stamp has expired")],
+            warnings=[],
+            status=None,
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(app, ["stamps", "check", "a" * 64])
+
+        assert result.exit_code == 1
+        assert "Can upload: No" in result.stdout
+        assert "EXPIRED" in result.stdout
+
+    def test_stamps_check_requires_gateway(self):
+        """Tests stamps check fails with local backend."""
+        result = runner.invoke(app, ["--backend", "local", "stamps", "check", "a" * 64])
+
+        assert result.exit_code == 1
+        assert "requires gateway backend" in result.stdout
+
+
+class TestUploadWithPool:
+    """Tests for upload command with --usePool flag."""
+
+    def test_usepool_requires_gateway(self, mocker, tmp_path):
+        """Tests --usePool fails with local backend."""
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("test content")
+
+        result = runner.invoke(
+            app,
+            ["--backend", "local", "upload", "--file", str(test_file), "--usePool"]
+        )
+
+        assert result.exit_code == 1
+        assert "requires gateway backend" in result.stdout
+
+    def test_usepool_acquires_from_pool(self, mocker, tmp_path):
+        """Tests --usePool acquires stamp from pool instead of purchasing."""
+        from swarm_provenance_uploader.models import AcquireStampResponse
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("test content")
+
+        mock_client = mocker.MagicMock()
+        # Pool availability check
+        mock_client.get_pool_available_count.return_value = 2
+
+        # Pool acquisition
+        mock_client.acquire_stamp_from_pool.return_value = AcquireStampResponse(
+            success=True,
+            batch_id="a" * 64,
+            depth=17,
+            size_name="small",
+            message="Stamp acquired successfully",
+            fallback_used=False,
+        )
+
+        # Stamp usability check (mark as usable immediately)
+        mock_stamp = mocker.MagicMock()
+        mock_stamp.exists = True
+        mock_stamp.usable = True
+        mock_stamp.batchTTL = 86400
+        mock_client.get_stamp.return_value = mock_stamp
+
+        # Upload success
+        mock_client.upload_data.return_value = "swarmref" * 8
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli._get_gateway_client_with_x402",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(
+            app,
+            ["upload", "--file", str(test_file), "--usePool"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Acquiring stamp from pool" in result.stdout
+        assert "acquired from pool" in result.stdout.lower()
+        # Should NOT have called purchase_stamp
+        mock_client.purchase_stamp.assert_not_called()
+        # Should have called acquire_stamp_from_pool
+        mock_client.acquire_stamp_from_pool.assert_called_once()
+
+    def test_usepool_shows_fallback_message(self, mocker, tmp_path):
+        """Tests --usePool shows fallback message when larger stamp used."""
+        from swarm_provenance_uploader.models import AcquireStampResponse
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("test content")
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_pool_available_count.return_value = 1
+
+        mock_client.acquire_stamp_from_pool.return_value = AcquireStampResponse(
+            success=True,
+            batch_id="a" * 64,
+            depth=20,
+            size_name="medium",
+            message="Larger stamp substituted",
+            fallback_used=True,
+        )
+
+        mock_stamp = mocker.MagicMock()
+        mock_stamp.usable = True
+        mock_stamp.batchTTL = 86400
+        mock_client.get_stamp.return_value = mock_stamp
+
+        mock_client.upload_data.return_value = "swarmref" * 8
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli._get_gateway_client_with_x402",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(
+            app,
+            ["upload", "--file", str(test_file), "--usePool", "--size", "small"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "fallback" in result.stdout.lower()
+
+    def test_usepool_pool_empty_error(self, mocker, tmp_path):
+        """Tests --usePool fails gracefully when pool is empty."""
+        from swarm_provenance_uploader.exceptions import PoolEmptyError
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("test content")
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_pool_available_count.return_value = 0
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli._get_gateway_client_with_x402",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(
+            app,
+            ["upload", "--file", str(test_file), "--usePool"]
+        )
+
+        assert result.exit_code == 1
+        assert "No stamps available" in result.stdout
+        assert "retry later" in result.stdout.lower() or "without --usePool" in result.stdout
+
+    def test_usepool_pool_not_enabled(self, mocker, tmp_path):
+        """Tests --usePool fails when pool not enabled."""
+        from swarm_provenance_uploader.exceptions import PoolNotEnabledError
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("test content")
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_pool_available_count.side_effect = PoolNotEnabledError("Pool not enabled")
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli._get_gateway_client_with_x402",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(
+            app,
+            ["upload", "--file", str(test_file), "--usePool"]
+        )
+
+        assert result.exit_code == 1
+        assert "not enabled" in result.stdout.lower()
+        assert "without --usePool" in result.stdout

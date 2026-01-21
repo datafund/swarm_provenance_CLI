@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, ValidationError
-from typing import Optional, List
+from typing import Dict, Optional, List
 
 class ProvenanceMetadata(BaseModel):
     """
@@ -92,3 +92,109 @@ class ChequebookResponse(BaseModel):
     chequebookAddress: str = Field(description="Chequebook contract address")
     availableBalance: str = Field(description="Available balance")
     totalBalance: str = Field(description="Total balance")
+
+
+# --- x402 Payment Models ---
+
+class X402PaymentOption(BaseModel):
+    """A single payment option from the 402 response accepts array."""
+    scheme: str = Field(description="Payment scheme (e.g., 'exact')")
+    network: str = Field(description="Network identifier (e.g., 'base-sepolia', 'base')")
+    maxAmountRequired: str = Field(description="Maximum payment amount in smallest units")
+    resource: str = Field(description="Resource being paid for")
+    description: Optional[str] = Field(default=None, description="Human-readable description")
+    mimeType: Optional[str] = Field(default=None, description="MIME type of resource")
+    payTo: str = Field(description="Address to pay to")
+    maxTimeoutSeconds: Optional[int] = Field(default=None, description="Max timeout for payment")
+    asset: Optional[str] = Field(default=None, description="Asset/token contract address")
+    extra: Optional[dict] = Field(default=None, description="Additional provider-specific data")
+
+
+class X402PaymentRequirements(BaseModel):
+    """Parsed from HTTP 402 response."""
+    accepts: List[X402PaymentOption] = Field(description="List of accepted payment options")
+    error: Optional[str] = Field(default=None, description="Error message if present")
+    x402Version: int = Field(default=1, description="x402 protocol version")
+
+
+class X402PaymentAuthorization(BaseModel):
+    """Authorization data for payment signature."""
+    from_address: str = Field(alias="from", description="Payer wallet address")
+    to: str = Field(description="Recipient address")
+    value: str = Field(description="Payment amount in smallest units")
+    validAfter: int = Field(default=0, description="Timestamp after which payment is valid")
+    validBefore: int = Field(description="Timestamp before which payment is valid")
+    nonce: str = Field(description="Unique nonce for this payment")
+
+
+class X402PaymentPayload(BaseModel):
+    """Payload for X-PAYMENT header."""
+    x402Version: int = Field(default=1, description="x402 protocol version")
+    scheme: str = Field(default="exact", description="Payment scheme")
+    network: str = Field(description="Network identifier")
+    payload: dict = Field(description="Contains signature and authorization data")
+
+
+class X402PaymentResponse(BaseModel):
+    """Response from x-payment-response header after payment attempt."""
+    success: bool = Field(description="Whether the payment was successful")
+    errorReason: Optional[str] = Field(default=None, description="Error reason if payment failed")
+    transaction: Optional[str] = Field(default=None, description="Transaction hash if successful")
+    network: Optional[str] = Field(default=None, description="Network the payment was made on")
+    payer: Optional[str] = Field(default=None, description="Address of the payer")
+
+
+# --- Stamp Pool Models ---
+
+class PoolStatusResponse(BaseModel):
+    """Response from pool status endpoint."""
+    enabled: bool = Field(description="Whether the stamp pool is enabled")
+    reserve_config: Dict[str, int] = Field(description="Target reserve levels by depth")
+    current_levels: Dict[str, int] = Field(description="Current stamp counts by depth")
+    available_stamps: Dict[str, List[str]] = Field(description="Available batch IDs by depth")
+    total_stamps: int = Field(description="Total number of stamps in pool")
+    low_reserve_warning: bool = Field(description="True if pool is below target reserve")
+    last_check: Optional[str] = Field(default=None, description="ISO timestamp of last maintenance check")
+    next_check: Optional[str] = Field(default=None, description="ISO timestamp of next scheduled check")
+    errors: List[str] = Field(default_factory=list, description="Any errors from last check")
+
+
+class AcquireStampRequest(BaseModel):
+    """Request body for acquiring stamp from pool."""
+    size: Optional[str] = Field(default=None, description="Preferred size: 'small', 'medium', 'large'")
+    depth: Optional[int] = Field(default=None, description="Specific depth (overrides size)")
+
+
+class AcquireStampResponse(BaseModel):
+    """Response from pool acquire endpoint."""
+    success: bool = Field(description="Whether acquisition was successful")
+    batch_id: Optional[str] = Field(default=None, description="Acquired stamp batch ID")
+    depth: Optional[int] = Field(default=None, description="Depth of acquired stamp")
+    size_name: Optional[str] = Field(default=None, description="Size name of acquired stamp")
+    message: str = Field(description="Status message")
+    fallback_used: bool = Field(description="True if a larger stamp was substituted")
+
+
+class PoolStampInfo(BaseModel):
+    """Information about a stamp in the pool."""
+    batch_id: str = Field(description="Stamp batch ID")
+    depth: int = Field(description="Stamp depth")
+    size_name: str = Field(description="Size name (small/medium/large)")
+    created_at: str = Field(description="ISO timestamp when stamp was created")
+    ttl_at_creation: int = Field(description="TTL in seconds at creation time")
+
+
+class StampHealthIssue(BaseModel):
+    """A health issue (error or warning) for a stamp."""
+    code: str = Field(description="Issue code (e.g., 'EXPIRED', 'LOW_TTL')")
+    message: str = Field(description="Human-readable message")
+    details: Optional[Dict] = Field(default=None, description="Additional details")
+
+
+class StampHealthCheckResponse(BaseModel):
+    """Response from stamp health check endpoint."""
+    stamp_id: str = Field(description="The stamp batch ID")
+    can_upload: bool = Field(description="Whether the stamp can be used for uploads")
+    errors: List[StampHealthIssue] = Field(default_factory=list, description="Blocking issues")
+    warnings: List[StampHealthIssue] = Field(default_factory=list, description="Non-blocking warnings")
+    status: Optional[Dict] = Field(default=None, description="Detailed status metrics")

@@ -12,14 +12,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **IMPORTANT**: Always create a feature branch before making changes. Never commit directly to `main`.
 
+### x402 Feature Development (Active)
+
+**DO NOT MERGE `feature/x402-support` TO `main` UNTIL EXPLICITLY AGREED WITH USER.**
+
+The x402 implementation uses a branching strategy:
+- `feature/x402-support` - Main x402 feature branch (DO NOT MERGE TO MAIN)
+- `feature/x402-core-module` - Issue #37: Core payment module
+- `feature/x402-gateway-integration` - Issue #38: GatewayClient integration
+- `feature/x402-cli-commands` - Issue #39: CLI commands and config
+- `feature/x402-testing-docs` - Issue #40: Testing and documentation
+
+All sub-branches merge into `feature/x402-support`, which only merges to `main` after explicit approval.
+
 ### Branch Naming
 - `fix/` - Bug fixes (e.g., `fix/stamp-usability-check`)
 - `feature/` - New features (e.g., `feature/add-stamp-purchase-command`)
 - `docs/` - Documentation only (e.g., `docs/update-readme`)
 
 ### Commit Messages
-- Never mention "Claude" or AI tools in commit messages
+
+**CRITICAL: NEVER mention "Claude", "AI", "Generated with", "Co-Authored-By: Claude", or any AI attribution in commits, PRs, or issues. This is a strict requirement - no exceptions.**
+
 - Keep commit messages focused on what changed and why
+- Use conventional commit style when appropriate
 
 ## Version Management
 
@@ -101,6 +117,9 @@ swarm-prov-upload upload --file /path/to/data.txt --size medium
 # Upload with existing stamp (skips purchase)
 swarm-prov-upload upload --file /path/to/data.txt --stamp-id <existing_stamp_id>
 
+# Upload using pooled stamp (faster, ~5s vs >1min)
+swarm-prov-upload upload --file /path/to/data.txt --usePool
+
 # Upload with local Bee backend (uses legacy amount)
 swarm-prov-upload --backend local upload --file /path/to/data.txt --amount 1000000000
 
@@ -111,10 +130,23 @@ swarm-prov-upload download <swarm_hash> --output-dir ./downloads
 swarm-prov-upload stamps list
 swarm-prov-upload stamps info <stamp_id>
 swarm-prov-upload stamps extend <stamp_id> --amount 1000000
+swarm-prov-upload stamps check <stamp_id>     # Health check
+swarm-prov-upload stamps pool-status          # Pool availability
 
 # Wallet info (gateway only)
 swarm-prov-upload wallet
 swarm-prov-upload chequebook
+
+# x402 payment commands (optional)
+swarm-prov-upload x402 status
+swarm-prov-upload x402 balance
+swarm-prov-upload x402 info
+
+# Upload with x402 enabled
+swarm-prov-upload --x402 upload --file /path/to/data.txt
+
+# Upload with auto-pay
+swarm-prov-upload --x402 --auto-pay --max-pay 1.00 upload --file /path/to/data.txt
 ```
 
 ## Architecture
@@ -122,10 +154,11 @@ swarm-prov-upload chequebook
 ### Core Workflow
 The application follows a modular architecture with clear separation of concerns:
 
-1. **CLI Layer** (`cli.py`): Typer-based command interface with commands for upload, download, stamps, wallet, health
+1. **CLI Layer** (`cli.py`): Typer-based command interface with commands for upload, download, stamps, wallet, health, x402
 2. **Core Modules** (`core/`): Business logic split across specialized modules
    - `gateway_client.py`: Client for provenance-gateway API (default)
    - `swarm_client.py`: Client for local Bee node API
+   - `x402_client.py`: Client for x402 payment handling (optional)
    - `file_utils.py`: File I/O and encoding utilities
    - `metadata_builder.py`: Metadata construction
 3. **Data Models** (`models.py`): Pydantic v2 schemas for metadata and API responses
@@ -138,11 +171,19 @@ The application follows a modular architecture with clear separation of concerns
 - Default backend, requires no local infrastructure
 - Supports all features: stamps, wallet, chequebook, data upload/download
 - Uses provenance-gateway.datafund.io API
+- Integrated x402 payment handling when enabled
 
 **SwarmClient** (`core/swarm_client.py`):
 - For local Bee node communication
 - Subset of features (no stamp list, no extend, no wallet)
 - Used with `--backend local`
+
+**X402Client** (`core/x402_client.py`):
+- Optional client for x402 payment handling
+- Lazy-loads eth-account and web3 dependencies
+- Handles HTTP 402 Payment Required responses
+- EIP-712 message signing for USDC payments on Base chain
+- Supports Base Sepolia (testnet) and Base (mainnet)
 
 ### Key Components
 
@@ -157,6 +198,11 @@ The application follows a modular architecture with clear separation of concerns
 - `StampDetails`, `StampListResponse`, `StampPurchaseResponse`
 - `DataUploadResponse`, `DataDownloadResponse`
 - `WalletResponse`, `ChequebookResponse`
+
+**x402 Payment Models**: Schemas for x402 payment handling:
+- `X402PaymentOption`: Individual payment option from 402 response
+- `X402PaymentRequirements`: Parsed 402 response body with accepts array
+- `X402PaymentPayload`: Signed payment payload for X-PAYMENT header
 
 **Upload Process**:
 1. File reading and SHA256 hashing (`file_utils.py`)
@@ -190,6 +236,13 @@ Uses python-dotenv for environment configuration:
 - `DEFAULT_POSTAGE_DURATION_HOURS`: Stamp validity in hours (gateway only, default: 25)
 - `DEFAULT_POSTAGE_AMOUNT`: Legacy PLUR amount for local backend (default: 1000000000)
 
+**x402 Payment Configuration**:
+- `X402_ENABLED`: Enable x402 payment support (default: false)
+- `SWARM_X402_PRIVATE_KEY`: Wallet private key for signing payments
+- `X402_NETWORK`: `base-sepolia` (testnet) or `base` (mainnet)
+- `X402_AUTO_PAY`: Enable auto-pay without prompts (default: false)
+- `X402_MAX_AUTO_PAY_USD`: Maximum auto-pay amount per request (default: 1.00)
+
 ## Testing Approach
 
 The test suite has two layers:
@@ -197,6 +250,7 @@ The test suite has two layers:
 ### Unit Tests (Mocked)
 - `test_cli.py`: CLI command tests with mocked backends
 - `test_gateway_client.py`: GatewayClient tests with mocked HTTP
+- `test_x402_client.py`: X402Client tests with mocked eth-account/web3
 - Network calls mocked via `requests-mock`
 - File I/O operations mocked with `pytest-mock`
 - Do not require live services

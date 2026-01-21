@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarm-provenance-uploader"
-version = "0.2.0"
+version = "0.4.0"
 description = "A CLI toolkit for wrapping data and uploading to Swarm."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -31,10 +31,18 @@ testing = [
     "pytest-mock>=3.12",
     "requests-mock>=1.11"
 ]
+# x402 payment support (USDC on Base chain)
+x402 = [
+    "x402>=0.1.0",
+    "eth-account>=0.8.0",
+    "web3>=6.0.0",
+]
 
 [tool.pytest.ini_options]
 markers = [
     "integration: marks tests as integration tests (hit real backends)",
     "local_bee: marks tests that require local Bee node",
     "gateway: marks tests that require gateway service",
+    "x402: marks tests that require x402 wallet configuration",
+    "slow: marks tests that are slow or use real funds",
 ]
