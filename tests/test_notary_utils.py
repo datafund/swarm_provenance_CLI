@@ -38,7 +38,8 @@ def create_signed_document(data: dict, private_key: str) -> dict:
                 "timestamp": timestamp,
                 "data_hash": data_hash,
                 "signature": signed.signature.hex(),
-                "signed_fields": ["data"],
+                "hashed_fields": ["data"],
+                "signed_message_format": "{data_hash}|{timestamp}",
             }
         ],
     }
@@ -159,7 +160,8 @@ class TestVerifyNotarySignature:
                     "timestamp": "2026-01-21T16:30:00+00:00",
                     "data_hash": "abc123",
                     "signature": "0x5678",
-                    "signed_fields": ["data"],
+                    "hashed_fields": ["data"],
+                    "signed_message_format": "{data_hash}|{timestamp}",
                 }
             ]
         }
@@ -242,7 +244,6 @@ class TestVerifyNotarySignature:
 
         assert is_valid is True
         assert error is None
-
 
 class TestExtractNotarySignature:
     """Tests for extract_notary_signature function."""

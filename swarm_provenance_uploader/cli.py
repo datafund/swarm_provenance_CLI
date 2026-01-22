@@ -475,6 +475,12 @@ def upload(
             typer.echo(f"  Timestamp: {notary_sig.get('timestamp', 'N/A')}")
             if verbose:
                 typer.echo(f"  Data hash: {notary_sig.get('data_hash', 'N/A')}")
+                hashed_fields = notary_sig.get("hashed_fields")
+                if hashed_fields:
+                    typer.echo(f"  Hashed fields: {hashed_fields}")
+                msg_format = notary_sig.get("signed_message_format")
+                if msg_format:
+                    typer.echo(f"  Message format: {msg_format}")
     elif use_signing:
         typer.secho("\nNote: Signature requested but signed document not returned by gateway.", fg=typer.colors.YELLOW)
 
@@ -610,6 +616,13 @@ def download(
                     typer.echo(f"  Type:      {notary_sig.get('type', 'unknown')}")
                     typer.echo(f"  Signer:    {signer_short}")
                     typer.echo(f"  Timestamp: {notary_sig.get('timestamp', 'unknown')}")
+                    if verbose:
+                        hashed_fields = notary_sig.get("hashed_fields")
+                        if hashed_fields:
+                            typer.echo(f"  Hashed fields: {hashed_fields}")
+                        msg_format = notary_sig.get("signed_message_format")
+                        if msg_format:
+                            typer.echo(f"  Message format: {msg_format}")
 
                 # Verify signature
                 is_valid, error_msg = verify_notary_signature(raw_document, expected_address)
@@ -1383,6 +1396,12 @@ def notary_verify(
         sig_value = notary_sig.get("signature", "")
         sig_short = f"{sig_value[:20]}...{sig_value[-8:]}" if len(sig_value) > 28 else sig_value
         typer.echo(f"  Signature: {sig_short}")
+        hashed_fields = notary_sig.get("hashed_fields")
+        if hashed_fields:
+            typer.echo(f"  Hashed fields: {hashed_fields}")
+        msg_format = notary_sig.get("signed_message_format")
+        if msg_format:
+            typer.echo(f"  Message format: {msg_format}")
 
     # Verify
     is_valid, error_msg = verify_notary_signature(document, expected_address)

@@ -413,7 +413,8 @@ The notary adds a signature entry in the following format:
       "timestamp": "2026-01-21T16:30:00+00:00",
       "data_hash": "sha256...",
       "signature": "0x...",
-      "signed_fields": ["data"]
+      "hashed_fields": ["data"],
+      "signed_message_format": "{data_hash}|{timestamp}"
     }
   ]
 }
@@ -423,10 +424,11 @@ The notary adds a signature entry in the following format:
 |-------|-------------|
 | `type` | Always `notary` |
 | `signer` | Ethereum address of the notary |
-| `timestamp` | ISO 8601 timestamp when signed |
+| `timestamp` | ISO 8601 timestamp when signed (gateway's witness time) |
 | `data_hash` | SHA256 hash of canonical JSON of `data` field |
 | `signature` | EIP-191 signature of `{data_hash}|{timestamp}` |
-| `signed_fields` | Fields that were included in the signature |
+| `hashed_fields` | Fields whose values were hashed (typically `["data"]`) |
+| `signed_message_format` | Format pattern of the signed message |
 
 #### Verifying Signatures Manually
 

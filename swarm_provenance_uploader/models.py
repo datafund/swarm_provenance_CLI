@@ -224,7 +224,8 @@ class NotarySignature(BaseModel):
     timestamp: str = Field(description="ISO 8601 timestamp when signature was created")
     data_hash: str = Field(description="SHA256 hash of the canonical JSON of the data field")
     signature: str = Field(description="EIP-191 signature (hex string, may include 0x prefix)")
-    signed_fields: List[str] = Field(description="List of field names that were signed (typically ['data'])")
+    hashed_fields: List[str] = Field(description="List of field names whose values were hashed (typically ['data'])")
+    signed_message_format: str = Field(description="Format of the signed message, e.g., '{data_hash}|{timestamp}'")
 
 
 class SignedDocumentResponse(BaseModel):
