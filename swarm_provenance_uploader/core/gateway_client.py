@@ -21,6 +21,9 @@ from ..exceptions import (
     PoolEmptyError,
     PoolAcquisitionError,
     StampNotFoundError,
+    NotaryNotEnabledError,
+    NotaryNotConfiguredError,
+    InvalidDocumentFormatError,
 )
 from ..models import (
     StampDetails,
@@ -35,6 +38,9 @@ from ..models import (
     AcquireStampResponse,
     PoolStampInfo,
     StampHealthCheckResponse,
+    NotaryInfoResponse,
+    NotaryStatusResponse,
+    SignedDocumentResponse,
 )
 
 
@@ -862,3 +868,185 @@ class GatewayClient:
             if verbose:
                 print(f"ERROR: Stamp health check failed: {e}")
             raise ConnectionError(f"Failed to check stamp health: {e}") from e
+
+    # --- Notary Signing ---
+
+    def get_notary_info(self, verbose: bool = False) -> NotaryInfoResponse:
+        """
+        Get notary service status and signer address.
+
+        Returns:
+            NotaryInfoResponse with enabled, available, address, and message.
+
+        Raises:
+            NotaryNotEnabledError: If notary endpoint returns 404
+        """
+        url = self._make_url("/api/v1/notary/info")
+        if verbose:
+            print(f"--- DEBUG: Get Notary Info ---")
+            print(f"URL: GET {url}")
+
+        try:
+            response = requests.get(url, headers=self._get_headers(), timeout=10)
+            if verbose:
+                print(f"DEBUG: Notary info response: {response.status_code}")
+
+            if response.status_code == 404:
+                raise NotaryNotEnabledError("Notary signing is not enabled on this gateway.")
+
+            response.raise_for_status()
+            data = response.json()
+            return NotaryInfoResponse.model_validate(data)
+        except NotaryNotEnabledError:
+            raise
+        except requests.exceptions.RequestException as e:
+            if verbose:
+                print(f"ERROR: Get notary info failed: {e}")
+            raise ConnectionError(f"Failed to get notary info: {e}") from e
+
+    def get_notary_status(self, verbose: bool = False) -> NotaryStatusResponse:
+        """
+        Get simplified notary service status (health check).
+
+        Returns:
+            NotaryStatusResponse with enabled and available flags.
+
+        Raises:
+            NotaryNotEnabledError: If notary endpoint returns 404
+        """
+        url = self._make_url("/api/v1/notary/status")
+        if verbose:
+            print(f"--- DEBUG: Get Notary Status ---")
+            print(f"URL: GET {url}")
+
+        try:
+            response = requests.get(url, headers=self._get_headers(), timeout=10)
+            if verbose:
+                print(f"DEBUG: Notary status response: {response.status_code}")
+
+            if response.status_code == 404:
+                raise NotaryNotEnabledError("Notary signing is not enabled on this gateway.")
+
+            response.raise_for_status()
+            data = response.json()
+            return NotaryStatusResponse.model_validate(data)
+        except NotaryNotEnabledError:
+            raise
+        except requests.exceptions.RequestException as e:
+            if verbose:
+                print(f"ERROR: Get notary status failed: {e}")
+            raise ConnectionError(f"Failed to get notary status: {e}") from e
+
+    def upload_data_with_signing(
+        self,
+        data: bytes,
+        stamp_id: str,
+        sign: str = "notary",
+        content_type: str = "application/json",
+        verbose: bool = False,
+    ) -> SignedDocumentResponse:
+        """
+        Upload data to Swarm with notary signing.
+
+        The gateway will add a cryptographic signature to the document
+        before storing it on Swarm.
+
+        Args:
+            data: The bytes to upload (must be valid JSON with 'data' field)
+            stamp_id: Postage stamp ID to use
+            sign: Signing mode, currently only 'notary' is supported
+            content_type: Content type (always forced to application/json for signing)
+            verbose: Enable debug output
+
+        Returns:
+            SignedDocumentResponse with reference and optional signed_document.
+
+        Raises:
+            NotaryNotEnabledError: If notary is not enabled
+            NotaryNotConfiguredError: If notary is enabled but not configured
+            InvalidDocumentFormatError: If document is not valid JSON or missing 'data' field
+        """
+        url = self._make_url("/api/v1/data/")
+        params = {
+            "stamp_id": stamp_id.lower(),
+            "sign": sign,
+            "content_type": "application/json",  # Always JSON for signed documents
+        }
+
+        if verbose:
+            print(f"--- DEBUG: Upload Data with Signing ---")
+            print(f"URL: POST {url}")
+            print(f"Params: {params}")
+            print(f"Data size: {len(data)} bytes")
+
+        try:
+            # Gateway expects multipart form data
+            files = {"file": ("data", data, "application/json")}
+            headers = {}
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+
+            # Use _make_paid_request for x402 support
+            response = self._make_paid_request(
+                "POST",
+                url,
+                params=params,
+                files=files,
+                headers=headers,
+                timeout=60,
+                verbose=verbose,
+            )
+
+            if verbose:
+                print(f"DEBUG: Upload with signing status: {response.status_code}")
+
+            # Handle specific error codes
+            if response.status_code == 400:
+                try:
+                    error_data = response.json()
+                    error_code = error_data.get("code", "")
+                    error_message = error_data.get("detail", str(error_data))
+
+                    if error_code == "NOTARY_NOT_ENABLED":
+                        raise NotaryNotEnabledError(
+                            "Notary signing is not enabled on this gateway."
+                        )
+                    elif error_code == "NOTARY_NOT_CONFIGURED":
+                        raise NotaryNotConfiguredError(
+                            "Notary is enabled but not fully configured on this gateway."
+                        )
+                    elif error_code == "INVALID_DOCUMENT_FORMAT":
+                        raise InvalidDocumentFormatError(
+                            f"Invalid document format: {error_message}"
+                        )
+                    elif error_code == "INVALID_SIGN_OPTION":
+                        raise ValueError(f"Invalid sign option: {error_message}")
+                except (ValueError, KeyError):
+                    pass  # Fall through to raise_for_status
+
+            response.raise_for_status()
+            data_response = response.json()
+
+            # Build response - gateway may return signed_document or just reference
+            reference = data_response.get("reference", "")
+            signed_doc = data_response.get("signed_document")
+            message = data_response.get("message")
+
+            if verbose:
+                print(f"DEBUG: Upload reference: {reference}")
+                if signed_doc:
+                    sigs = signed_doc.get("signatures", [])
+                    print(f"DEBUG: Document has {len(sigs)} signature(s)")
+
+            return SignedDocumentResponse(
+                reference=reference,
+                signed_document=signed_doc,
+                message=message,
+            )
+
+        except (NotaryNotEnabledError, NotaryNotConfiguredError, InvalidDocumentFormatError):
+            raise
+        except requests.exceptions.RequestException as e:
+            if verbose:
+                print(f"ERROR: Upload with signing failed: {e}")
+            raise ConnectionError(f"Failed to upload data with signing: {e}") from e

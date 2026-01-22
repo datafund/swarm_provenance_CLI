@@ -908,3 +908,159 @@ class TestGatewayClientPool:
 
         with pytest.raises(StampNotFoundError):
             client.check_stamp_health(DUMMY_STAMP)
+
+
+class TestGatewayClientNotary:
+    """Tests for notary signing functionality."""
+
+    def test_get_notary_info_enabled(self, requests_mock):
+        """Tests getting notary info when enabled."""
+        notary_response = {
+            "enabled": True,
+            "available": True,
+            "address": "0x54e5e8477D2352dFBCab55B0306bA77038074670",
+            "message": "Notary signing is available. Use sign=notary on upload.",
+        }
+        requests_mock.get(
+            "https://test.gateway.io/api/v1/notary/info",
+            json=notary_response,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        info = client.get_notary_info()
+
+        assert info.enabled is True
+        assert info.available is True
+        assert info.address == "0x54e5e8477D2352dFBCab55B0306bA77038074670"
+        assert "sign=notary" in info.message
+
+    def test_get_notary_info_disabled(self, requests_mock):
+        """Tests getting notary info when disabled (404)."""
+        from swarm_provenance_uploader.exceptions import NotaryNotEnabledError
+
+        requests_mock.get(
+            "https://test.gateway.io/api/v1/notary/info",
+            status_code=404,
+            json={"error": "Not found"},
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+
+        with pytest.raises(NotaryNotEnabledError):
+            client.get_notary_info()
+
+    def test_get_notary_info_not_configured(self, requests_mock):
+        """Tests getting notary info when enabled but not configured."""
+        notary_response = {
+            "enabled": True,
+            "available": False,
+            "address": None,
+            "message": "Notary is enabled but private key is not configured.",
+        }
+        requests_mock.get(
+            "https://test.gateway.io/api/v1/notary/info",
+            json=notary_response,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        info = client.get_notary_info()
+
+        assert info.enabled is True
+        assert info.available is False
+        assert info.address is None
+
+    def test_get_notary_status(self, requests_mock):
+        """Tests getting notary status."""
+        status_response = {
+            "enabled": True,
+            "available": True,
+            "address": "0x54e5e8477D2352dFBCab55B0306bA77038074670",
+        }
+        requests_mock.get(
+            "https://test.gateway.io/api/v1/notary/status",
+            json=status_response,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        status = client.get_notary_status()
+
+        assert status.enabled is True
+        assert status.available is True
+
+    def test_upload_with_signing(self, requests_mock):
+        """Tests upload with sign=notary parameter."""
+        upload_response = {
+            "reference": DUMMY_SWARM_REF,
+            "signed_document": {
+                "data": "dGVzdCBkYXRh",
+                "signatures": [
+                    {
+                        "type": "notary",
+                        "signer": "0x54e5e8477D2352dFBCab55B0306bA77038074670",
+                        "timestamp": "2026-01-21T16:30:00+00:00",
+                        "data_hash": "abc123",
+                        "signature": "0x" + "a" * 130,
+                        "hashed_fields": ["data"],
+                        "signed_message_format": "{data_hash}|{timestamp}",
+                    }
+                ],
+            },
+            "message": "Upload successful with notary signature",
+        }
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/data/",
+            json=upload_response,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        result = client.upload_data_with_signing(b'{"data": "test"}', DUMMY_STAMP)
+
+        assert result.reference == DUMMY_SWARM_REF
+        assert result.signed_document is not None
+        assert len(result.signed_document["signatures"]) == 1
+        assert result.signed_document["signatures"][0]["type"] == "notary"
+
+    def test_upload_with_signing_notary_not_enabled(self, requests_mock):
+        """Tests upload when notary not enabled."""
+        from swarm_provenance_uploader.exceptions import NotaryNotEnabledError
+
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/data/",
+            status_code=400,
+            json={"code": "NOTARY_NOT_ENABLED", "detail": "Notary signing is not enabled"},
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+
+        with pytest.raises(NotaryNotEnabledError):
+            client.upload_data_with_signing(b'{"data": "test"}', DUMMY_STAMP)
+
+    def test_upload_with_signing_notary_not_configured(self, requests_mock):
+        """Tests upload when notary not configured."""
+        from swarm_provenance_uploader.exceptions import NotaryNotConfiguredError
+
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/data/",
+            status_code=400,
+            json={"code": "NOTARY_NOT_CONFIGURED", "detail": "Missing private key"},
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+
+        with pytest.raises(NotaryNotConfiguredError):
+            client.upload_data_with_signing(b'{"data": "test"}', DUMMY_STAMP)
+
+    def test_upload_with_signing_invalid_document(self, requests_mock):
+        """Tests upload with invalid document format."""
+        from swarm_provenance_uploader.exceptions import InvalidDocumentFormatError
+
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/data/",
+            status_code=400,
+            json={"code": "INVALID_DOCUMENT_FORMAT", "detail": "Missing 'data' field"},
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+
+        with pytest.raises(InvalidDocumentFormatError):
+            client.upload_data_with_signing(b'{"invalid": "document"}', DUMMY_STAMP)

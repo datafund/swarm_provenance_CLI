@@ -147,6 +147,13 @@ swarm-prov-upload --x402 upload --file /path/to/data.txt
 
 # Upload with auto-pay
 swarm-prov-upload --x402 --auto-pay --max-pay 1.00 upload --file /path/to/data.txt
+
+# Notary signing (gateway only)
+swarm-prov-upload notary info                           # Check notary service status
+swarm-prov-upload notary status                         # Quick status check
+swarm-prov-upload notary verify --file signed.json      # Verify local file signature
+swarm-prov-upload upload --file data.txt --sign notary  # Upload with notary signing
+swarm-prov-upload download <hash> --verify              # Download with signature verification
 ```
 
 ## Architecture
@@ -159,6 +166,7 @@ The application follows a modular architecture with clear separation of concerns
    - `gateway_client.py`: Client for provenance-gateway API (default)
    - `swarm_client.py`: Client for local Bee node API
    - `x402_client.py`: Client for x402 payment handling (optional)
+   - `notary_utils.py`: Notary signature verification utilities
    - `file_utils.py`: File I/O and encoding utilities
    - `metadata_builder.py`: Metadata construction
 3. **Data Models** (`models.py`): Pydantic v2 schemas for metadata and API responses
@@ -203,6 +211,12 @@ The application follows a modular architecture with clear separation of concerns
 - `X402PaymentOption`: Individual payment option from 402 response
 - `X402PaymentRequirements`: Parsed 402 response body with accepts array
 - `X402PaymentPayload`: Signed payment payload for X-PAYMENT header
+
+**Notary Models**: Schemas for notary signing:
+- `NotaryInfoResponse`: Status and configuration from /api/v1/notary/info
+- `NotaryStatusResponse`: Simplified health check from /api/v1/notary/status
+- `NotarySignature`: Signature entry in a signed document
+- `SignedDocumentResponse`: Response from upload with sign=notary
 
 **Upload Process**:
 1. File reading and SHA256 hashing (`file_utils.py`)
@@ -250,6 +264,7 @@ The test suite has two layers:
 ### Unit Tests (Mocked)
 - `test_cli.py`: CLI command tests with mocked backends
 - `test_gateway_client.py`: GatewayClient tests with mocked HTTP
+- `test_notary_utils.py`: Notary signature verification tests with mocked crypto
 - `test_x402_client.py`: X402Client tests with mocked eth-account/web3
 - Network calls mocked via `requests-mock`
 - File I/O operations mocked with `pytest-mock`

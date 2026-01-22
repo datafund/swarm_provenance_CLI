@@ -18,6 +18,8 @@ stamps_app = typer.Typer(help="Manage postage stamps.")
 app.add_typer(stamps_app, name="stamps")
 x402_app = typer.Typer(help="x402 payment configuration and status.")
 app.add_typer(x402_app, name="x402")
+notary_app = typer.Typer(help="Notary signing service commands.")
+app.add_typer(notary_app, name="notary")
 
 
 def _version_callback(value: bool):
@@ -132,6 +134,7 @@ def upload(
     stamp_check_retries: Annotated[int, typer.Option("--stamp-retries", help="Number of times to check for stamp usability.")] = 12,
     stamp_check_interval: Annotated[int, typer.Option("--stamp-interval", help="Seconds to wait between stamp usability checks.")] = 20,
     use_pool: Annotated[bool, typer.Option("--usePool", help="Acquire stamp from pool instead of purchasing (gateway only, faster ~5s vs >1min).")] = False,
+    sign: Annotated[Optional[str], typer.Option("--sign", help="Sign document with notary service. Value: 'notary' (gateway only).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False
 ):
     """
@@ -143,11 +146,23 @@ def upload(
     Use --duration to specify validity in hours (min 24).
     Use --size for preset sizes: small, medium, large.
     Use --usePool to acquire from pool (faster, gateway only).
+    Use --sign notary to add a notary signature (gateway only).
     """
     # Determine which backend to use
     use_gateway = _backend_config["backend"] == "gateway"
     gateway_url = _backend_config["gateway_url"]
     local_bee_url = bee_url or _backend_config["bee_url"]
+
+    # Validate --sign option
+    use_signing = False
+    if sign:
+        if sign.lower() != "notary":
+            typer.secho(f"ERROR: Invalid --sign value '{sign}'. Use 'notary'.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        if not use_gateway:
+            typer.secho("ERROR: --sign requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        use_signing = True
 
     # Show warning for local backend
     if not use_gateway:
@@ -174,6 +189,8 @@ def upload(
         typer.echo(f"    Stamp Check Interval: {stamp_check_interval}s")
         if use_pool:
             typer.echo(f"    Use Pool: Yes (acquire from pool instead of purchasing)")
+        if use_signing:
+            typer.echo(f"    Sign: notary (document will be signed by gateway notary)")
     else:
         typer.echo(f"Processing file: {file.name}...")
 
@@ -391,16 +408,40 @@ def upload(
         typer.echo(f"    Final Metadata Object created with stamp_id: {final_metadata_obj.stamp_id}")
         typer.echo(f"    Preview of final_payload_bytes (first 100): {final_payload_bytes[:100].decode('utf-8', errors='replace')}...")
 
-    # 8 & 9. Upload "Provenance Metadata" JSON
-    typer.echo(f"Uploading data to Swarm...")
+    # 8 & 9. Upload "Provenance Metadata" JSON (with optional signing)
+    if use_signing:
+        typer.echo(f"Uploading data to Swarm with notary signature...")
+    else:
+        typer.echo(f"Uploading data to Swarm...")
     if verbose:
         typer.echo(f"    (Using stamp_id: {stamp_id.lower()} in header)")
+
+    signed_document = None
     try:
         if use_gateway:
             gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
-            swarm_ref_hash = gw_client.upload_data(final_payload_bytes, stamp_id, verbose=verbose)
+            if use_signing:
+                # Upload with notary signing
+                result = gw_client.upload_data_with_signing(
+                    final_payload_bytes, stamp_id, sign="notary", verbose=verbose
+                )
+                swarm_ref_hash = result.reference
+                signed_document = result.signed_document
+            else:
+                swarm_ref_hash = gw_client.upload_data(final_payload_bytes, stamp_id, verbose=verbose)
         else:
             swarm_ref_hash = swarm_client.upload_data(local_bee_url, final_payload_bytes, stamp_id, verbose=verbose)
+    except exceptions.NotaryNotEnabledError:
+        typer.secho(f"\nERROR: Notary signing is not enabled on this gateway.", fg=typer.colors.RED, err=True)
+        typer.echo("Remove --sign option or use a gateway with notary enabled.")
+        raise typer.Exit(code=1)
+    except exceptions.NotaryNotConfiguredError:
+        typer.secho(f"\nERROR: Notary is enabled but not configured on this gateway.", fg=typer.colors.RED, err=True)
+        typer.echo("Contact the gateway operator or remove --sign option.")
+        raise typer.Exit(code=1)
+    except exceptions.InvalidDocumentFormatError as e:
+        typer.secho(f"\nERROR: Invalid document format for signing: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
     except exceptions.PaymentRequiredError as e:
         typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
         typer.echo("Use --x402 to enable x402 payments, or use a gateway without x402 mode.")
@@ -416,6 +457,33 @@ def upload(
     typer.echo("Swarm Reference Hash:")
     typer.secho(f"{swarm_ref_hash}", fg=typer.colors.CYAN)
 
+    # Display signature info if signing was used
+    if use_signing and signed_document:
+        signatures = signed_document.get("signatures", [])
+        notary_sig = None
+        for sig in signatures:
+            if sig.get("type") == "notary":
+                notary_sig = sig
+                break
+
+        if notary_sig:
+            typer.echo("\nSignature added:")
+            signer = notary_sig.get("signer", "")
+            signer_short = f"{signer[:10]}...{signer[-4:]}" if len(signer) > 14 else signer
+            typer.echo(f"  Type:      {notary_sig.get('type', 'notary')}")
+            typer.echo(f"  Signer:    {signer_short}")
+            typer.echo(f"  Timestamp: {notary_sig.get('timestamp', 'N/A')}")
+            if verbose:
+                typer.echo(f"  Data hash: {notary_sig.get('data_hash', 'N/A')}")
+                hashed_fields = notary_sig.get("hashed_fields")
+                if hashed_fields:
+                    typer.echo(f"  Hashed fields: {hashed_fields}")
+                msg_format = notary_sig.get("signed_message_format")
+                if msg_format:
+                    typer.echo(f"  Message format: {msg_format}")
+    elif use_signing:
+        typer.secho("\nNote: Signature requested but signed document not returned by gateway.", fg=typer.colors.YELLOW)
+
 @app.command()
 def download(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash of the Provenance Metadata to download.")],
@@ -429,11 +497,14 @@ def download(
         default_factory=lambda: Path.cwd()  # Default to current working directory
     )],
     bee_url: Annotated[Optional[str], typer.Option("--bee-url", help="Bee Gateway URL (when backend=local).")] = None,
+    verify: Annotated[bool, typer.Option("--verify", help="Verify notary signature if present (gateway only for address lookup).")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False
 ):
     """
     Downloads Provenance Metadata from Swarm, decodes the wrapped data,
     verifies its integrity, and saves both files.
+
+    Use --verify to verify notary signatures if present.
     """
     # Determine which backend to use
     use_gateway = _backend_config["backend"] == "gateway"
@@ -501,6 +572,70 @@ def download(
     # 4. Validate expected JSON structure (Pydantic does this on parsing)
     #    and check for essential fields if not using Pydantic or for extra safety.
     #    Pydantic model already ensures 'data' and 'content_hash' exist if parsing succeeds.
+
+    # 4.5 Verify notary signature if requested
+    if verify:
+        from .core.notary_utils import verify_notary_signature, has_notary_signature
+
+        # Parse the raw metadata to check for signatures
+        try:
+            raw_document = json.loads(metadata_str)
+        except json.JSONDecodeError:
+            raw_document = {}
+
+        if has_notary_signature(raw_document):
+            typer.echo("\nSignature Verification:")
+            typer.echo("-" * 50)
+
+            # Get expected notary address from gateway
+            expected_address = None
+            if use_gateway:
+                try:
+                    gw_client = GatewayClient(base_url=gateway_url)
+                    notary_info = gw_client.get_notary_info(verbose=verbose)
+                    expected_address = notary_info.address
+                    if verbose:
+                        typer.echo(f"    Fetched notary address: {expected_address}")
+                except exceptions.NotaryNotEnabledError:
+                    typer.secho("  Warning: Could not fetch notary address (notary not enabled on gateway)", fg=typer.colors.YELLOW)
+                except Exception as e:
+                    typer.secho(f"  Warning: Could not fetch notary address: {e}", fg=typer.colors.YELLOW)
+
+            if expected_address:
+                # Extract signature info for display
+                signatures = raw_document.get("signatures", [])
+                notary_sig = None
+                for sig in signatures:
+                    if sig.get("type") == "notary":
+                        notary_sig = sig
+                        break
+
+                if notary_sig:
+                    signer = notary_sig.get("signer", "")
+                    signer_short = f"{signer[:10]}...{signer[-4:]}" if len(signer) > 14 else signer
+                    typer.echo(f"  Type:      {notary_sig.get('type', 'unknown')}")
+                    typer.echo(f"  Signer:    {signer_short}")
+                    typer.echo(f"  Timestamp: {notary_sig.get('timestamp', 'unknown')}")
+                    if verbose:
+                        hashed_fields = notary_sig.get("hashed_fields")
+                        if hashed_fields:
+                            typer.echo(f"  Hashed fields: {hashed_fields}")
+                        msg_format = notary_sig.get("signed_message_format")
+                        if msg_format:
+                            typer.echo(f"  Message format: {msg_format}")
+
+                # Verify signature
+                is_valid, error_msg = verify_notary_signature(raw_document, expected_address)
+
+                if is_valid:
+                    typer.secho(f"  Signature: ✓ Verified", fg=typer.colors.GREEN)
+                else:
+                    typer.secho(f"  Signature: ✗ FAILED - {error_msg}", fg=typer.colors.RED)
+            else:
+                typer.secho("  Cannot verify: No notary address available", fg=typer.colors.YELLOW)
+                typer.echo("  Use gateway backend or run 'notary verify' manually with --address")
+        else:
+            typer.echo("\nNo notary signatures found in document.")
 
     # 5. Extract Base64 encoded data
     b64_encoded_original_data = provenance_metadata_obj.data
@@ -1086,6 +1221,199 @@ def x402_info():
     typer.echo("   swarm-prov-upload x402 status   # Check configuration")
     typer.echo("   swarm-prov-upload x402 balance  # Check USDC balance")
     typer.echo("")
+
+
+# --- Notary Subcommands ---
+
+@notary_app.command("info")
+def notary_info(
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
+):
+    """
+    Get notary service status and signer address. (Gateway only)
+    """
+    if _backend_config["backend"] != "gateway":
+        typer.secho("ERROR: 'notary info' requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    gateway_url = _backend_config["gateway_url"]
+    if verbose:
+        typer.echo(f"Getting notary info from {gateway_url}...")
+
+    try:
+        gw_client = GatewayClient(base_url=gateway_url)
+        info = gw_client.get_notary_info(verbose=verbose)
+
+        typer.echo(f"\nNotary Service:")
+        typer.echo("-" * 40)
+
+        # Enabled status
+        enabled_str = typer.style("Yes", fg=typer.colors.GREEN) if info.enabled else typer.style("No", fg=typer.colors.RED)
+        typer.echo(f"  Enabled:   {enabled_str}")
+
+        # Available status
+        available_str = typer.style("Yes", fg=typer.colors.GREEN) if info.available else typer.style("No", fg=typer.colors.YELLOW)
+        typer.echo(f"  Available: {available_str}")
+
+        # Address
+        if info.address:
+            typer.echo(f"  Address:   {info.address}")
+        else:
+            typer.echo(f"  Address:   {typer.style('Not configured', fg=typer.colors.YELLOW)}")
+
+        # Message
+        if info.message:
+            typer.echo(f"  Message:   {info.message}")
+
+        typer.echo("")
+
+    except exceptions.NotaryNotEnabledError:
+        typer.secho("Notary signing is not enabled on this gateway.", fg=typer.colors.YELLOW)
+    except Exception as e:
+        typer.secho(f"ERROR: Failed to get notary info: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@notary_app.command("status")
+def notary_status(
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
+):
+    """
+    Quick health check for notary service. (Gateway only)
+    """
+    if _backend_config["backend"] != "gateway":
+        typer.secho("ERROR: 'notary status' requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    gateway_url = _backend_config["gateway_url"]
+    if verbose:
+        typer.echo(f"Checking notary status from {gateway_url}...")
+
+    try:
+        gw_client = GatewayClient(base_url=gateway_url)
+        status = gw_client.get_notary_status(verbose=verbose)
+
+        if status.available:
+            typer.secho(f"✓ Notary service: Available", fg=typer.colors.GREEN)
+            if status.address:
+                addr_short = f"{status.address[:10]}...{status.address[-4:]}"
+                typer.echo(f"  Address: {addr_short}")
+        else:
+            typer.secho(f"✗ Notary service: Not available", fg=typer.colors.RED)
+            if not status.enabled:
+                typer.echo("  Reason: Not enabled on this gateway")
+            else:
+                typer.echo("  Reason: Enabled but not configured")
+            raise typer.Exit(code=1)
+
+    except exceptions.NotaryNotEnabledError:
+        typer.secho(f"✗ Notary service: Not enabled", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        typer.secho(f"✗ Notary service: Error - {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@notary_app.command("verify")
+def notary_verify(
+    file: Annotated[Path, typer.Option(
+        "--file", "-f",
+        help="Path to the signed JSON document to verify.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+    )],
+    address: Annotated[Optional[str], typer.Option(
+        "--address", "-a",
+        help="Expected signer address (fetched from gateway if not provided)."
+    )] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
+):
+    """
+    Verify a notary signature on a local JSON file. (Gateway only for address lookup)
+    """
+    from .core.notary_utils import verify_notary_signature, extract_notary_signature
+
+    # Read and parse the file
+    try:
+        content = file.read_text(encoding="utf-8")
+        document = json.loads(content)
+    except json.JSONDecodeError as e:
+        typer.secho(f"ERROR: File is not valid JSON: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"ERROR: Failed to read file: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    # Check if document has a notary signature
+    notary_sig = extract_notary_signature(document)
+    if not notary_sig:
+        typer.secho("No notary signature found in document.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+
+    # Get expected address
+    expected_address = address
+    if not expected_address:
+        if _backend_config["backend"] != "gateway":
+            typer.secho("ERROR: No --address provided and gateway backend not configured.", fg=typer.colors.RED, err=True)
+            typer.echo("Provide --address or use --backend gateway to fetch address from gateway.")
+            raise typer.Exit(code=1)
+
+        gateway_url = _backend_config["gateway_url"]
+        if verbose:
+            typer.echo(f"Fetching notary address from {gateway_url}...")
+
+        try:
+            gw_client = GatewayClient(base_url=gateway_url)
+            info = gw_client.get_notary_info(verbose=verbose)
+            expected_address = info.address
+            if not expected_address:
+                typer.secho("ERROR: Gateway notary has no address configured.", fg=typer.colors.RED, err=True)
+                raise typer.Exit(code=1)
+        except exceptions.NotaryNotEnabledError:
+            typer.secho("ERROR: Notary not enabled on gateway. Provide --address manually.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        except Exception as e:
+            typer.secho(f"ERROR: Failed to get notary address: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+
+    # Display signature info
+    typer.echo(f"\nSignature Verification:")
+    typer.echo("-" * 50)
+    typer.echo(f"  Type:      {notary_sig.get('type', 'unknown')}")
+
+    signer = notary_sig.get("signer", "")
+    signer_short = f"{signer[:10]}...{signer[-4:]}" if len(signer) > 14 else signer
+    typer.echo(f"  Signer:    {signer_short}")
+    typer.echo(f"  Timestamp: {notary_sig.get('timestamp', 'unknown')}")
+
+    if verbose:
+        typer.echo(f"  Data hash: {notary_sig.get('data_hash', 'unknown')}")
+        sig_value = notary_sig.get("signature", "")
+        sig_short = f"{sig_value[:20]}...{sig_value[-8:]}" if len(sig_value) > 28 else sig_value
+        typer.echo(f"  Signature: {sig_short}")
+        hashed_fields = notary_sig.get("hashed_fields")
+        if hashed_fields:
+            typer.echo(f"  Hashed fields: {hashed_fields}")
+        msg_format = notary_sig.get("signed_message_format")
+        if msg_format:
+            typer.echo(f"  Message format: {msg_format}")
+
+    # Verify
+    is_valid, error_msg = verify_notary_signature(document, expected_address)
+
+    if is_valid:
+        typer.secho(f"\n  Result:    ✓ VERIFIED", fg=typer.colors.GREEN, bold=True)
+        if signer.lower() == expected_address.lower():
+            typer.echo(f"             Signer matches gateway notary")
+    else:
+        typer.secho(f"\n  Result:    ✗ FAILED", fg=typer.colors.RED, bold=True)
+        typer.echo(f"             {error_msg}")
+        raise typer.Exit(code=1)
 
 
 @app.callback()
