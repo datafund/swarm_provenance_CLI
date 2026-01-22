@@ -1200,7 +1200,8 @@ class TestNotaryVerifyCommand:
                     "timestamp": "2026-01-21T16:30:00+00:00",
                     "data_hash": "abc123",
                     "signature": "0x" + "ab" * 65,
-                    "signed_fields": ["data"],
+                    "hashed_fields": ["data"],
+                    "signed_message_format": "{data_hash}|{timestamp}",
                 }
             ],
         }
@@ -1245,7 +1246,8 @@ class TestNotaryVerifyCommand:
                     "timestamp": "2026-01-21T16:30:00+00:00",
                     "data_hash": "wrong_hash",
                     "signature": "0x" + "00" * 65,
-                    "signed_fields": ["data"],
+                    "hashed_fields": ["data"],
+                    "signed_message_format": "{data_hash}|{timestamp}",
                 }
             ],
         }
@@ -1287,7 +1289,8 @@ class TestNotaryVerifyCommand:
                     "timestamp": "2026-01-21T16:30:00+00:00",
                     "data_hash": "abc",
                     "signature": "0x" + "ab" * 65,
-                    "signed_fields": ["data"],
+                    "hashed_fields": ["data"],
+                    "signed_message_format": "{data_hash}|{timestamp}",
                 }
             ],
         }
@@ -1306,6 +1309,52 @@ class TestNotaryVerifyCommand:
 
         assert result.exit_code != 0
 
+    def test_notary_verify_shows_new_fields_verbose(self, mocker, tmp_path):
+        """Tests notary verify shows hashed_fields and signed_message_format in verbose mode."""
+        import json
+        from swarm_provenance_uploader.models import NotaryInfoResponse
+
+        signed_doc = {
+            "data": {"content": "test", "value": 123},
+            "signatures": [
+                {
+                    "type": "notary",
+                    "signer": "0x1234567890abcdef1234567890abcdef12345678",
+                    "timestamp": "2026-01-21T16:30:00+00:00",
+                    "data_hash": "abc123",
+                    "signature": "0x" + "ab" * 65,
+                    "hashed_fields": ["data"],
+                    "signed_message_format": "{data_hash}|{timestamp}",
+                }
+            ],
+        }
+        test_file = tmp_path / "signed.json"
+        test_file.write_text(json.dumps(signed_doc))
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_notary_info.return_value = NotaryInfoResponse(
+            enabled=True,
+            available=True,
+            address="0x1234567890abcdef1234567890abcdef12345678",
+            message=None,
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.core.notary_utils.verify_notary_signature",
+            return_value=(True, None)
+        )
+
+        result = runner.invoke(app, ["notary", "verify", "--file", str(test_file), "-v"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Hashed fields" in result.stdout
+        assert "Message format" in result.stdout
+        assert "{data_hash}|{timestamp}" in result.stdout
 
 class TestUploadWithSign:
     """Tests for upload command with --sign option."""
@@ -1352,7 +1401,8 @@ class TestUploadWithSign:
                         "timestamp": "2026-01-21T16:30:00+00:00",
                         "data_hash": "abc123",
                         "signature": "0x" + "ab" * 65,
-                        "signed_fields": ["data"],
+                        "hashed_fields": ["data"],
+                        "signed_message_format": "{data_hash}|{timestamp}",
                     }
                 ],
             },
@@ -1455,7 +1505,8 @@ class TestDownloadWithVerify:
                     "timestamp": "2026-01-21T16:30:00+00:00",
                     "data_hash": "abc123",
                     "signature": "0x" + "ab" * 65,
-                    "signed_fields": ["data"],
+                    "hashed_fields": ["data"],
+                    "signed_message_format": "{data_hash}|{timestamp}",
                 }
             ],
         }
@@ -1511,7 +1562,8 @@ class TestDownloadWithVerify:
                     "timestamp": "2026-01-21T16:30:00+00:00",
                     "data_hash": "wrong_hash",
                     "signature": "0x" + "00" * 65,
-                    "signed_fields": ["data"],
+                    "hashed_fields": ["data"],
+                    "signed_message_format": "{data_hash}|{timestamp}",
                 }
             ],
         }
@@ -1606,7 +1658,8 @@ class TestDownloadWithVerify:
                     "timestamp": "2026-01-21T16:30:00+00:00",
                     "data_hash": "abc123",
                     "signature": "0x" + "ab" * 65,
-                    "signed_fields": ["data"],
+                    "hashed_fields": ["data"],
+                    "signed_message_format": "{data_hash}|{timestamp}",
                 }
             ],
         }

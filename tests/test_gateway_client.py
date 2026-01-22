@@ -1000,7 +1000,8 @@ class TestGatewayClientNotary:
                         "timestamp": "2026-01-21T16:30:00+00:00",
                         "data_hash": "abc123",
                         "signature": "0x" + "a" * 130,
-                        "signed_fields": ["data"],
+                        "hashed_fields": ["data"],
+                        "signed_message_format": "{data_hash}|{timestamp}",
                     }
                 ],
             },
