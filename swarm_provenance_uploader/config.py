@@ -57,3 +57,19 @@ except (ValueError, TypeError):
 
 # Custom RPC URL (optional, uses default if not set)
 X402_RPC_URL = os.getenv("X402_RPC_URL")
+
+# --- Chain / Blockchain Configuration ---
+# Enable on-chain anchoring (disabled by default)
+CHAIN_ENABLED = os.getenv("CHAIN_ENABLED", "false").lower() == "true"
+
+# Chain name: "base-sepolia" (testnet, default) or "base" (mainnet)
+CHAIN_NAME = os.getenv("CHAIN_NAME", "base-sepolia")
+
+# Custom RPC URL (optional, overrides preset for selected chain)
+CHAIN_RPC_URL = os.getenv("CHAIN_RPC_URL")
+
+# Custom contract address (optional, overrides preset for selected chain)
+CHAIN_CONTRACT = os.getenv("CHAIN_CONTRACT")
+
+# Environment variable name that contains the wallet private key
+CHAIN_WALLET_KEY_ENV = os.getenv("CHAIN_WALLET_KEY_ENV", "PROVENANCE_WALLET_KEY")

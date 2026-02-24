@@ -168,6 +168,58 @@ swarm-prov-upload x402 info
 
 See [docs/x402-setup.md](docs/x402-setup.md) for detailed setup instructions.
 
+## Blockchain Anchoring (Optional)
+
+On-chain provenance anchoring registers Swarm hashes on the DataProvenance smart contract (Base chain), providing immutable proof of data registration, ownership, and transformation lineage.
+
+### Quick Start
+
+```bash
+# Install with blockchain support
+pip install -e .[blockchain]
+
+# Configure wallet
+export PROVENANCE_WALLET_KEY=0x...  # Your wallet private key
+export CHAIN_NAME=base-sepolia      # Testnet (default)
+
+# Anchor a Swarm hash on-chain (via Python API)
+from swarm_provenance_uploader.core.chain_client import ChainClient
+
+client = ChainClient(chain="base-sepolia")
+result = client.anchor(swarm_hash="<64-char-hex>", data_type="swarm-provenance")
+print(f"TX: {result.explorer_url}")
+```
+
+### Blockchain Configuration
+
+| Environment Variable | Description | Default |
+|---------------------|-------------|---------|
+| `CHAIN_ENABLED` | Enable blockchain features | `false` |
+| `CHAIN_NAME` | `base-sepolia` (testnet) or `base` (mainnet) | `base-sepolia` |
+| `PROVENANCE_WALLET_KEY` | Wallet private key (keep secret!) | - |
+| `CHAIN_RPC_URL` | Custom RPC URL (optional) | Uses preset |
+| `CHAIN_CONTRACT` | Custom contract address (optional) | Uses preset |
+
+### ChainClient API
+
+**Write operations** (require wallet + gas):
+- `anchor(swarm_hash, data_type)` - Register a hash on-chain
+- `anchor_for(swarm_hash, owner, data_type)` - Register on behalf of another owner
+- `batch_anchor(swarm_hashes, data_types)` - Batch register multiple hashes
+- `transform(original_hash, new_hash, description)` - Record data transformation
+- `access(swarm_hash)` - Record data access
+- `batch_access(swarm_hashes)` - Batch record access
+- `set_status(swarm_hash, status)` - Change data status (ACTIVE/RESTRICTED/DELETED)
+- `transfer_ownership(swarm_hash, new_owner)` - Transfer data ownership
+- `set_delegate(delegate, authorized)` - Authorize/revoke a delegate
+
+**Read operations** (no gas required):
+- `get(swarm_hash)` - Get full provenance record
+- `verify(swarm_hash)` - Check if hash is registered
+- `get_provenance_chain(swarm_hash)` - Follow transformation lineage
+- `balance()` - Get wallet balance and chain info
+- `health_check()` - Check RPC connectivity
+
 ## Run Tests
 
 ### Unit Tests (Mocked)
@@ -195,11 +247,19 @@ pytest -m local_bee
 
 # Run only gateway tests
 pytest -m gateway
+
+# Run blockchain tests (local Hardhat)
+pytest -m blockchain
+
+# Run blockchain tests on Base Sepolia (uses testnet gas)
+pytest -m "blockchain and slow"
 ```
 
 **Requirements:**
 - Local Bee: Running at `http://localhost:1633`
 - Gateway: Available at `https://provenance-gateway.datafund.io`
+- Local Hardhat: Running at `http://localhost:8545` with DataProvenance deployed
+- Base Sepolia: `PROVENANCE_WALLET_KEY` set with funded wallet
 
 ## Usage
 
@@ -513,10 +573,10 @@ Use `swarm-prov-upload --help` for all options.
 │  │                   │  │   wrapping      │  │ • Direct Bee API             │  │
 │  ├───────────────────┤  │                 │  │ • Local/self-hosted          │  │
 │  │ X402_CLIENT.PY    │  │                 │  │                              │  │
-│  │ (optional)        │  │                 │  │                              │  │
-│  │ • EIP-712 signing │  │                 │  │                              │  │
-│  │ • USDC on Base    │  │                 │  │                              │  │
-│  │ • 402 handling    │  │                 │  │                              │  │
+│  │ (optional)        │  │                 │  │ chain_client.py (optional)   │  │
+│  │ • EIP-712 signing │  │                 │  │ • On-chain anchoring         │  │
+│  │ • USDC on Base    │  │                 │  │ • DataProvenance contract    │  │
+│  │ • 402 handling    │  │                 │  │ • Provenance chain tracking  │  │
 │  └───────────────────┘  └─────────────────┘  └──────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                         │
@@ -540,6 +600,12 @@ Use `swarm-prov-upload --help` for all options.
 │  │ • X402PaymentRequirements       │  │ • X402_NETWORK                      │  │
 │  │ • X402PaymentPayload            │  │ • X402_AUTO_PAY                     │  │
 │  │                                 │  │ • X402_MAX_AUTO_PAY_USD             │  │
+│  │ Chain Models:                   │  │                                     │  │
+│  │ • ChainProvenanceRecord         │  │ Chain Configuration:                │  │
+│  │ • AnchorResult                  │  │ • CHAIN_ENABLED                     │  │
+│  │ • TransformResult               │  │ • CHAIN_NAME                        │  │
+│  │ • AccessResult                  │  │ • PROVENANCE_WALLET_KEY             │  │
+│  │ • ChainWalletInfo               │  │ • CHAIN_RPC_URL                     │  │
 │  └─────────────────────────────────┘  └─────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                         │
@@ -663,6 +729,12 @@ Use `swarm-prov-upload --help` for all options.
 │  • Payment confirmation           • Verifiable timestamps                     │
 │  • Lazy dependency loading        • Local signature verification              │
 │  • Balance checking               • Ethereum address recovery                 │
+│                                                                                 │
+│  ⛓️  BLOCKCHAIN ANCHORING (Optional)                                           │
+│  • DataProvenance smart contract  • On-chain data registration                │
+│  • Transformation lineage         • Access tracking                           │
+│  • Ownership transfer             • Delegate authorization                    │
+│  • Base Sepolia / Base mainnet    • Lazy dependency loading                   │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────────┐
@@ -716,8 +788,16 @@ swarm_provenance_uploader/
 │   ├── config.py
 │   ├── exceptions.py            # Custom exception classes
 │   ├── models.py
+│   ├── chain/                   # Blockchain subpackage (optional)
+│   │   ├── __init__.py
+│   │   ├── provider.py          # Web3 connection management
+│   │   ├── wallet.py            # Transaction signing
+│   │   ├── contract.py          # DataProvenance contract wrapper
+│   │   └── abi/
+│   │       └── DataProvenance.json  # Contract ABI
 │   └── core/
 │       ├── __init__.py
+│       ├── chain_client.py      # High-level chain facade (optional)
 │       ├── file_utils.py
 │       ├── gateway_client.py    # Gateway API client (default)
 │       ├── metadata_builder.py
@@ -726,6 +806,7 @@ swarm_provenance_uploader/
 │       └── x402_client.py       # x402 payment client (optional)
 └── tests/
     ├── __init__.py
+    ├── test_chain_client.py     # Chain client unit tests (mocked)
     ├── test_cli.py              # CLI unit tests (mocked)
     ├── test_gateway_client.py   # GatewayClient unit tests (mocked)
     ├── test_integration.py      # Integration tests (real backends)

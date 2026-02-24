@@ -166,12 +166,18 @@ The application follows a modular architecture with clear separation of concerns
    - `gateway_client.py`: Client for provenance-gateway API (default)
    - `swarm_client.py`: Client for local Bee node API
    - `x402_client.py`: Client for x402 payment handling (optional)
+   - `chain_client.py`: High-level facade for on-chain operations (optional)
    - `notary_utils.py`: Notary signature verification utilities
    - `file_utils.py`: File I/O and encoding utilities
    - `metadata_builder.py`: Metadata construction
-3. **Data Models** (`models.py`): Pydantic v2 schemas for metadata and API responses
-4. **Exceptions** (`exceptions.py`): Custom exception hierarchy for unified error handling
-5. **Configuration** (`config.py`): Environment-based configuration management
+3. **Chain Subpackage** (`chain/`): Low-level blockchain components
+   - `provider.py`: Web3 connection management with chain presets
+   - `wallet.py`: Private key handling and transaction signing
+   - `contract.py`: DataProvenance contract wrapper with build_*_tx pattern
+   - `abi/DataProvenance.json`: Embedded contract ABI
+4. **Data Models** (`models.py`): Pydantic v2 schemas for metadata and API responses
+5. **Exceptions** (`exceptions.py`): Custom exception hierarchy for unified error handling
+6. **Configuration** (`config.py`): Environment-based configuration management
 
 ### Backend Clients
 
@@ -192,6 +198,14 @@ The application follows a modular architecture with clear separation of concerns
 - Handles HTTP 402 Payment Required responses
 - EIP-712 message signing for USDC payments on Base chain
 - Supports Base Sepolia (testnet) and Base (mainnet)
+
+**ChainClient** (`core/chain_client.py`):
+- High-level facade for on-chain provenance operations
+- Wraps ChainProvider + ChainWallet + DataProvenanceContract
+- Write methods: `anchor()`, `anchor_for()`, `batch_anchor()`, `transform()`, `access()`, `batch_access()`, `set_status()`, `transfer_ownership()`, `set_delegate()`
+- Read methods: `get()`, `verify()`, `get_provenance_chain()`, `balance()`, `health_check()`
+- Lazy-loads web3 and eth-account via `blockchain` optional dependency group
+- Targets DataProvenance contract on Base Sepolia (`0x9a3c6F47B69211F05891CCb7aD33596290b9fE64`)
 
 ### Key Components
 
@@ -216,6 +230,14 @@ The application follows a modular architecture with clear separation of concerns
 - `NotaryInfoResponse`: Status and configuration from /api/v1/notary/info
 - `NotaryStatusResponse`: Simplified health check from /api/v1/notary/status
 - `NotarySignature`: Signature entry in a signed document
+
+**Chain Models**: Schemas for on-chain provenance:
+- `DataStatusEnum`: On-chain data status (ACTIVE, RESTRICTED, DELETED)
+- `ChainProvenanceRecord`: Full on-chain provenance record
+- `AnchorResult`: Transaction result from anchoring a hash
+- `TransformResult`: Transaction result from recording a transformation
+- `AccessResult`: Transaction result from recording data access
+- `ChainWalletInfo`: Wallet balance and chain configuration info
 - `SignedDocumentResponse`: Response from upload with sign=notary
 
 **Upload Process**:
@@ -257,6 +279,13 @@ Uses python-dotenv for environment configuration:
 - `X402_AUTO_PAY`: Enable auto-pay without prompts (default: false)
 - `X402_MAX_AUTO_PAY_USD`: Maximum auto-pay amount per request (default: 1.00)
 
+**Chain / Blockchain Configuration**:
+- `CHAIN_ENABLED`: Enable on-chain anchoring (default: false)
+- `CHAIN_NAME`: `base-sepolia` (testnet, default) or `base` (mainnet)
+- `CHAIN_RPC_URL`: Custom RPC URL (optional, overrides preset)
+- `CHAIN_CONTRACT`: Custom contract address (optional, overrides preset)
+- `PROVENANCE_WALLET_KEY`: Wallet private key for signing transactions
+
 ## Testing Approach
 
 The test suite has two layers:
@@ -266,6 +295,7 @@ The test suite has two layers:
 - `test_gateway_client.py`: GatewayClient tests with mocked HTTP
 - `test_notary_utils.py`: Notary signature verification tests with mocked crypto
 - `test_x402_client.py`: X402Client tests with mocked eth-account/web3
+- `test_chain_client.py`: ChainClient tests with mocked web3/eth-account
 - Network calls mocked via `requests-mock`
 - File I/O operations mocked with `pytest-mock`
 - Do not require live services
@@ -273,8 +303,9 @@ The test suite has two layers:
 ### Integration Tests (Real Backends)
 - `test_integration.py`: Tests against real services
 - Auto-skip when backends unavailable
-- Markers: `@pytest.mark.integration`, `@pytest.mark.local_bee`, `@pytest.mark.gateway`
+- Markers: `@pytest.mark.integration`, `@pytest.mark.local_bee`, `@pytest.mark.gateway`, `@pytest.mark.blockchain`
 - Require: Local Bee at `localhost:1633` and/or gateway at `provenance-gateway.datafund.io`
+- Blockchain: Local Hardhat at `localhost:8545` with DataProvenance deployed, or Base Sepolia with funded wallet
 
 ## Development Guidelines
 
