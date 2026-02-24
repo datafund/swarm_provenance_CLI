@@ -46,6 +46,7 @@ class ChainClient:
         private_key: Optional[str] = None,
         private_key_env: str = "PROVENANCE_WALLET_KEY",
         gas_limit_multiplier: float = 1.2,
+        explorer_url: Optional[str] = None,
     ):
         """
         Initialize the chain client.
@@ -57,6 +58,7 @@ class ChainClient:
             private_key: Wallet private key. If None, reads from env var.
             private_key_env: Environment variable name for private key.
             gas_limit_multiplier: Safety multiplier for gas estimates (default 1.2).
+            explorer_url: Custom block explorer URL. If None, uses preset.
 
         Raises:
             ChainConfigurationError: If dependencies missing or config invalid.
@@ -69,6 +71,7 @@ class ChainClient:
             chain=chain,
             rpc_url=rpc_url,
             contract_address=contract_address,
+            explorer_url=explorer_url,
         )
         self._wallet = ChainWallet(
             private_key=private_key,

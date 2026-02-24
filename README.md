@@ -182,13 +182,50 @@ pip install -e .[blockchain]
 export PROVENANCE_WALLET_KEY=0x...  # Your wallet private key
 export CHAIN_NAME=base-sepolia      # Testnet (default)
 
-# Anchor a Swarm hash on-chain (via Python API)
-from swarm_provenance_uploader.core.chain_client import ChainClient
+# Check wallet balance
+swarm-prov-upload chain balance
 
-client = ChainClient(chain="base-sepolia")
-result = client.anchor(swarm_hash="<64-char-hex>", data_type="swarm-provenance")
-print(f"TX: {result.explorer_url}")
+# Anchor a Swarm hash on-chain
+swarm-prov-upload chain anchor <swarm_hash>
+
+# Get the on-chain provenance record
+swarm-prov-upload chain get <swarm_hash>
+
+# Verify a hash is anchored
+swarm-prov-upload chain verify <swarm_hash>
 ```
+
+### Chain Commands
+
+```bash
+# Wallet balance and chain info
+swarm-prov-upload chain balance
+swarm-prov-upload chain balance --json
+
+# Anchor a Swarm hash on-chain
+swarm-prov-upload chain anchor <swarm_hash>
+swarm-prov-upload chain anchor <swarm_hash> --type "dataset"
+
+# Record data access
+swarm-prov-upload chain access <swarm_hash>
+
+# Record a data transformation (original must be anchored first)
+swarm-prov-upload chain transform <original_hash> <new_hash> --description "Anonymized PII"
+
+# Get full provenance record
+swarm-prov-upload chain get <swarm_hash>
+swarm-prov-upload chain get <swarm_hash> --json
+
+# Verify a hash is registered on-chain (exit code 0=yes, 1=no)
+swarm-prov-upload chain verify <swarm_hash>
+```
+
+### Global Flags
+
+| Flag | Description |
+|------|-------------|
+| `--chain TEXT` | Blockchain: `base-sepolia` (testnet) or `base` (mainnet) |
+| `--chain-rpc TEXT` | Custom RPC URL for blockchain connection |
 
 ### Blockchain Configuration
 
@@ -199,8 +236,23 @@ print(f"TX: {result.explorer_url}")
 | `PROVENANCE_WALLET_KEY` | Wallet private key (keep secret!) | - |
 | `CHAIN_RPC_URL` | Custom RPC URL (optional) | Uses preset |
 | `CHAIN_CONTRACT` | Custom contract address (optional) | Uses preset |
+| `CHAIN_EXPLORER_URL` | Custom block explorer URL (optional) | Uses preset |
 
-### ChainClient API
+### Testnet Setup
+
+1. **Get testnet ETH** (for gas): https://www.alchemy.com/faucets/base-sepolia
+2. **Get testnet USDC** (if using x402): https://faucet.circle.com/
+3. **Configure wallet**: Set `PROVENANCE_WALLET_KEY` with your wallet's private key
+
+### ChainClient Python API
+
+```python
+from swarm_provenance_uploader.core.chain_client import ChainClient
+
+client = ChainClient(chain="base-sepolia")
+result = client.anchor(swarm_hash="<64-char-hex>", data_type="swarm-provenance")
+print(f"TX: {result.explorer_url}")
+```
 
 **Write operations** (require wallet + gas):
 - `anchor(swarm_hash, data_type)` - Register a hash on-chain
@@ -547,14 +599,21 @@ Use `swarm-prov-upload --help` for all options.
 │  │ --x402          │  ├──────────────────┤  │                                 │ │
 │  │ --auto-pay      │  │ STAMPS COMMANDS  │  ├─────────────────────────────────┤ │
 │  │ --max-pay       │  │ (gateway only)   │  │ NOTARY COMMANDS (gateway only)  │ │
-│  │ --usePool       │  │ stamps list      │  │ notary info                     │ │
-│  │ --sign          │  │ stamps info      │  │ notary status                   │ │
-│  │ --verify        │  │ stamps extend    │  │ notary verify                   │ │
-│  │                 │  │ stamps check     │  │                                 │ │
-│  │ Built with:     │  │ stamps pool-stat │  ├─────────────────────────────────┤ │
-│  │ • Rich output   │  │                  │  │ x402 status                     │ │
-│  │                 │  │                  │  │ x402 balance                    │ │
-│  │                 │  │                  │  │ x402 info                       │ │
+│  │ --chain         │  │ stamps list      │  │ notary info                     │ │
+│  │ --chain-rpc     │  │ stamps info      │  │ notary status                   │ │
+│  │ --usePool       │  │ stamps extend    │  │ notary verify                   │ │
+│  │ --sign          │  │ stamps check     │  │                                 │ │
+│  │ --verify        │  │ stamps pool-stat │  ├─────────────────────────────────┤ │
+│  │                 │  │                  │  │ x402 status                     │ │
+│  │ Built with:     │  ├──────────────────┤  │ x402 balance                    │ │
+│  │ • Rich output   │  │ CHAIN COMMANDS   │  │ x402 info                       │ │
+│  │                 │  │ (optional)       │  │                                 │ │
+│  │                 │  │ chain balance    │  │                                 │ │
+│  │                 │  │ chain anchor     │  │                                 │ │
+│  │                 │  │ chain get        │  │                                 │ │
+│  │                 │  │ chain verify     │  │                                 │ │
+│  │                 │  │ chain access     │  │                                 │ │
+│  │                 │  │ chain transform  │  │                                 │ │
 │  └─────────────────┘  └──────────────────┘  └─────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                         │
@@ -606,6 +665,7 @@ Use `swarm-prov-upload --help` for all options.
 │  │ • TransformResult               │  │ • CHAIN_NAME                        │  │
 │  │ • AccessResult                  │  │ • PROVENANCE_WALLET_KEY             │  │
 │  │ • ChainWalletInfo               │  │ • CHAIN_RPC_URL                     │  │
+│  │                                 │  │ • CHAIN_EXPLORER_URL                │  │
 │  └─────────────────────────────────┘  └─────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                         │

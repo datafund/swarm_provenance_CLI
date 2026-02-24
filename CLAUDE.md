@@ -154,6 +154,15 @@ swarm-prov-upload notary status                         # Quick status check
 swarm-prov-upload notary verify --file signed.json      # Verify local file signature
 swarm-prov-upload upload --file data.txt --sign notary  # Upload with notary signing
 swarm-prov-upload download <hash> --verify              # Download with signature verification
+
+# Chain commands (optional, requires blockchain dependencies)
+swarm-prov-upload chain balance                                              # Wallet balance and chain info
+swarm-prov-upload chain anchor <hash>                                        # Anchor a Swarm hash on-chain
+swarm-prov-upload chain anchor <hash> --type "dataset"                       # Anchor with custom data type
+swarm-prov-upload chain get <hash>                                           # Get on-chain provenance record
+swarm-prov-upload chain verify <hash>                                        # Verify hash is anchored
+swarm-prov-upload chain access <hash>                                        # Record data access
+swarm-prov-upload chain transform <orig_hash> <new_hash> --description "..."  # Record transformation
 ```
 
 ## Architecture
@@ -284,6 +293,7 @@ Uses python-dotenv for environment configuration:
 - `CHAIN_NAME`: `base-sepolia` (testnet, default) or `base` (mainnet)
 - `CHAIN_RPC_URL`: Custom RPC URL (optional, overrides preset)
 - `CHAIN_CONTRACT`: Custom contract address (optional, overrides preset)
+- `CHAIN_EXPLORER_URL`: Custom block explorer URL (optional, overrides preset)
 - `PROVENANCE_WALLET_KEY`: Wallet private key for signing transactions
 
 ## Testing Approach

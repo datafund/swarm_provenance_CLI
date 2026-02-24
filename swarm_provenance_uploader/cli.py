@@ -68,6 +68,7 @@ _chain_config = {
     "rpc_url": config.CHAIN_RPC_URL,
     "contract": config.CHAIN_CONTRACT,
     "wallet_key_env": config.CHAIN_WALLET_KEY_ENV,
+    "explorer_url": config.CHAIN_EXPLORER_URL,
 }
 
 
@@ -100,6 +101,7 @@ def _get_chain_client(verbose: bool = False):
             rpc_url=_chain_config["rpc_url"],
             contract_address=_chain_config["contract"],
             private_key_env=_chain_config["wallet_key_env"],
+            explorer_url=_chain_config["explorer_url"],
         )
     except exceptions.ChainConfigurationError as e:
         typer.secho(f"ERROR: Chain configuration invalid: {e}", fg=typer.colors.RED, err=True)

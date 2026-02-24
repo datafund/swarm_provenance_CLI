@@ -34,6 +34,7 @@ def reset_backend_config():
     _chain_config["rpc_url"] = None
     _chain_config["contract"] = None
     _chain_config["wallet_key_env"] = "PROVENANCE_WALLET_KEY"
+    _chain_config["explorer_url"] = None
     yield
     # Reset again after test
     _backend_config["backend"] = "gateway"
@@ -48,6 +49,7 @@ def reset_backend_config():
     _chain_config["rpc_url"] = None
     _chain_config["contract"] = None
     _chain_config["wallet_key_env"] = "PROVENANCE_WALLET_KEY"
+    _chain_config["explorer_url"] = None
 
 
 # =============================================================================

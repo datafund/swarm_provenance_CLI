@@ -71,5 +71,8 @@ CHAIN_RPC_URL = os.getenv("CHAIN_RPC_URL")
 # Custom contract address (optional, overrides preset for selected chain)
 CHAIN_CONTRACT = os.getenv("CHAIN_CONTRACT")
 
+# Custom block explorer URL (optional, overrides preset for selected chain)
+CHAIN_EXPLORER_URL = os.getenv("CHAIN_EXPLORER_URL")
+
 # Environment variable name that contains the wallet private key
 CHAIN_WALLET_KEY_ENV = os.getenv("CHAIN_WALLET_KEY_ENV", "PROVENANCE_WALLET_KEY")

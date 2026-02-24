@@ -62,6 +62,7 @@ class ChainProvider:
         chain: str = "base-sepolia",
         rpc_url: Optional[str] = None,
         contract_address: Optional[str] = None,
+        explorer_url: Optional[str] = None,
     ):
         """
         Initialize the chain provider.
@@ -70,6 +71,7 @@ class ChainProvider:
             chain: Chain name ('base-sepolia' or 'base').
             rpc_url: Custom RPC URL. If None, uses preset for chain.
             contract_address: Custom contract address. If None, uses preset.
+            explorer_url: Custom block explorer URL. If None, uses preset.
 
         Raises:
             ChainConfigurationError: If chain is unsupported or web3 not installed.
@@ -85,7 +87,7 @@ class ChainProvider:
         self.chain = chain
         self.chain_id = preset["chain_id"]
         self.rpc_url = rpc_url or preset["rpc_url"]
-        self.explorer_url = preset["explorer_url"]
+        self.explorer_url = explorer_url or preset["explorer_url"]
         self.contract_address = contract_address or preset["contract_address"]
 
         if not self.contract_address:
