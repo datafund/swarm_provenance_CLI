@@ -1,6 +1,7 @@
 import pytest
+import typer
 from typer.testing import CliRunner
-from swarm_provenance_uploader.cli import app, _backend_config, _x402_config
+from swarm_provenance_uploader.cli import app, _backend_config, _x402_config, _chain_config
 from swarm_provenance_uploader.models import (
     StampDetails,
     StampListResponse,
@@ -28,6 +29,11 @@ def reset_backend_config():
     _x402_config["auto_pay"] = False
     _x402_config["max_auto_pay_usd"] = 1.00
     _x402_config["network"] = "base-sepolia"
+    _chain_config["enabled"] = False
+    _chain_config["chain"] = "base-sepolia"
+    _chain_config["rpc_url"] = None
+    _chain_config["contract"] = None
+    _chain_config["wallet_key_env"] = "PROVENANCE_WALLET_KEY"
     yield
     # Reset again after test
     _backend_config["backend"] = "gateway"
@@ -37,6 +43,11 @@ def reset_backend_config():
     _x402_config["auto_pay"] = False
     _x402_config["max_auto_pay_usd"] = 1.00
     _x402_config["network"] = "base-sepolia"
+    _chain_config["enabled"] = False
+    _chain_config["chain"] = "base-sepolia"
+    _chain_config["rpc_url"] = None
+    _chain_config["contract"] = None
+    _chain_config["wallet_key_env"] = "PROVENANCE_WALLET_KEY"
 
 
 # =============================================================================
@@ -1678,3 +1689,510 @@ class TestDownloadWithVerify:
         assert result.exit_code == 0
         # But should warn about not being able to verify
         assert "Cannot verify" in result.stdout or "No notary address" in result.stdout
+
+
+# =============================================================================
+# CHAIN COMMANDS TESTS
+# =============================================================================
+
+DUMMY_TX_HASH = "0x" + "ab" * 32
+DUMMY_EXPLORER_URL = "https://sepolia.basescan.org/tx/" + DUMMY_TX_HASH
+DUMMY_ADDRESS = "0x" + "cd" * 20
+
+
+class TestChainAnchorCommand:
+    """Tests for chain anchor command."""
+
+    def test_anchor_success(self, mocker):
+        """Tests chain anchor command succeeds."""
+        from swarm_provenance_uploader.models import AnchorResult
+
+        mock_client = mocker.MagicMock()
+        mock_client.anchor.return_value = AnchorResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12345,
+            gas_used=50000,
+            explorer_url=DUMMY_EXPLORER_URL,
+            swarm_hash=DUMMY_SWARM_REF,
+            data_type="swarm-provenance",
+            owner=DUMMY_ADDRESS,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Anchored successfully" in result.stdout
+        assert DUMMY_TX_HASH in result.stdout
+        assert "12345" in result.stdout
+
+    def test_anchor_json_output(self, mocker):
+        """Tests chain anchor with --json output."""
+        from swarm_provenance_uploader.models import AnchorResult
+
+        mock_client = mocker.MagicMock()
+        mock_client.anchor.return_value = AnchorResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12345,
+            gas_used=50000,
+            explorer_url=DUMMY_EXPLORER_URL,
+            swarm_hash=DUMMY_SWARM_REF,
+            data_type="swarm-provenance",
+            owner=DUMMY_ADDRESS,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        import json
+        output = json.loads(result.stdout)
+        assert output["tx_hash"] == DUMMY_TX_HASH
+        assert output["block_number"] == 12345
+
+    def test_anchor_transaction_error(self, mocker):
+        """Tests chain anchor handles transaction errors."""
+        from swarm_provenance_uploader.exceptions import ChainTransactionError
+
+        mock_client = mocker.MagicMock()
+        mock_client.anchor.side_effect = ChainTransactionError("reverted", tx_hash=DUMMY_TX_HASH)
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1
+        assert "Transaction failed" in result.stdout
+        assert DUMMY_TX_HASH in result.stdout
+
+    def test_anchor_custom_type(self, mocker):
+        """Tests chain anchor with custom --type."""
+        from swarm_provenance_uploader.models import AnchorResult
+
+        mock_client = mocker.MagicMock()
+        mock_client.anchor.return_value = AnchorResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=100,
+            gas_used=30000,
+            explorer_url=None,
+            swarm_hash=DUMMY_SWARM_REF,
+            data_type="custom-type",
+            owner=DUMMY_ADDRESS,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--type", "custom-type"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        mock_client.anchor.assert_called_once_with(DUMMY_SWARM_REF, data_type="custom-type", verbose=False)
+
+
+class TestChainTransformCommand:
+    """Tests for chain transform command."""
+
+    def test_transform_success(self, mocker):
+        """Tests chain transform command succeeds."""
+        from swarm_provenance_uploader.models import TransformResult
+
+        mock_client = mocker.MagicMock()
+        mock_client.transform.return_value = TransformResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12346,
+            gas_used=60000,
+            explorer_url=DUMMY_EXPLORER_URL,
+            original_hash=DUMMY_SWARM_REF,
+            new_hash="c" * 64,
+            description="filtered PII",
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "transform", DUMMY_SWARM_REF, "c" * 64, "--description", "filtered PII"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Transformation recorded" in result.stdout
+
+    def test_transform_original_not_registered(self, mocker):
+        """Tests chain transform when original hash is not registered."""
+        from swarm_provenance_uploader.exceptions import DataNotRegisteredError
+
+        mock_client = mocker.MagicMock()
+        mock_client.transform.side_effect = DataNotRegisteredError(
+            "Not registered", data_hash=DUMMY_SWARM_REF
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "transform", DUMMY_SWARM_REF, "c" * 64])
+
+        assert result.exit_code == 1
+        assert "not registered" in result.stdout.lower()
+        assert "anchor it first" in result.stdout.lower() or "Anchor" in result.stdout
+
+
+class TestChainAccessCommand:
+    """Tests for chain access command."""
+
+    def test_access_success(self, mocker):
+        """Tests chain access command succeeds."""
+        from swarm_provenance_uploader.models import AccessResult
+
+        mock_client = mocker.MagicMock()
+        mock_client.access.return_value = AccessResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12347,
+            gas_used=40000,
+            explorer_url=DUMMY_EXPLORER_URL,
+            swarm_hash=DUMMY_SWARM_REF,
+            accessor=DUMMY_ADDRESS,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Access recorded" in result.stdout
+
+    def test_access_json_output(self, mocker):
+        """Tests chain access with --json output."""
+        from swarm_provenance_uploader.models import AccessResult
+
+        mock_client = mocker.MagicMock()
+        mock_client.access.return_value = AccessResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12347,
+            gas_used=40000,
+            explorer_url=None,
+            swarm_hash=DUMMY_SWARM_REF,
+            accessor=DUMMY_ADDRESS,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF, "--json"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        import json
+        output = json.loads(result.stdout)
+        assert output["swarm_hash"] == DUMMY_SWARM_REF
+
+
+class TestChainGetCommand:
+    """Tests for chain get command."""
+
+    def test_get_success(self, mocker):
+        """Tests chain get command succeeds."""
+        from swarm_provenance_uploader.models import ChainProvenanceRecord, DataStatusEnum
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            status=DataStatusEnum.ACTIVE,
+            accessors=[DUMMY_ADDRESS],
+            transformations=[],
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "get", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Provenance Record" in result.stdout
+        assert "ACTIVE" in result.stdout
+        assert "Accessors (1)" in result.stdout
+
+    def test_get_not_found(self, mocker):
+        """Tests chain get when hash is not registered."""
+        from swarm_provenance_uploader.exceptions import DataNotRegisteredError
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.side_effect = DataNotRegisteredError("Not registered", data_hash=DUMMY_SWARM_REF)
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "get", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1
+        assert "Not found" in result.stdout or "not registered" in result.stdout.lower()
+
+    def test_get_json_output(self, mocker):
+        """Tests chain get with --json output."""
+        from swarm_provenance_uploader.models import ChainProvenanceRecord, DataStatusEnum
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            status=DataStatusEnum.ACTIVE,
+            accessors=[],
+            transformations=[],
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "get", DUMMY_SWARM_REF, "--json"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        import json
+        output = json.loads(result.stdout)
+        assert output["data_hash"] == DUMMY_SWARM_REF
+        assert output["status"] == 0  # ACTIVE
+
+    def test_get_with_transformations(self, mocker):
+        """Tests chain get shows transformations."""
+        from swarm_provenance_uploader.models import (
+            ChainProvenanceRecord, DataStatusEnum, ChainTransformation,
+        )
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            status=DataStatusEnum.ACTIVE,
+            accessors=[],
+            transformations=[
+                ChainTransformation(new_data_hash="d" * 64, description="filtered PII"),
+            ],
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "get", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Transformations (1)" in result.stdout
+        assert "filtered PII" in result.stdout
+
+
+class TestChainVerifyCommand:
+    """Tests for chain verify command."""
+
+    def test_verify_registered(self, mocker):
+        """Tests chain verify when hash is registered (exit 0)."""
+        mock_client = mocker.MagicMock()
+        mock_client.verify.return_value = True
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Verified" in result.stdout or "anchored" in result.stdout
+
+    def test_verify_not_registered(self, mocker):
+        """Tests chain verify when hash is not registered (exit 1)."""
+        mock_client = mocker.MagicMock()
+        mock_client.verify.return_value = False
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1
+        assert "Not found" in result.stdout or "not registered" in result.stdout.lower()
+
+
+class TestChainBalanceCommand:
+    """Tests for chain balance command."""
+
+    def test_balance_success(self, mocker):
+        """Tests chain balance command succeeds."""
+        from swarm_provenance_uploader.models import ChainWalletInfo
+
+        mock_client = mocker.MagicMock()
+        mock_client.balance.return_value = ChainWalletInfo(
+            address=DUMMY_ADDRESS,
+            balance_wei=1000000000000000000,
+            balance_eth="1.0",
+            chain="base-sepolia",
+            contract_address="0x9a3c6F47B69211F05891CCb7aD33596290b9fE64",
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "balance"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Chain Wallet" in result.stdout
+        assert "1.0" in result.stdout
+        assert DUMMY_ADDRESS in result.stdout
+
+    def test_balance_json_output(self, mocker):
+        """Tests chain balance with --json output."""
+        from swarm_provenance_uploader.models import ChainWalletInfo
+
+        mock_client = mocker.MagicMock()
+        mock_client.balance.return_value = ChainWalletInfo(
+            address=DUMMY_ADDRESS,
+            balance_wei=1000000000000000000,
+            balance_eth="1.0",
+            chain="base-sepolia",
+            contract_address="0x9a3c6F47B69211F05891CCb7aD33596290b9fE64",
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "balance", "--json"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        import json
+        output = json.loads(result.stdout)
+        assert output["address"] == DUMMY_ADDRESS
+        assert output["balance_eth"] == "1.0"
+
+    def test_balance_testnet_faucet_link(self, mocker):
+        """Tests chain balance shows faucet link on testnet."""
+        from swarm_provenance_uploader.models import ChainWalletInfo
+
+        mock_client = mocker.MagicMock()
+        mock_client.balance.return_value = ChainWalletInfo(
+            address=DUMMY_ADDRESS,
+            balance_wei=0,
+            balance_eth="0.0",
+            chain="base-sepolia",
+            contract_address="0x9a3c6F47B69211F05891CCb7aD33596290b9fE64",
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "balance"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "faucet" in result.stdout.lower()
+
+    def test_balance_mainnet_no_faucet(self, mocker):
+        """Tests chain balance does not show faucet link on mainnet."""
+        from swarm_provenance_uploader.models import ChainWalletInfo
+
+        mock_client = mocker.MagicMock()
+        mock_client.balance.return_value = ChainWalletInfo(
+            address=DUMMY_ADDRESS,
+            balance_wei=0,
+            balance_eth="0.0",
+            chain="base",
+            contract_address="0x1234567890abcdef1234567890abcdef12345678",
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "balance"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "faucet" not in result.stdout.lower()
+
+
+class TestChainDepsNotInstalled:
+    """Tests for graceful failure when blockchain deps are not installed."""
+
+    def test_chain_command_without_deps(self, mocker):
+        """Tests chain commands fail gracefully when blockchain deps missing."""
+        mocker.patch(
+            "swarm_provenance_uploader.cli._get_chain_client",
+            side_effect=typer.Exit(code=1),
+        )
+
+        result = runner.invoke(app, ["chain", "balance"])
+
+        assert result.exit_code == 1
+
+    def test_chain_import_error_message(self, mocker):
+        """Tests helpful error message when import fails."""
+        import builtins
+        original_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if name == "swarm_provenance_uploader.core.chain_client" or "chain_client" in str(name):
+                raise ImportError("No module named 'web3'")
+            return original_import(name, *args, **kwargs)
+
+        # Patch at the _get_chain_client level to simulate ImportError
+        mocker.patch(
+            "swarm_provenance_uploader.cli._get_chain_client",
+            side_effect=typer.Exit(code=1),
+        )
+
+        result = runner.invoke(app, ["chain", "balance"])
+        assert result.exit_code == 1
+
+
+class TestChainGlobalFlags:
+    """Tests for --chain and --chain-rpc global CLI flags."""
+
+    def test_chain_flag_accepted(self, mocker):
+        """Tests --chain flag is recognized."""
+        from swarm_provenance_uploader.models import ChainWalletInfo
+
+        mock_client = mocker.MagicMock()
+        mock_client.balance.return_value = ChainWalletInfo(
+            address=DUMMY_ADDRESS,
+            balance_wei=0,
+            balance_eth="0.0",
+            chain="base",
+            contract_address="0x1234",
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["--chain", "base", "chain", "balance"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+
+    def test_invalid_chain_rejected(self):
+        """Tests invalid --chain value is rejected."""
+        result = runner.invoke(app, ["--chain", "ethereum", "chain", "balance"])
+
+        assert result.exit_code == 1
+        assert "Invalid chain" in result.stdout
+
+    def test_chain_rpc_flag_accepted(self, mocker):
+        """Tests --chain-rpc flag is recognized."""
+        from swarm_provenance_uploader.models import ChainWalletInfo
+
+        mock_client = mocker.MagicMock()
+        mock_client.balance.return_value = ChainWalletInfo(
+            address=DUMMY_ADDRESS,
+            balance_wei=0,
+            balance_eth="0.0",
+            chain="base-sepolia",
+            contract_address="0x1234",
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["--chain-rpc", "https://custom-rpc.example.com", "chain", "balance"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+
+
+class TestChainConnectionError:
+    """Tests for chain connection error handling."""
+
+    def test_connection_error_shows_rpc_url(self, mocker):
+        """Tests connection error shows RPC URL."""
+        from swarm_provenance_uploader.exceptions import ChainConnectionError
+
+        mock_client = mocker.MagicMock()
+        mock_client.balance.side_effect = ChainConnectionError(
+            "Cannot connect", rpc_url="https://rpc.example.com"
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "balance"])
+
+        assert result.exit_code == 1
+        assert "Cannot connect" in result.stdout
+        assert "rpc.example.com" in result.stdout

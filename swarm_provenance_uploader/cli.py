@@ -20,6 +20,8 @@ x402_app = typer.Typer(help="x402 payment configuration and status.")
 app.add_typer(x402_app, name="x402")
 notary_app = typer.Typer(help="Notary signing service commands.")
 app.add_typer(notary_app, name="notary")
+chain_app = typer.Typer(help="On-chain provenance anchoring (optional).")
+app.add_typer(chain_app, name="chain")
 
 
 def _version_callback(value: bool):
@@ -58,6 +60,51 @@ _x402_config = {
     "max_auto_pay_usd": config.X402_MAX_AUTO_PAY_USD,
     "network": config.X402_NETWORK,
 }
+
+# Global state for chain / blockchain configuration
+_chain_config = {
+    "enabled": config.CHAIN_ENABLED,
+    "chain": config.CHAIN_NAME,
+    "rpc_url": config.CHAIN_RPC_URL,
+    "contract": config.CHAIN_CONTRACT,
+    "wallet_key_env": config.CHAIN_WALLET_KEY_ENV,
+}
+
+
+def _get_chain_client(verbose: bool = False):
+    """
+    Create a ChainClient with current chain configuration.
+
+    Args:
+        verbose: Enable verbose output.
+
+    Returns:
+        Configured ChainClient instance.
+
+    Raises:
+        typer.Exit: If dependencies are missing or config is invalid.
+    """
+    try:
+        from .core.chain_client import ChainClient
+    except ImportError:
+        typer.secho(
+            "ERROR: Blockchain dependencies not installed.",
+            fg=typer.colors.RED, err=True,
+        )
+        typer.echo("Install with: pip install swarm-provenance-uploader[blockchain]")
+        raise typer.Exit(code=1)
+
+    try:
+        return ChainClient(
+            chain=_chain_config["chain"],
+            rpc_url=_chain_config["rpc_url"],
+            contract_address=_chain_config["contract"],
+            private_key_env=_chain_config["wallet_key_env"],
+        )
+    except exceptions.ChainConfigurationError as e:
+        typer.secho(f"ERROR: Chain configuration invalid: {e}", fg=typer.colors.RED, err=True)
+        typer.echo("Check PROVENANCE_WALLET_KEY environment variable and chain settings.")
+        raise typer.Exit(code=1)
 
 
 def _x402_payment_callback(amount_usd: str, description: str) -> bool:
@@ -1416,6 +1463,272 @@ def notary_verify(
         raise typer.Exit(code=1)
 
 
+# --- Chain Subcommands ---
+
+@chain_app.command("balance")
+def chain_balance(
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
+    output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
+):
+    """
+    Show wallet balance and chain configuration.
+    """
+    try:
+        client = _get_chain_client(verbose=verbose)
+        result = client.balance(verbose=verbose)
+    except typer.Exit:
+        raise
+    except exceptions.ChainConnectionError as e:
+        typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+        if e.rpc_url:
+            typer.echo(f"  RPC URL: {e.rpc_url}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainError as e:
+        typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if output_json:
+        typer.echo(json.dumps(result.model_dump(), indent=2))
+        return
+
+    typer.echo(f"\nChain Wallet:")
+    typer.echo("-" * 40)
+    typer.echo(f"  Address:  {result.address}")
+    typer.echo(f"  Balance:  {result.balance_eth} ETH")
+    typer.echo(f"  Chain:    {result.chain}")
+    typer.echo(f"  Contract: {result.contract_address}")
+
+    if result.chain == "base-sepolia":
+        typer.echo("")
+        typer.echo("Get testnet ETH: https://www.alchemy.com/faucets/base-sepolia")
+
+
+@chain_app.command("verify")
+def chain_verify(
+    swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to verify on-chain.")],
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
+):
+    """
+    Verify that a Swarm hash is anchored on-chain.
+
+    Exit code 0 if anchored, 1 if not found (useful for scripting).
+    """
+    try:
+        client = _get_chain_client(verbose=verbose)
+        is_registered = client.verify(swarm_hash, verbose=verbose)
+    except typer.Exit:
+        raise
+    except exceptions.ChainConnectionError as e:
+        typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+        if e.rpc_url:
+            typer.echo(f"  RPC URL: {e.rpc_url}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainError as e:
+        typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if is_registered:
+        typer.secho(f"Verified: {swarm_hash} is anchored on-chain.", fg=typer.colors.GREEN)
+    else:
+        typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+
+
+@chain_app.command("get")
+def chain_get(
+    swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to look up.")],
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
+    output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
+):
+    """
+    Get the on-chain provenance record for a Swarm hash.
+    """
+    try:
+        client = _get_chain_client(verbose=verbose)
+        record = client.get(swarm_hash, verbose=verbose)
+    except typer.Exit:
+        raise
+    except exceptions.DataNotRegisteredError:
+        typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+    except exceptions.ChainConnectionError as e:
+        typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+        if e.rpc_url:
+            typer.echo(f"  RPC URL: {e.rpc_url}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainError as e:
+        typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if output_json:
+        typer.echo(json.dumps(record.model_dump(), indent=2))
+        return
+
+    from datetime import datetime, timezone
+    ts_str = datetime.fromtimestamp(record.timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    hash_short = f"{record.data_hash[:12]}...{record.data_hash[-8:]}" if len(record.data_hash) > 20 else record.data_hash
+    owner_short = f"{record.owner[:10]}...{record.owner[-4:]}" if len(record.owner) > 14 else record.owner
+
+    typer.echo(f"\nProvenance Record:")
+    typer.echo("-" * 50)
+    typer.echo(f"  Hash:    {hash_short}")
+    typer.echo(f"  Owner:   {owner_short}")
+    typer.echo(f"  Type:    {record.data_type}")
+    typer.echo(f"  Status:  {record.status.name}")
+    typer.echo(f"  Time:    {ts_str}")
+
+    if record.transformations:
+        typer.echo(f"\n  Transformations ({len(record.transformations)}):")
+        for t in record.transformations:
+            t_hash = f"{t.new_data_hash[:12]}..." if len(t.new_data_hash) > 12 else t.new_data_hash
+            typer.echo(f"    -> {t_hash}: {t.description}")
+
+    if record.accessors:
+        typer.echo(f"\n  Accessors ({len(record.accessors)}):")
+        for addr in record.accessors:
+            addr_short = f"{addr[:10]}...{addr[-4:]}" if len(addr) > 14 else addr
+            typer.echo(f"    - {addr_short}")
+
+
+@chain_app.command("anchor")
+def chain_anchor(
+    swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to anchor on-chain.")],
+    data_type: Annotated[str, typer.Option("--type", "-t", help="Data type/category.")] = "swarm-provenance",
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
+    output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
+):
+    """
+    Anchor a Swarm hash on-chain by registering it in the DataProvenance contract.
+    """
+    try:
+        client = _get_chain_client(verbose=verbose)
+        result = client.anchor(swarm_hash, data_type=data_type, verbose=verbose)
+    except typer.Exit:
+        raise
+    except exceptions.ChainTransactionError as e:
+        typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
+        if e.tx_hash:
+            typer.echo(f"  Transaction: {e.tx_hash}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainConnectionError as e:
+        typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+        if e.rpc_url:
+            typer.echo(f"  RPC URL: {e.rpc_url}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainError as e:
+        typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if output_json:
+        typer.echo(json.dumps(result.model_dump(), indent=2))
+        return
+
+    typer.secho(f"\nAnchored successfully!", fg=typer.colors.GREEN, bold=True)
+    typer.echo(f"  Hash:    {swarm_hash}")
+    typer.echo(f"  Type:    {data_type}")
+    typer.echo(f"  Tx:      {result.tx_hash}")
+    typer.echo(f"  Block:   {result.block_number}")
+    typer.echo(f"  Gas:     {result.gas_used}")
+    if result.explorer_url:
+        typer.echo(f"  Explorer: {result.explorer_url}")
+
+
+@chain_app.command("access")
+def chain_access(
+    swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to record access for.")],
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
+    output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
+):
+    """
+    Record that data was accessed on-chain.
+
+    This operation is idempotent - recording access multiple times
+    for the same hash and accessor is safe.
+    """
+    try:
+        client = _get_chain_client(verbose=verbose)
+        result = client.access(swarm_hash, verbose=verbose)
+    except typer.Exit:
+        raise
+    except exceptions.ChainTransactionError as e:
+        typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
+        if e.tx_hash:
+            typer.echo(f"  Transaction: {e.tx_hash}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainConnectionError as e:
+        typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+        if e.rpc_url:
+            typer.echo(f"  RPC URL: {e.rpc_url}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainError as e:
+        typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if output_json:
+        typer.echo(json.dumps(result.model_dump(), indent=2))
+        return
+
+    typer.secho(f"\nAccess recorded!", fg=typer.colors.GREEN, bold=True)
+    typer.echo(f"  Hash:    {swarm_hash}")
+    typer.echo(f"  Tx:      {result.tx_hash}")
+    typer.echo(f"  Block:   {result.block_number}")
+    typer.echo(f"  Gas:     {result.gas_used}")
+    if result.explorer_url:
+        typer.echo(f"  Explorer: {result.explorer_url}")
+
+
+@chain_app.command("transform")
+def chain_transform(
+    original_hash: Annotated[str, typer.Argument(help="Hash of the original data.")],
+    new_hash: Annotated[str, typer.Argument(help="Hash of the transformed data.")],
+    description: Annotated[str, typer.Option("--description", "-d", help="Description of the transformation.")] = "",
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
+    output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
+):
+    """
+    Record a data transformation on-chain, linking original to new hash.
+
+    The original hash must already be anchored on-chain.
+    """
+    try:
+        client = _get_chain_client(verbose=verbose)
+        result = client.transform(original_hash, new_hash, description=description, verbose=verbose)
+    except typer.Exit:
+        raise
+    except exceptions.DataNotRegisteredError as e:
+        typer.secho(f"ERROR: Original hash is not registered on-chain.", fg=typer.colors.RED, err=True)
+        typer.echo(f"  Anchor it first: swarm-prov-upload chain anchor {e.data_hash or original_hash}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainTransactionError as e:
+        typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
+        if e.tx_hash:
+            typer.echo(f"  Transaction: {e.tx_hash}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainConnectionError as e:
+        typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+        if e.rpc_url:
+            typer.echo(f"  RPC URL: {e.rpc_url}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainError as e:
+        typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if output_json:
+        typer.echo(json.dumps(result.model_dump(), indent=2))
+        return
+
+    typer.secho(f"\nTransformation recorded!", fg=typer.colors.GREEN, bold=True)
+    typer.echo(f"  Original: {original_hash}")
+    typer.echo(f"  New:      {new_hash}")
+    if description:
+        typer.echo(f"  Desc:     {description}")
+    typer.echo(f"  Tx:       {result.tx_hash}")
+    typer.echo(f"  Block:    {result.block_number}")
+    typer.echo(f"  Gas:      {result.gas_used}")
+    if result.explorer_url:
+        typer.echo(f"  Explorer: {result.explorer_url}")
+
+
 @app.callback()
 def main(
     ctx: typer.Context,
@@ -1449,6 +1762,14 @@ def main(
         "--x402-network",
         help="x402 network: 'base-sepolia' (testnet) or 'base' (mainnet). [default: base-sepolia]"
     )] = None,
+    chain: Annotated[Optional[str], typer.Option(
+        "--chain",
+        help="Blockchain for on-chain anchoring: 'base-sepolia' (testnet) or 'base' (mainnet)."
+    )] = None,
+    chain_rpc: Annotated[Optional[str], typer.Option(
+        "--chain-rpc",
+        help="Custom RPC URL for blockchain connection."
+    )] = None,
 ):
     """
     Swarm Provenance CLI Toolkit - Wraps and uploads data to Swarm.
@@ -1480,6 +1801,15 @@ def main(
             typer.secho(f"ERROR: Invalid x402 network '{x402_network}'. Use 'base-sepolia' or 'base'.", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
         _x402_config["network"] = x402_network
+
+    # Chain configuration
+    if chain:
+        if chain not in ("base-sepolia", "base"):
+            typer.secho(f"ERROR: Invalid chain '{chain}'. Use 'base-sepolia' or 'base'.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        _chain_config["chain"] = chain
+    if chain_rpc:
+        _chain_config["rpc_url"] = chain_rpc
 
 if __name__ == "__main__":
      app()
