@@ -438,6 +438,44 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    def batch_set_status(
+        self,
+        swarm_hashes: List[str],
+        statuses: List[int],
+        verbose: bool = False,
+    ) -> AnchorResult:
+        """
+        Set the status of multiple registered data hashes in a single transaction.
+
+        Args:
+            swarm_hashes: List of data hashes.
+            statuses: List of new statuses (0=ACTIVE, 1=RESTRICTED, 2=DELETED).
+            verbose: Enable debug output.
+
+        Returns:
+            AnchorResult with transaction details.
+        """
+        if verbose:
+            print(f"--- DEBUG: Batch Set Status ---")
+            print(f"Count: {len(swarm_hashes)}")
+
+        tx = self._contract.build_batch_set_data_status_tx(
+            data_hashes=swarm_hashes,
+            statuses=statuses,
+            sender=self._wallet.address,
+        )
+        receipt = self._send_transaction(tx, verbose=verbose)
+
+        return AnchorResult(
+            tx_hash=receipt["transactionHash"].hex(),
+            block_number=receipt["blockNumber"],
+            gas_used=receipt["gasUsed"],
+            explorer_url=self._receipt_to_explorer_url(receipt),
+            swarm_hash=swarm_hashes[0] if swarm_hashes else "",
+            data_type="",
+            owner=self._wallet.address,
+        )
+
     def transfer_ownership(
         self,
         swarm_hash: str,
@@ -554,12 +592,15 @@ class ChainClient:
                 data_hash=swarm_hash,
             )
 
-        # Parse transformations (stored as strings in contract)
+        # Parse transformations — each is a TransformationRecord struct
+        # returned by web3.py as a tuple: (bytes32 newDataHash, string transformation)
         chain_transformations = []
         for t in transformations:
+            new_hash = t[0].hex() if isinstance(t[0], bytes) else str(t[0])
+            description = t[1] if len(t) > 1 else ""
             chain_transformations.append(ChainTransformation(
-                new_data_hash=t,
-                description=t,
+                new_data_hash=new_hash,
+                description=description,
             ))
 
         if verbose:

@@ -16,11 +16,19 @@ from ..exceptions import ChainConfigurationError, ChainValidationError
 
 
 # --- Constants ---
-
+# Client-side validation limits (not enforced on-chain — Solidity strings are
+# dynamically sized, so these are reasonable guard rails to prevent wasted gas).
 MAX_DATA_TYPE_LENGTH = 64
 MAX_TRANSFORMATION_LENGTH = 256
+
+# Client-side batch limits. The contract does not enforce per-call batch sizes
+# but larger batches risk exceeding the block gas limit.
 MAX_BATCH_REGISTER = 50
 MAX_BATCH_ACCESS = 100
+
+# Note: the contract also defines on-chain constants MAX_TRANSFORMATIONS (100)
+# and MAX_ACCESSORS readable via contract.functions.MAX_TRANSFORMATIONS().call().
+# These limit how many transformations/accessors can be stored per data record.
 
 
 class DataStatus(IntEnum):
@@ -359,6 +367,42 @@ class DataProvenanceContract:
         hash_bytes = _normalize_hash(data_hash)
         return self._contract.functions.setDataStatus(
             hash_bytes, status
+        ).build_transaction({
+            "from": self._web3.to_checksum_address(sender),
+        })
+
+    def build_batch_set_data_status_tx(
+        self,
+        data_hashes: List[str],
+        statuses: List[int],
+        sender: str,
+    ) -> dict:
+        """
+        Build transaction to change the status of multiple data hashes.
+
+        Args:
+            data_hashes: List of data hashes.
+            statuses: List of new statuses (0=ACTIVE, 1=RESTRICTED, 2=DELETED).
+            sender: Address of the data owner.
+
+        Returns:
+            Unsigned transaction dict.
+
+        Raises:
+            ChainValidationError: If arrays have different lengths or exceed batch limit.
+        """
+        if len(data_hashes) != len(statuses):
+            raise ChainValidationError(
+                f"data_hashes ({len(data_hashes)}) and statuses ({len(statuses)}) "
+                "must have the same length"
+            )
+        if len(data_hashes) > MAX_BATCH_REGISTER:
+            raise ChainValidationError(
+                f"Batch size {len(data_hashes)} exceeds maximum of {MAX_BATCH_REGISTER}"
+            )
+        hash_bytes_list = [_normalize_hash(h) for h in data_hashes]
+        return self._contract.functions.batchSetDataStatus(
+            hash_bytes_list, statuses
         ).build_transaction({
             "from": self._web3.to_checksum_address(sender),
         })

@@ -113,6 +113,11 @@ def mock_chain_deps():
             "to": DUMMY_CONTRACT,
             "data": "0x",
         }
+        mock_contract.functions.batchSetDataStatus.return_value.build_transaction.return_value = {
+            "from": DUMMY_ADDRESS,
+            "to": DUMMY_CONTRACT,
+            "data": "0x",
+        }
 
         # Mock read functions
         mock_contract.functions.getDataRecord.return_value.call.return_value = (
@@ -893,3 +898,135 @@ class TestChainExceptions:
         """Tests that DataNotRegisteredError stores data_hash."""
         err = DataNotRegisteredError("not found", data_hash=DUMMY_HASH)
         assert err.data_hash == DUMMY_HASH
+
+
+# --- Transformation parsing tests ---
+
+class TestTransformationParsing:
+    """Tests for correct parsing of TransformationRecord structs from getDataRecord."""
+
+    def test_get_with_transformations(self, mock_chain_deps):
+        """Tests that transformations are parsed as (bytes32, string) tuples."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        new_hash_bytes = bytes.fromhex("bb" * 32)
+        # Contract returns TransformationRecord as tuple: (bytes32 newDataHash, string transformation)
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES,
+            DUMMY_ADDRESS,
+            1700000000,
+            "swarm-provenance",
+            [(new_hash_bytes, "encrypted: AES-256-GCM")],  # TransformationRecord tuple
+            [DUMMY_ADDRESS],
+            0,
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        record = client.get(swarm_hash=DUMMY_HASH)
+
+        assert len(record.transformations) == 1
+        assert record.transformations[0].new_data_hash == "bb" * 32
+        assert record.transformations[0].description == "encrypted: AES-256-GCM"
+
+    def test_get_with_multiple_transformations(self, mock_chain_deps):
+        """Tests parsing multiple transformation records."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        hash1 = bytes.fromhex("bb" * 32)
+        hash2 = bytes.fromhex("cc" * 32)
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES,
+            DUMMY_ADDRESS,
+            1700000000,
+            "swarm-provenance",
+            [
+                (hash1, "filtered PII"),
+                (hash2, "anonymized"),
+            ],
+            [],
+            0,
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        record = client.get(swarm_hash=DUMMY_HASH)
+
+        assert len(record.transformations) == 2
+        assert record.transformations[0].new_data_hash == "bb" * 32
+        assert record.transformations[0].description == "filtered PII"
+        assert record.transformations[1].new_data_hash == "cc" * 32
+        assert record.transformations[1].description == "anonymized"
+
+    def test_get_with_accessors(self, mock_chain_deps):
+        """Tests that accessors list is parsed correctly."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        accessor_addr = "0x1111111111111111111111111111111111111111"
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES,
+            DUMMY_ADDRESS,
+            1700000000,
+            "swarm-provenance",
+            [],
+            [DUMMY_ADDRESS, accessor_addr],
+            0,
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        record = client.get(swarm_hash=DUMMY_HASH)
+
+        assert len(record.accessors) == 2
+        assert accessor_addr in record.accessors
+
+
+# --- Batch status tests ---
+
+class TestBatchSetDataStatus:
+    """Tests for batch set data status operations."""
+
+    def test_batch_set_status_mismatched_lengths(self, mock_chain_deps):
+        """Tests that mismatched array lengths raise error."""
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+
+        with pytest.raises(ChainValidationError) as exc_info:
+            contract.build_batch_set_data_status_tx(
+                data_hashes=[DUMMY_HASH],
+                statuses=[0, 1],  # mismatched
+                sender=DUMMY_ADDRESS,
+            )
+        assert "same length" in str(exc_info.value)
+
+    def test_batch_set_status_exceeds_limit(self, mock_chain_deps):
+        """Tests that exceeding batch limit raises error."""
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract, MAX_BATCH_REGISTER
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+
+        with pytest.raises(ChainValidationError) as exc_info:
+            contract.build_batch_set_data_status_tx(
+                data_hashes=[DUMMY_HASH] * (MAX_BATCH_REGISTER + 1),
+                statuses=[0] * (MAX_BATCH_REGISTER + 1),
+                sender=DUMMY_ADDRESS,
+            )
+        assert "maximum" in str(exc_info.value).lower()
+
+    def test_batch_set_status_client_success(self, mock_chain_deps):
+        """Tests batch_set_status through ChainClient."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        hash2 = "b" * 64
+        client = ChainClient(chain="base-sepolia")
+        result = client.batch_set_status(
+            swarm_hashes=[DUMMY_HASH, hash2],
+            statuses=[1, 2],  # RESTRICTED, DELETED
+        )
+
+        assert isinstance(result, AnchorResult)
+        assert result.swarm_hash == DUMMY_HASH
