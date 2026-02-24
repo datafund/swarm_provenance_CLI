@@ -377,6 +377,34 @@ class TestChainProvider:
         )
         assert provider.contract_address == custom_addr
 
+    def test_custom_explorer_url(self, mock_chain_deps):
+        """Tests that custom explorer URL overrides the preset."""
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        provider = ChainProvider(
+            chain="base-sepolia",
+            explorer_url="https://custom-explorer.io",
+        )
+        assert provider.explorer_url == "https://custom-explorer.io"
+
+    def test_default_explorer_url(self, mock_chain_deps):
+        """Tests that preset explorer URL is used when no override given."""
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        provider = ChainProvider(chain="base-sepolia")
+        assert provider.explorer_url == "https://sepolia.basescan.org"
+
+    def test_custom_explorer_url_in_tx_url(self, mock_chain_deps):
+        """Tests that custom explorer URL is used in generated TX URLs."""
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        provider = ChainProvider(
+            chain="base-sepolia",
+            explorer_url="https://custom-explorer.io",
+        )
+        url = provider.get_explorer_tx_url("0xabc123")
+        assert url == "https://custom-explorer.io/tx/0xabc123"
+
     def test_base_mainnet_no_contract_raises_error(self, mock_chain_deps):
         """Tests that base mainnet without contract raises error."""
         from swarm_provenance_uploader.chain.provider import ChainProvider
@@ -512,6 +540,20 @@ class TestChainClientInit:
         assert client.address == DUMMY_ADDRESS
         assert client.chain == "base-sepolia"
         assert client.contract_address == DUMMY_CONTRACT
+
+    def test_explorer_url_passthrough(self, mock_chain_deps):
+        """Tests that explorer_url is passed through to ChainProvider."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        client = ChainClient(
+            chain="base-sepolia",
+            explorer_url="https://custom-explorer.io",
+        )
+        assert client._provider.explorer_url == "https://custom-explorer.io"
+
+        # Verify explorer URL is used in anchor results
+        result = client.anchor(swarm_hash=DUMMY_HASH)
+        assert "custom-explorer.io" in result.explorer_url
 
     def test_missing_deps_shows_helpful_message(self):
         """Tests that missing blockchain deps give clear error."""
@@ -819,6 +861,67 @@ class TestChainClientProvenanceChain:
         chain = client.get_provenance_chain(swarm_hash=DUMMY_HASH)
 
         assert len(chain) == 0
+
+    def test_multi_hop_chain(self, mock_chain_deps):
+        """Tests traversal of a multi-hop provenance chain: A -> B -> C."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        hash_a = DUMMY_HASH          # "aa...aa"
+        hash_b = "b" * 64
+        hash_c = "c" * 64
+        hash_a_bytes = bytes.fromhex(hash_a)
+        hash_b_bytes = bytes.fromhex(hash_b)
+        hash_c_bytes = bytes.fromhex(hash_c)
+
+        # Set up contract to return different records depending on which hash is queried.
+        # We use side_effect to return different values for successive calls.
+        call_count = {"n": 0}
+        records = {
+            hash_a_bytes: (
+                hash_a_bytes, DUMMY_ADDRESS, 1700000000, "swarm-provenance",
+                [(hash_b_bytes, "filtered PII")],  # A -> B
+                [], 0,
+            ),
+            hash_b_bytes: (
+                hash_b_bytes, DUMMY_ADDRESS, 1700001000, "swarm-provenance",
+                [(hash_c_bytes, "anonymized")],  # B -> C
+                [], 0,
+            ),
+            hash_c_bytes: (
+                hash_c_bytes, DUMMY_ADDRESS, 1700002000, "swarm-provenance",
+                [],  # C is terminal
+                [], 0,
+            ),
+        }
+
+        # The contract mock uses a single return value, so we need to make
+        # getDataRecord return a new mock each time it's called with different args.
+        original_getDataRecord = mock_chain_deps["contract"].functions.getDataRecord
+
+        def mock_get_data_record(data_hash):
+            mock_call = MagicMock()
+            # data_hash is bytes32 passed by the contract wrapper
+            mock_call.call.return_value = records.get(
+                data_hash,
+                (data_hash, ZERO_ADDRESS, 0, "", [], [], 0),
+            )
+            return mock_call
+
+        mock_chain_deps["contract"].functions.getDataRecord = mock_get_data_record
+
+        client = ChainClient(chain="base-sepolia")
+        chain = client.get_provenance_chain(swarm_hash=hash_a)
+
+        assert len(chain) == 3
+        assert chain[0].data_hash == hash_a
+        assert chain[1].data_hash == hash_b
+        assert chain[2].data_hash == hash_c
+        # Verify transformations are present
+        assert len(chain[0].transformations) == 1
+        assert chain[0].transformations[0].description == "filtered PII"
+        assert len(chain[1].transformations) == 1
+        assert chain[1].transformations[0].description == "anonymized"
+        assert len(chain[2].transformations) == 0
 
 
 # --- Models tests ---

@@ -2179,6 +2179,44 @@ class TestChainGlobalFlags:
         assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
 
 
+class TestChainExplorerUrlConfig:
+    """Tests for CHAIN_EXPLORER_URL config passthrough."""
+
+    def test_explorer_url_in_chain_config(self):
+        """Tests that explorer_url key exists in _chain_config."""
+        assert "explorer_url" in _chain_config
+
+    def test_explorer_url_passed_to_client(self, mocker):
+        """Tests that explorer_url from config is passed to ChainClient."""
+        from swarm_provenance_uploader.models import ChainWalletInfo
+
+        _chain_config["explorer_url"] = "https://custom-explorer.io"
+
+        mock_chain_client_class = mocker.patch(
+            "swarm_provenance_uploader.core.chain_client.ChainClient",
+        )
+        mock_client = mocker.MagicMock()
+        mock_client.balance.return_value = ChainWalletInfo(
+            address=DUMMY_ADDRESS,
+            balance_wei=0,
+            balance_eth="0.0",
+            chain="base-sepolia",
+            contract_address="0x1234",
+        )
+        mock_chain_client_class.return_value = mock_client
+
+        result = runner.invoke(app, ["chain", "balance"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        mock_chain_client_class.assert_called_once_with(
+            chain="base-sepolia",
+            rpc_url=None,
+            contract_address=None,
+            private_key_env="PROVENANCE_WALLET_KEY",
+            explorer_url="https://custom-explorer.io",
+        )
+
+
 class TestChainConnectionError:
     """Tests for chain connection error handling."""
 
