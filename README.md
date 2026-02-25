@@ -395,9 +395,70 @@ swarm-prov-upload upload-collection /path/to/directory --stamp-id <id> --deferre
 | `--size` | Stamp size preset: `small`, `medium`, `large` |
 | `--stamp-id`, `-s` | Use existing stamp (skip purchase) |
 | `--usePool` | Acquire stamp from pool (faster) |
-| `--deferred` | Deferred upload mode |
-| `--redundancy` | Enable redundancy |
-| `--json` | Output result as JSON |
+| `--deferred` | Deferred upload — the gateway returns immediately and processes the upload in the background. Useful for large collections. |
+| `--redundancy` | Stores data on multiple nodes for higher availability. Increases upload cost. |
+| `--json` | Output result as JSON (see example below) |
+
+**Example Output (text):**
+```
+Processing directory: my_dataset/ (3 files)...
+Purchasing postage stamp...
+Postage stamp purchased (ID: ...a3a3a3a3a3a3)
+Uploading collection to Swarm...
+
+SUCCESS! Collection uploaded.
+Swarm Manifest Reference:
+b5d4ea763a1396676771151158461f73678f1676166acd06a0a18600b85de8a4
+
+Files (3):
+  readme.txt (42 bytes)
+  data/values.csv (128 bytes)
+  data/metadata.json (256 bytes)
+
+Total size: 426 bytes
+Collection hash: 9f86d08...
+
+Access files at:
+  bzz/b5d4ea76.../readme.txt
+  bzz/b5d4ea76.../data/values.csv
+  bzz/b5d4ea76.../data/metadata.json
+```
+
+**Example Output (JSON with `--json`):**
+```json
+{
+  "collection_hash": "9f86d081884c7d659a2feaa0c55ad015...",
+  "files": [
+    {"path": "readme.txt", "size": 42, "content_hash": "a1b2c3..."},
+    {"path": "data/values.csv", "size": 128, "content_hash": "d4e5f6..."}
+  ],
+  "total_size": 170,
+  "file_count": 2,
+  "stamp_id": "a3a3a3a3...",
+  "swarm_reference": "b5d4ea763a...",
+  "provenance_standard": "PROV-STD-V1"
+}
+```
+
+**Accessing files from a manifest:**
+
+After uploading, individual files are accessible via Swarm's `bzz` protocol using the manifest reference and the file path:
+
+```
+https://gateway.ethswarm.org/bzz/<reference>/path/to/file
+```
+
+For example, if the reference is `b5d4ea76...` and the file is `data/values.csv`:
+```
+https://gateway.ethswarm.org/bzz/b5d4ea76.../data/values.csv
+```
+
+You can also use any Swarm gateway or a local Bee node to access the files.
+
+**Notes:**
+- Symlinks are skipped (not included in the archive) to avoid circular reference issues
+- Hidden files (dotfiles like `.gitignore`) are included
+- The `collection_hash` is a SHA-256 of the sorted concatenation of all individual file hashes, providing a deterministic fingerprint for the entire collection
 
 **Upload Options:**
 | Option | Description |

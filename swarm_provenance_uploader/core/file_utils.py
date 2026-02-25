@@ -57,15 +57,15 @@ def create_tar_from_directory(directory: Path, output_path: Path) -> Path:
     if not directory.is_dir():
         raise ValueError(f"Not a directory: {directory}")
 
-    # Check directory is not empty
-    files = [f for f in directory.rglob("*") if f.is_file()]
+    # Check directory is not empty (skip symlinks to avoid circular link loops)
+    files = [f for f in directory.rglob("*") if f.is_file() and not f.is_symlink()]
     if not files:
         raise ValueError(f"Directory is empty: {directory}")
 
     with tarfile.open(output_path, "w") as tar:
         for file_path in sorted(files):
             arcname = str(file_path.relative_to(directory))
-            tar.add(str(file_path), arcname=arcname)
+            tar.add(str(file_path), arcname=arcname, recursive=False)
 
     return output_path
 
@@ -90,7 +90,8 @@ def calculate_directory_hash_and_files(directory: Path) -> Tuple[str, List[dict]
     if not directory.is_dir():
         raise ValueError(f"Not a directory: {directory}")
 
-    files = sorted(f for f in directory.rglob("*") if f.is_file())
+    # Skip symlinks to avoid circular link loops
+    files = sorted(f for f in directory.rglob("*") if f.is_file() and not f.is_symlink())
     if not files:
         raise ValueError(f"Directory is empty: {directory}")
 

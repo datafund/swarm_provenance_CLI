@@ -1162,3 +1162,67 @@ class TestGatewayClientManifest:
         client = GatewayClient(base_url="https://test.gateway.io")
         with pytest.raises(Exception):
             client.upload_manifest(str(tar_path), DUMMY_STAMP)
+
+    def test_upload_manifest_deferred_param(self, requests_mock, tmp_path):
+        """Tests that deferred=True is sent as query parameter."""
+        mock = requests_mock.post(
+            "https://test.gateway.io/api/v1/data/manifest",
+            json={"reference": DUMMY_SWARM_REF},
+        )
+
+        import tarfile
+        tar_path = tmp_path / "test.tar"
+        file1 = tmp_path / "f.txt"
+        file1.write_text("data")
+        with tarfile.open(tar_path, "w") as tar:
+            tar.add(str(file1), arcname="f.txt")
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        client.upload_manifest(str(tar_path), DUMMY_STAMP, deferred=True)
+
+        assert mock.called
+        assert "deferred=true" in mock.last_request.url.lower()
+
+    def test_upload_manifest_redundancy_param(self, requests_mock, tmp_path):
+        """Tests that redundancy=True is sent as query parameter."""
+        mock = requests_mock.post(
+            "https://test.gateway.io/api/v1/data/manifest",
+            json={"reference": DUMMY_SWARM_REF},
+        )
+
+        import tarfile
+        tar_path = tmp_path / "test.tar"
+        file1 = tmp_path / "f.txt"
+        file1.write_text("data")
+        with tarfile.open(tar_path, "w") as tar:
+            tar.add(str(file1), arcname="f.txt")
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        client.upload_manifest(str(tar_path), DUMMY_STAMP, redundancy=True)
+
+        assert mock.called
+        assert "redundancy=true" in mock.last_request.url.lower()
+
+    def test_upload_manifest_deferred_and_redundancy(self, requests_mock, tmp_path):
+        """Tests both deferred and redundancy params sent together."""
+        mock = requests_mock.post(
+            "https://test.gateway.io/api/v1/data/manifest",
+            json={"reference": DUMMY_SWARM_REF},
+        )
+
+        import tarfile
+        tar_path = tmp_path / "test.tar"
+        file1 = tmp_path / "f.txt"
+        file1.write_text("data")
+        with tarfile.open(tar_path, "w") as tar:
+            tar.add(str(file1), arcname="f.txt")
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        client.upload_manifest(
+            str(tar_path), DUMMY_STAMP, deferred=True, redundancy=True
+        )
+
+        assert mock.called
+        url = mock.last_request.url.lower()
+        assert "deferred=true" in url
+        assert "redundancy=true" in url

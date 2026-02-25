@@ -3620,3 +3620,54 @@ class TestUploadCollectionCommand:
 
             assert result.exit_code != 0
             assert "gateway" in result.stdout.lower()
+
+    def test_upload_collection_nonexistent_directory(self):
+        """Tests error when directory path does not exist."""
+        result = runner.invoke(
+            app, ["upload-collection", "/tmp/does_not_exist_xyz_12345"]
+        )
+
+        assert result.exit_code != 0
+        assert "Not a directory" in result.stdout
+
+    def test_upload_collection_with_existing_stamp(self, mocker):
+        """Tests collection upload with --stamp-id (skip purchase)."""
+        mock_client = self._mock_gateway_for_collection(mocker)
+
+        with runner.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/file.txt", "w") as f:
+                f.write("data")
+
+            result = runner.invoke(
+                app, ["upload-collection", "mydir", "--stamp-id", DUMMY_STAMP]
+            )
+
+            assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+            assert "SUCCESS" in result.stdout
+            # Should NOT have called purchase or pool acquire
+            mock_client.purchase_stamp.assert_not_called()
+            mock_client.acquire_stamp_from_pool.assert_not_called()
+            # Should have called upload_manifest
+            mock_client.upload_manifest.assert_called_once()
+
+    def test_upload_collection_deferred_and_redundancy(self, mocker):
+        """Tests that --deferred and --redundancy flags are passed through."""
+        mock_client = self._mock_gateway_for_collection(mocker)
+
+        with runner.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/file.txt", "w") as f:
+                f.write("data")
+
+            result = runner.invoke(
+                app, ["upload-collection", "mydir", "--deferred", "--redundancy"]
+            )
+
+            assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+            # Verify flags were passed to upload_manifest
+            call_kwargs = mock_client.upload_manifest.call_args
+            assert call_kwargs.kwargs.get("deferred") is True or call_kwargs[1].get("deferred") is True
+            assert call_kwargs.kwargs.get("redundancy") is True or call_kwargs[1].get("redundancy") is True
