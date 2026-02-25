@@ -1539,12 +1539,72 @@ def chain_verify(
 @chain_app.command("get")
 def chain_get(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to look up.")],
+    follow: Annotated[bool, typer.Option("--follow", help="Walk the transformation chain.")] = False,
+    depth: Annotated[Optional[int], typer.Option("--depth", help="Max chain depth when using --follow.")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
     """
     Get the on-chain provenance record for a Swarm hash.
+
+    Use --follow to walk the full transformation chain.
+    Use --depth to limit traversal depth.
     """
+    if follow:
+        # Chain walking mode
+        try:
+            client = _get_chain_client(verbose=verbose)
+            chain_records = client.get_provenance_chain(swarm_hash, max_depth=depth, verbose=verbose)
+        except typer.Exit:
+            raise
+        except exceptions.ChainConnectionError as e:
+            typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+            if e.rpc_url:
+                typer.echo(f"  RPC URL: {e.rpc_url}")
+            raise typer.Exit(code=1)
+        except exceptions.ChainError as e:
+            typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+
+        if not chain_records:
+            typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
+            raise typer.Exit(code=1)
+
+        if output_json:
+            output = {
+                "chain": [r.model_dump() for r in chain_records],
+                "depth": len(chain_records),
+                "root": swarm_hash,
+            }
+            typer.echo(json.dumps(output, indent=2))
+            return
+
+        typer.echo(f"\nProvenance Chain ({len(chain_records)} records):")
+        typer.echo("\u2550" * 35)
+
+        for i, record in enumerate(chain_records, 1):
+            hash_short = f"{record.data_hash[:12]}...{record.data_hash[-8:]}" if len(record.data_hash) > 20 else record.data_hash
+            owner_short = f"{record.owner[:10]}...{record.owner[-4:]}" if len(record.owner) > 14 else record.owner
+
+            label = "Original" if i == 1 else "Derived"
+            typer.echo(f"\n\u250c\u2500\u2500\u2500 [{i}] {label} \u2500\u2500\u2500")
+            typer.echo(f"\u2502  Hash:   {hash_short}")
+            typer.echo(f"\u2502  Type:   {record.data_type}")
+            typer.echo(f"\u2502  Owner:  {owner_short}")
+            typer.echo(f"\u2502  Status: {record.status.name}")
+
+            if record.transformations:
+                for t in record.transformations:
+                    typer.echo(f"\u2502")
+                    desc = t.description if t.description else "transformation"
+                    typer.echo(f"\u2514\u2500\u2500\u2500\u2500 -> [{desc}] \u2500\u2500\u2500\u2500")
+            else:
+                typer.echo(f"\u2502")
+                typer.echo(f"\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+
+        return
+
+    # Single record mode
     try:
         client = _get_chain_client(verbose=verbose)
         record = client.get(swarm_hash, verbose=verbose)
@@ -1596,15 +1656,21 @@ def chain_get(
 def chain_anchor(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to anchor on-chain.")],
     data_type: Annotated[str, typer.Option("--type", "-t", help="Data type/category.")] = "swarm-provenance",
+    owner: Annotated[Optional[str], typer.Option("--owner", help="Register on behalf of this owner address (requires delegate authorization).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
     """
     Anchor a Swarm hash on-chain by registering it in the DataProvenance contract.
+
+    Use --owner to register on behalf of another address (caller must be authorized delegate).
     """
     try:
         client = _get_chain_client(verbose=verbose)
-        result = client.anchor(swarm_hash, data_type=data_type, verbose=verbose)
+        if owner:
+            result = client.anchor_for(swarm_hash, owner=owner, data_type=data_type, verbose=verbose)
+        else:
+            result = client.anchor(swarm_hash, data_type=data_type, verbose=verbose)
     except typer.Exit:
         raise
     except exceptions.ChainTransactionError as e:
@@ -1628,6 +1694,8 @@ def chain_anchor(
     typer.secho(f"\nAnchored successfully!", fg=typer.colors.GREEN, bold=True)
     typer.echo(f"  Hash:    {swarm_hash}")
     typer.echo(f"  Type:    {data_type}")
+    if owner:
+        typer.echo(f"  Owner:   {owner}")
     typer.echo(f"  Tx:      {result.tx_hash}")
     typer.echo(f"  Block:   {result.block_number}")
     typer.echo(f"  Gas:     {result.gas_used}")
@@ -1679,11 +1747,198 @@ def chain_access(
         typer.echo(f"  Explorer: {result.explorer_url}")
 
 
+@chain_app.command("status")
+def chain_status(
+    swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to query or update status.")],
+    set_status: Annotated[Optional[str], typer.Option("--set", help="Set status: active, restricted, deleted.")] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
+    output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
+):
+    """
+    Query or set the on-chain status of a data hash.
+
+    Without --set: shows current status.
+    With --set: changes status to active, restricted, or deleted.
+    """
+    status_map = {"active": 0, "restricted": 1, "deleted": 2}
+
+    if set_status is not None:
+        # Set status mode
+        status_name = set_status.lower()
+        if status_name not in status_map:
+            typer.secho(
+                f"ERROR: Invalid status '{set_status}'. Use: active, restricted, deleted.",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=1)
+
+        try:
+            client = _get_chain_client(verbose=verbose)
+            result = client.set_status(swarm_hash, status=status_map[status_name], verbose=verbose)
+        except typer.Exit:
+            raise
+        except exceptions.DataNotRegisteredError:
+            typer.secho(f"ERROR: {swarm_hash} is not registered on-chain.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        except exceptions.ChainTransactionError as e:
+            typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
+            if e.tx_hash:
+                typer.echo(f"  Transaction: {e.tx_hash}")
+            raise typer.Exit(code=1)
+        except exceptions.ChainConnectionError as e:
+            typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+            if e.rpc_url:
+                typer.echo(f"  RPC URL: {e.rpc_url}")
+            raise typer.Exit(code=1)
+        except exceptions.ChainError as e:
+            typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+
+        if output_json:
+            typer.echo(json.dumps(result.model_dump(), indent=2))
+            return
+
+        typer.secho(f"\nStatus updated!", fg=typer.colors.GREEN, bold=True)
+        typer.echo(f"  Hash:    {swarm_hash}")
+        typer.echo(f"  Status:  {status_name.upper()}")
+        typer.echo(f"  Tx:      {result.tx_hash}")
+        typer.echo(f"  Block:   {result.block_number}")
+        typer.echo(f"  Gas:     {result.gas_used}")
+        if result.explorer_url:
+            typer.echo(f"  Explorer: {result.explorer_url}")
+    else:
+        # Query status mode
+        try:
+            client = _get_chain_client(verbose=verbose)
+            record = client.get(swarm_hash, verbose=verbose)
+        except typer.Exit:
+            raise
+        except exceptions.DataNotRegisteredError:
+            typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
+            raise typer.Exit(code=1)
+        except exceptions.ChainConnectionError as e:
+            typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+            if e.rpc_url:
+                typer.echo(f"  RPC URL: {e.rpc_url}")
+            raise typer.Exit(code=1)
+        except exceptions.ChainError as e:
+            typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+
+        if output_json:
+            typer.echo(json.dumps({"hash": swarm_hash, "status": record.status.name}, indent=2))
+            return
+
+        hash_short = f"{swarm_hash[:12]}...{swarm_hash[-8:]}" if len(swarm_hash) > 20 else swarm_hash
+        typer.echo(f"\nStatus: {hash_short}")
+        typer.echo(f"  Status: {record.status.name}")
+
+
+@chain_app.command("transfer")
+def chain_transfer(
+    swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to transfer.")],
+    to: Annotated[str, typer.Option("--to", help="New owner address.")],
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
+    output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
+):
+    """
+    Transfer ownership of a data hash to a new address.
+    """
+    try:
+        client = _get_chain_client(verbose=verbose)
+        result = client.transfer_ownership(swarm_hash, new_owner=to, verbose=verbose)
+    except typer.Exit:
+        raise
+    except exceptions.ChainTransactionError as e:
+        typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
+        if e.tx_hash:
+            typer.echo(f"  Transaction: {e.tx_hash}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainConnectionError as e:
+        typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+        if e.rpc_url:
+            typer.echo(f"  RPC URL: {e.rpc_url}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainError as e:
+        typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if output_json:
+        typer.echo(json.dumps(result.model_dump(), indent=2))
+        return
+
+    to_short = f"{to[:10]}...{to[-4:]}" if len(to) > 14 else to
+    typer.secho(f"\nOwnership transferred!", fg=typer.colors.GREEN, bold=True)
+    typer.echo(f"  Hash:    {swarm_hash}")
+    typer.echo(f"  New owner: {to_short}")
+    typer.echo(f"  Tx:      {result.tx_hash}")
+    typer.echo(f"  Block:   {result.block_number}")
+    typer.echo(f"  Gas:     {result.gas_used}")
+    if result.explorer_url:
+        typer.echo(f"  Explorer: {result.explorer_url}")
+
+
+@chain_app.command("delegate")
+def chain_delegate(
+    address: Annotated[str, typer.Argument(help="Delegate address to authorize or revoke.")],
+    authorize: Annotated[bool, typer.Option("--authorize", help="Authorize this delegate.")] = False,
+    revoke: Annotated[bool, typer.Option("--revoke", help="Revoke this delegate.")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
+    output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
+):
+    """
+    Authorize or revoke a delegate address.
+
+    A delegate can anchor data on behalf of the caller.
+    Must provide exactly one of --authorize or --revoke.
+    """
+    if authorize == revoke:
+        typer.secho(
+            "ERROR: Specify exactly one of --authorize or --revoke.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        client = _get_chain_client(verbose=verbose)
+        result = client.set_delegate(delegate=address, authorized=authorize, verbose=verbose)
+    except typer.Exit:
+        raise
+    except exceptions.ChainTransactionError as e:
+        typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
+        if e.tx_hash:
+            typer.echo(f"  Transaction: {e.tx_hash}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainConnectionError as e:
+        typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+        if e.rpc_url:
+            typer.echo(f"  RPC URL: {e.rpc_url}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainError as e:
+        typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if output_json:
+        typer.echo(json.dumps(result.model_dump(), indent=2))
+        return
+
+    action = "authorized" if authorize else "revoked"
+    addr_short = f"{address[:10]}...{address[-4:]}" if len(address) > 14 else address
+    typer.secho(f"\nDelegate {action}!", fg=typer.colors.GREEN, bold=True)
+    typer.echo(f"  Address: {addr_short}")
+    typer.echo(f"  Tx:      {result.tx_hash}")
+    typer.echo(f"  Block:   {result.block_number}")
+    typer.echo(f"  Gas:     {result.gas_used}")
+    if result.explorer_url:
+        typer.echo(f"  Explorer: {result.explorer_url}")
+
+
 @chain_app.command("transform")
 def chain_transform(
     original_hash: Annotated[str, typer.Argument(help="Hash of the original data.")],
     new_hash: Annotated[str, typer.Argument(help="Hash of the transformed data.")],
     description: Annotated[str, typer.Option("--description", "-d", help="Description of the transformation.")] = "",
+    restrict_original: Annotated[bool, typer.Option("--restrict-original", help="Set original hash status to RESTRICTED after transform.")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -1691,6 +1946,7 @@ def chain_transform(
     Record a data transformation on-chain, linking original to new hash.
 
     The original hash must already be anchored on-chain.
+    Use --restrict-original to automatically restrict the original after transform.
     """
     try:
         client = _get_chain_client(verbose=verbose)
@@ -1715,7 +1971,7 @@ def chain_transform(
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
-    if output_json:
+    if output_json and not restrict_original:
         typer.echo(json.dumps(result.model_dump(), indent=2))
         return
 
@@ -1729,6 +1985,116 @@ def chain_transform(
     typer.echo(f"  Gas:      {result.gas_used}")
     if result.explorer_url:
         typer.echo(f"  Explorer: {result.explorer_url}")
+
+    # Optionally restrict original
+    if restrict_original:
+        try:
+            status_result = client.set_status(original_hash, status=1, verbose=verbose)
+            typer.secho(f"\nOriginal hash restricted!", fg=typer.colors.GREEN)
+            typer.echo(f"  Hash:    {original_hash}")
+            typer.echo(f"  Status:  RESTRICTED")
+            typer.echo(f"  Tx:      {status_result.tx_hash}")
+        except exceptions.ChainError as e:
+            typer.secho(f"\nWARNING: Transform succeeded but failed to restrict original: {e}", fg=typer.colors.YELLOW)
+
+        if output_json:
+            combined = {
+                "transform": result.model_dump(),
+                "restrict": status_result.model_dump() if 'status_result' in dir() else None,
+            }
+            typer.echo(json.dumps(combined, indent=2))
+
+
+@chain_app.command("protect")
+def chain_protect(
+    original_hash: Annotated[str, typer.Argument(help="Hash of the original data to protect.")],
+    new_hash: Annotated[str, typer.Argument(help="Hash of the replacement/transformed data.")],
+    description: Annotated[str, typer.Option("--description", "-d", help="Description of the transformation.")] = "",
+    anchor_new: Annotated[bool, typer.Option("--anchor-new", help="Anchor the new hash if not already registered.")] = False,
+    data_type: Annotated[str, typer.Option("--type", "-t", help="Data type for anchoring new hash.")] = "swarm-provenance",
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
+    output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
+):
+    """
+    Protect original data by replacing it with a new version.
+
+    This composite command:
+    1. Verifies original is registered and ACTIVE
+    2. Optionally anchors the new hash (--anchor-new)
+    3. Records the transformation (original -> new)
+    4. Sets original status to RESTRICTED
+    """
+    try:
+        client = _get_chain_client(verbose=verbose)
+    except typer.Exit:
+        raise
+
+    results = {}
+
+    # Step 1: Verify original is registered and ACTIVE
+    try:
+        record = client.get(original_hash, verbose=verbose)
+    except exceptions.DataNotRegisteredError:
+        typer.secho(f"ERROR: Original hash is not registered on-chain.", fg=typer.colors.RED, err=True)
+        typer.echo(f"  Anchor it first: swarm-prov-upload chain anchor {original_hash}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainError as e:
+        typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    from .models import DataStatusEnum
+    if record.status != DataStatusEnum.ACTIVE:
+        typer.secho(
+            f"ERROR: Original hash status is {record.status.name}, expected ACTIVE.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # Step 2: Optionally anchor new hash
+    if anchor_new:
+        try:
+            anchor_result = client.anchor(new_hash, data_type=data_type, verbose=verbose)
+            results["anchor"] = anchor_result
+            if not output_json:
+                typer.secho(f"New hash anchored.", fg=typer.colors.GREEN)
+        except exceptions.ChainError as e:
+            typer.secho(f"ERROR: Failed to anchor new hash: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+
+    # Step 3: Record transformation
+    try:
+        transform_result = client.transform(original_hash, new_hash, description=description, verbose=verbose)
+        results["transform"] = transform_result
+        if not output_json:
+            typer.secho(f"Transformation recorded.", fg=typer.colors.GREEN)
+    except exceptions.ChainError as e:
+        typer.secho(f"ERROR: Failed to record transformation: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    # Step 4: Restrict original
+    try:
+        status_result = client.set_status(original_hash, status=1, verbose=verbose)
+        results["restrict"] = status_result
+        if not output_json:
+            typer.secho(f"Original hash restricted.", fg=typer.colors.GREEN)
+    except exceptions.ChainError as e:
+        typer.secho(f"ERROR: Transform succeeded but failed to restrict original: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if output_json:
+        output = {}
+        if "anchor" in results:
+            output["anchor"] = results["anchor"].model_dump()
+        output["transform"] = results["transform"].model_dump()
+        output["restrict"] = results["restrict"].model_dump()
+        typer.echo(json.dumps(output, indent=2))
+        return
+
+    typer.secho(f"\nProtect complete!", fg=typer.colors.GREEN, bold=True)
+    typer.echo(f"  Original:  {original_hash} -> RESTRICTED")
+    typer.echo(f"  New:       {new_hash}")
+    if description:
+        typer.echo(f"  Desc:      {description}")
 
 
 @app.callback()

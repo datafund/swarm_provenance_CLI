@@ -205,19 +205,38 @@ swarm-prov-upload chain balance --json
 # Anchor a Swarm hash on-chain
 swarm-prov-upload chain anchor <swarm_hash>
 swarm-prov-upload chain anchor <swarm_hash> --type "dataset"
+swarm-prov-upload chain anchor <swarm_hash> --owner <address>  # anchor as delegate
 
 # Record data access
 swarm-prov-upload chain access <swarm_hash>
 
 # Record a data transformation (original must be anchored first)
 swarm-prov-upload chain transform <original_hash> <new_hash> --description "Anonymized PII"
+swarm-prov-upload chain transform <orig> <new> --restrict-original  # restrict original after transform
 
 # Get full provenance record
 swarm-prov-upload chain get <swarm_hash>
 swarm-prov-upload chain get <swarm_hash> --json
+swarm-prov-upload chain get <swarm_hash> --follow           # walk transformation chain
+swarm-prov-upload chain get <swarm_hash> --follow --depth 3 # limit traversal depth
 
 # Verify a hash is registered on-chain (exit code 0=yes, 1=no)
 swarm-prov-upload chain verify <swarm_hash>
+
+# Query or set data status
+swarm-prov-upload chain status <swarm_hash>                 # show current status
+swarm-prov-upload chain status <swarm_hash> --set restricted  # set status (active|restricted|deleted)
+
+# Transfer ownership
+swarm-prov-upload chain transfer <swarm_hash> --to <new_owner_address>
+
+# Authorize or revoke a delegate
+swarm-prov-upload chain delegate <address> --authorize
+swarm-prov-upload chain delegate <address> --revoke
+
+# Protect: composite workflow (transform + restrict original)
+swarm-prov-upload chain protect <original_hash> <new_hash> --description "Removed PII"
+swarm-prov-upload chain protect <orig> <new> --anchor-new --description "Redacted"  # anchor new hash first
 ```
 
 ### Global Flags
@@ -616,6 +635,10 @@ Use `swarm-prov-upload --help` for all options.
 │  │                 │  │ chain verify     │  │                                 │ │
 │  │                 │  │ chain access     │  │                                 │ │
 │  │                 │  │ chain transform  │  │                                 │ │
+│  │                 │  │ chain status     │  │                                 │ │
+│  │                 │  │ chain transfer   │  │                                 │ │
+│  │                 │  │ chain delegate   │  │                                 │ │
+│  │                 │  │ chain protect    │  │                                 │ │
 │  └─────────────────┘  └──────────────────┘  └─────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                         │

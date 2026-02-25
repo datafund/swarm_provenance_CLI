@@ -11,6 +11,7 @@ How the chain subsystem is structured internally:
 │                          CLI Layer (cli.py)                         │
 │                                                                     │
 │  chain balance | anchor | verify | get | access | transform         │
+│  chain status | transfer | delegate | protect                       │
 │  Global flags: --chain, --chain-rpc                                 │
 └──────────────────────────┬──────────────────────────────────────────┘
                            │
@@ -172,6 +173,14 @@ swarm-prov-upload chain transform bbb... ccc... --description "Aggregated by reg
 # 4. View the full lineage
 swarm-prov-upload chain get aaa...
 # Shows: transformations -> bbb... "Removed PII"
+
+# 5. Walk the full transformation chain
+swarm-prov-upload chain get aaa... --follow
+# Shows all records: aaa -> bbb -> ccc
+
+# 6. Limit walk depth
+swarm-prov-upload chain get aaa... --follow --depth 1
+# Shows only: aaa -> bbb (stops at depth 1)
 ```
 
 **Python API for chain walking:**
@@ -307,6 +316,17 @@ Data goes through lifecycle states. Status changes are recorded on-chain.
   Status changes are recorded on-chain and auditable.
 ```
 
+**CLI commands:**
+```bash
+# Query current status
+swarm-prov-upload chain status abc123...
+
+# Set status
+swarm-prov-upload chain status abc123... --set restricted
+swarm-prov-upload chain status abc123... --set deleted
+swarm-prov-upload chain status abc123... --set active
+```
+
 **Python API:**
 ```python
 from swarm_provenance_uploader.core.chain_client import ChainClient
@@ -362,6 +382,21 @@ client.set_status("abc123...", status=0)  # ACTIVE
        │─────────────────────────────────────────────────> │
        │                                                   │  Bob can no longer
        │                                                   │  act on Alice's behalf
+```
+
+**CLI commands:**
+```bash
+# Authorize Bob as delegate
+swarm-prov-upload chain delegate 0xBob... --authorize
+
+# Bob anchors on behalf of Alice
+swarm-prov-upload chain anchor abc123... --owner 0xAlice...
+
+# Transfer ownership to Carol
+swarm-prov-upload chain transfer abc123... --to 0xCarol...
+
+# Revoke Bob's delegation
+swarm-prov-upload chain delegate 0xBob... --revoke
 ```
 
 **Python API:**

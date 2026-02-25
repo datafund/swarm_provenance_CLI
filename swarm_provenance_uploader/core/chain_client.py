@@ -700,6 +700,7 @@ class ChainClient:
     def get_provenance_chain(
         self,
         swarm_hash: str,
+        max_depth: Optional[int] = None,
         verbose: bool = False,
     ) -> List[ChainProvenanceRecord]:
         """
@@ -710,6 +711,7 @@ class ChainClient:
 
         Args:
             swarm_hash: Starting Swarm reference hash.
+            max_depth: Maximum traversal depth. None means no limit (capped at 50).
             verbose: Enable debug output.
 
         Returns:
@@ -719,14 +721,23 @@ class ChainClient:
         if verbose:
             print(f"--- DEBUG: Get Provenance Chain ---")
             print(f"Starting hash: {swarm_hash}")
+            if max_depth is not None:
+                print(f"Max depth: {max_depth}")
+
+        effective_max = max_depth if max_depth is not None else 50
 
         chain = []
         visited = set()
-        to_visit = [swarm_hash]
+        # Track (hash, depth) pairs
+        to_visit = [(swarm_hash, 0)]
 
         while to_visit:
-            current_hash = to_visit.pop(0)
+            current_hash, current_depth = to_visit.pop(0)
             if current_hash in visited:
+                continue
+            if current_depth > effective_max:
+                if verbose:
+                    print(f"DEBUG: Depth limit reached at {current_depth}")
                 continue
             visited.add(current_hash)
 
@@ -737,7 +748,7 @@ class ChainClient:
                 # Follow transformation links
                 for t in record.transformations:
                     if t.new_data_hash not in visited:
-                        to_visit.append(t.new_data_hash)
+                        to_visit.append((t.new_data_hash, current_depth + 1))
             except DataNotRegisteredError:
                 if verbose:
                     print(f"DEBUG: Hash {current_hash} not registered, skipping")

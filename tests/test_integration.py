@@ -777,6 +777,162 @@ class TestBlockchainLocalHardhat:
         # Hardhat default accounts have 10000 ETH
         assert info.balance_wei > 0
 
+    @skip_if_no_hardhat
+    @skip_if_no_chain_wallet
+    def test_chain_client_set_status(self):
+        """Test setting data status on local Hardhat."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.models import DataStatusEnum
+
+        contract = os.getenv("CHAIN_CONTRACT")
+        if not contract:
+            pytest.skip("CHAIN_CONTRACT not set for local Hardhat")
+
+        client = ChainClient(
+            chain="base-sepolia",
+            rpc_url="http://localhost:8545",
+            contract_address=contract,
+        )
+
+        test_hash = "f1" * 32
+        # Register first
+        client.anchor(swarm_hash=test_hash, data_type="status-test")
+
+        # Set to RESTRICTED
+        result = client.set_status(swarm_hash=test_hash, status=1)
+        assert result.tx_hash is not None
+
+        # Verify status changed
+        record = client.get(swarm_hash=test_hash)
+        assert record.status == DataStatusEnum.RESTRICTED
+
+    @skip_if_no_hardhat
+    @skip_if_no_chain_wallet
+    def test_chain_client_transfer_ownership(self):
+        """Test transferring data ownership on local Hardhat."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        contract = os.getenv("CHAIN_CONTRACT")
+        if not contract:
+            pytest.skip("CHAIN_CONTRACT not set for local Hardhat")
+
+        client = ChainClient(
+            chain="base-sepolia",
+            rpc_url="http://localhost:8545",
+            contract_address=contract,
+        )
+
+        test_hash = "f2" * 32
+        new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"  # Hardhat account #1
+
+        # Register first
+        client.anchor(swarm_hash=test_hash, data_type="transfer-test")
+
+        # Transfer ownership
+        result = client.transfer_ownership(swarm_hash=test_hash, new_owner=new_owner)
+        assert result.tx_hash is not None
+        assert result.owner == new_owner
+
+        # Verify new owner
+        record = client.get(swarm_hash=test_hash)
+        assert record.owner.lower() == new_owner.lower()
+
+    @skip_if_no_hardhat
+    @skip_if_no_chain_wallet
+    def test_chain_client_delegate(self):
+        """Test delegate authorization on local Hardhat."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        contract = os.getenv("CHAIN_CONTRACT")
+        if not contract:
+            pytest.skip("CHAIN_CONTRACT not set for local Hardhat")
+
+        client = ChainClient(
+            chain="base-sepolia",
+            rpc_url="http://localhost:8545",
+            contract_address=contract,
+        )
+
+        delegate_addr = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+
+        # Authorize delegate
+        result = client.set_delegate(delegate=delegate_addr, authorized=True)
+        assert result.tx_hash is not None
+
+    @skip_if_no_hardhat
+    @skip_if_no_chain_wallet
+    def test_chain_provenance_chain_walk(self):
+        """Test provenance chain walking: anchor A, transform A->B, walk chain."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        contract = os.getenv("CHAIN_CONTRACT")
+        if not contract:
+            pytest.skip("CHAIN_CONTRACT not set for local Hardhat")
+
+        client = ChainClient(
+            chain="base-sepolia",
+            rpc_url="http://localhost:8545",
+            contract_address=contract,
+        )
+
+        hash_a = "f3" * 32
+        hash_b = "f4" * 32
+
+        # Anchor original
+        client.anchor(swarm_hash=hash_a, data_type="chain-walk-test")
+
+        # Transform A -> B
+        client.transform(
+            original_hash=hash_a,
+            new_hash=hash_b,
+            description="Removed PII",
+        )
+
+        # Walk the chain
+        chain = client.get_provenance_chain(swarm_hash=hash_a)
+
+        # Should have at least A (B may or may not be registered)
+        assert len(chain) >= 1
+        assert chain[0].data_hash == hash_a
+
+    @skip_if_no_hardhat
+    @skip_if_no_chain_wallet
+    def test_chain_protect_workflow(self):
+        """Test full protect workflow: anchor, protect, verify restriction."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.models import DataStatusEnum
+
+        contract = os.getenv("CHAIN_CONTRACT")
+        if not contract:
+            pytest.skip("CHAIN_CONTRACT not set for local Hardhat")
+
+        client = ChainClient(
+            chain="base-sepolia",
+            rpc_url="http://localhost:8545",
+            contract_address=contract,
+        )
+
+        orig_hash = "f5" * 32
+        new_hash = "f6" * 32
+
+        # Anchor both
+        client.anchor(swarm_hash=orig_hash, data_type="protect-test")
+        client.anchor(swarm_hash=new_hash, data_type="protect-test")
+
+        # Transform
+        client.transform(
+            original_hash=orig_hash,
+            new_hash=new_hash,
+            description="Protected PII data",
+        )
+
+        # Restrict original
+        client.set_status(swarm_hash=orig_hash, status=1)
+
+        # Verify original is RESTRICTED
+        record = client.get(swarm_hash=orig_hash)
+        assert record.status == DataStatusEnum.RESTRICTED
+
 
 # =============================================================================
 # BLOCKCHAIN INTEGRATION TESTS - BASE SEPOLIA

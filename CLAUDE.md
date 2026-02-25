@@ -159,10 +159,21 @@ swarm-prov-upload download <hash> --verify              # Download with signatur
 swarm-prov-upload chain balance                                              # Wallet balance and chain info
 swarm-prov-upload chain anchor <hash>                                        # Anchor a Swarm hash on-chain
 swarm-prov-upload chain anchor <hash> --type "dataset"                       # Anchor with custom data type
+swarm-prov-upload chain anchor <hash> --owner <address>                      # Anchor as delegate for owner
 swarm-prov-upload chain get <hash>                                           # Get on-chain provenance record
+swarm-prov-upload chain get <hash> --follow                                  # Walk transformation chain
+swarm-prov-upload chain get <hash> --follow --depth 3                        # Limit chain walk depth
 swarm-prov-upload chain verify <hash>                                        # Verify hash is anchored
 swarm-prov-upload chain access <hash>                                        # Record data access
-swarm-prov-upload chain transform <orig_hash> <new_hash> --description "..."  # Record transformation
+swarm-prov-upload chain status <hash>                                        # Query current status
+swarm-prov-upload chain status <hash> --set restricted                       # Set status (active|restricted|deleted)
+swarm-prov-upload chain transfer <hash> --to <address>                       # Transfer ownership
+swarm-prov-upload chain delegate <address> --authorize                       # Authorize a delegate
+swarm-prov-upload chain delegate <address> --revoke                          # Revoke a delegate
+swarm-prov-upload chain transform <orig> <new> --description "..."           # Record transformation
+swarm-prov-upload chain transform <orig> <new> --restrict-original           # Transform + restrict original
+swarm-prov-upload chain protect <orig> <new> --description "..."             # Composite: transform + restrict
+swarm-prov-upload chain protect <orig> <new> --anchor-new                    # Protect with auto-anchor
 ```
 
 ## Architecture
