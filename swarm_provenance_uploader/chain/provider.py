@@ -85,10 +85,10 @@ class ChainProvider:
 
         preset = CHAIN_PRESETS[chain]
         self.chain = chain
-        self.chain_id = preset["chain_id"]
         self.rpc_url = rpc_url or preset["rpc_url"]
         self.explorer_url = explorer_url or preset["explorer_url"]
         self.contract_address = contract_address or preset["contract_address"]
+        self._custom_rpc = rpc_url is not None
 
         if not self.contract_address:
             raise ChainConfigurationError(
@@ -98,6 +98,16 @@ class ChainProvider:
 
         # Initialize Web3 connection
         self._web3 = Web3(Web3.HTTPProvider(self.rpc_url))
+
+        # When a custom RPC is provided, auto-detect chain ID from the node
+        # (e.g. local Hardhat uses chain ID 31337, not the preset chain ID)
+        if self._custom_rpc:
+            try:
+                self.chain_id = self._web3.eth.chain_id
+            except Exception:
+                self.chain_id = preset["chain_id"]
+        else:
+            self.chain_id = preset["chain_id"]
 
     @property
     def web3(self):
