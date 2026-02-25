@@ -1,0 +1,19 @@
+{
+  "type": "observation",
+  "version": "1.0",
+  "agent_id": "agent-alpha",
+  "market": "BTC/USD",
+  "timestamp": "2025-06-16T08:00:00Z",
+  "prediction_ref": "PREDICTION_SWARM_REF_PLACEHOLDER",
+  "observation": {
+    "outcome": "correct",
+    "actual_direction": "up",
+    "return_pct": 2.3,
+    "evaluation_timestamp": "2025-06-16T08:00:00Z"
+  },
+  "metadata": {
+    "evaluation_method": "price_comparison",
+    "data_source": "price_feed"
+  },
+  "content_hash": "cea3c1a39e41292e0391310747f0cc120623979e7fe7bce6dcad4aeacb91b56a"
+}

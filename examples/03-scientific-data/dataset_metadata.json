@@ -1,0 +1,28 @@
+{
+  "title": "Indoor Environmental Monitoring - Building A, Floor 3",
+  "description": "Temperature and humidity sensor readings from environmental monitoring stations",
+  "prov_standard": "PROV-O",
+  "experiment": {
+    "id": "EXP-ENV-2025-042",
+    "principal_investigator": "Dr. M. Chen",
+    "institution": "Climate Research Institute",
+    "start_date": "2025-06-01",
+    "end_date": "2025-06-15"
+  },
+  "methodology": {
+    "sensor_type": "DHT22",
+    "sampling_interval_seconds": 300,
+    "calibration_date": "2025-05-28",
+    "stations": ["STA-3A", "STA-3B", "STA-3C", "STA-3D"]
+  },
+  "data_files": [
+    {
+      "filename": "experiment_results.csv",
+      "format": "CSV",
+      "records": 8,
+      "columns": ["timestamp", "station_id", "temperature_c", "humidity_pct", "status"]
+    }
+  ],
+  "license": "CC-BY-4.0",
+  "keywords": ["environmental monitoring", "temperature", "humidity", "indoor air quality"]
+}

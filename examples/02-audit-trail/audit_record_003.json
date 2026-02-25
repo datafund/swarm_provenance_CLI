@@ -1,0 +1,29 @@
+{
+  "event_type": "config_change",
+  "event_id": "EVT-2025-003",
+  "timestamp": "2025-06-15T14:45:00Z",
+  "actor": {
+    "id": "USR-0501",
+    "role": "sysadmin",
+    "department": "infrastructure"
+  },
+  "action": {
+    "type": "modify",
+    "target": "firewall-rule-set",
+    "change_description": "Added inbound rule for monitoring subnet",
+    "previous_value": "deny 10.0.5.0/24",
+    "new_value": "allow 10.0.5.0/24 port 9090"
+  },
+  "context": {
+    "ip_address": "10.0.0.5",
+    "session_id": "sess-i9j0k1l2",
+    "change_ticket": "CHG-7891",
+    "approved_by": "USR-0102"
+  },
+  "compliance": {
+    "policy": "SEC-POL-007",
+    "regulation": "ISO27001-A12",
+    "change_management_required": true,
+    "rollback_available": true
+  }
+}

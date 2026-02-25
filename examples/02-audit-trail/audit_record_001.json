@@ -1,0 +1,28 @@
+{
+  "event_type": "transaction_approval",
+  "event_id": "EVT-2025-001",
+  "timestamp": "2025-06-15T09:30:00Z",
+  "actor": {
+    "id": "USR-1042",
+    "role": "finance_manager",
+    "department": "treasury"
+  },
+  "action": {
+    "type": "approve",
+    "target": "TXN-88291",
+    "amount": 45000.00,
+    "currency": "USD",
+    "description": "Q2 infrastructure payment"
+  },
+  "context": {
+    "ip_address": "10.0.1.42",
+    "session_id": "sess-a1b2c3d4",
+    "approval_level": 2,
+    "required_levels": 2
+  },
+  "compliance": {
+    "policy": "FIN-POL-003",
+    "regulation": "SOX-404",
+    "audit_trail_required": true
+  }
+}

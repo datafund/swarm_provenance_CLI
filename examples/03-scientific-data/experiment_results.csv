@@ -1,0 +1,9 @@
+timestamp,station_id,temperature_c,humidity_pct,status
+2025-06-01T08:00:00Z,STA-3A,22.4,45.2,normal
+2025-06-01T08:05:00Z,STA-3B,22.1,46.8,normal
+2025-06-01T08:10:00Z,STA-3C,23.0,44.1,normal
+2025-06-01T08:15:00Z,STA-3D,21.8,47.5,normal
+2025-06-01T08:20:00Z,STA-3A,22.6,45.0,normal
+2025-06-01T08:25:00Z,STA-3B,22.3,46.5,normal
+2025-06-01T08:30:00Z,STA-3C,24.1,42.3,warning
+2025-06-01T08:35:00Z,STA-3D,21.9,47.2,normal

@@ -1,0 +1,21 @@
+Patient Record - CONFIDENTIAL
+==============================
+
+Patient ID: PT-2025-08421
+Name: Jane Doe
+DOB: 1985-03-15
+SSN: ***-**-7890
+
+Diagnosis: Hypertension Stage 1
+Prescribed: Lisinopril 10mg daily
+Last Visit: 2025-06-10
+Next Appointment: 2025-07-10
+
+Lab Results (2025-06-10):
+  Blood Pressure: 142/91 mmHg
+  Heart Rate: 78 bpm
+  Cholesterol: 215 mg/dL
+  Blood Glucose: 98 mg/dL
+
+Notes: Patient reports improved adherence to medication.
+Recommend follow-up in 30 days with repeat labs.

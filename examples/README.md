@@ -24,6 +24,10 @@ Real-world usage examples for the Swarm Provenance CLI toolkit.
 | # | Example | Description |
 |---|---------|-------------|
 | [01](01-basic-upload-download/) | **Basic Upload/Download** | Upload a file, download it back, verify integrity |
+| [02](02-audit-trail/) | **Audit Trail** | Immutable compliance records with `--std "AUDIT-LOG-V1"` |
+| [03](03-scientific-data/) | **Scientific Data** | Research archival with `--std "PROV-O"` and `--duration 720` |
+| [05](05-encrypted-data/) | **Encrypted Data** | Pre-encrypt, upload with `--enc "AES-256-GCM"`, decrypt |
+| [06](06-market-memory/) | **Market Memory** | Canonical hashing, prediction→outcome linking |
 
 ## Directory Structure
 
@@ -35,10 +39,15 @@ examples/
     sample_generator.py        # Generate sample data files
     verify.py                  # Verification helpers
   01-basic-upload-download/    # Core upload/download workflow
-    README.md
-    demo.sh
-    sample.txt
-    run_demo.py
+    README.md, demo.sh, run_demo.py, sample.txt
+  02-audit-trail/              # Immutable compliance records
+    README.md, demo.sh, run_demo.py, audit_record_*.json
+  03-scientific-data/          # Research data archival
+    README.md, demo.sh, run_demo.py, dataset_metadata.json, experiment_results.csv
+  05-encrypted-data/           # Pre-encryption workflow
+    README.md, demo.sh, run_demo.py, sensitive_data.txt
+  06-market-memory/            # Prediction memory units
+    README.md, demo.sh, run_demo.py, create_memory_unit.py, prediction_001.json, observation_001.json
 ```
 
 ## Common Utilities
