@@ -244,7 +244,7 @@ swarm-prov-upload chain verify <swarm_hash>
 2. **Get testnet USDC** (if using x402): https://faucet.circle.com/
 3. **Configure wallet**: Set `PROVENANCE_WALLET_KEY` with your wallet's private key
 
-See [docs/chain-setup.md](docs/chain-setup.md) for detailed setup instructions.
+See [docs/chain-setup.md](docs/chain-setup.md) for detailed setup instructions and [docs/chain-workflows.md](docs/chain-workflows.md) for workflow diagrams.
 
 ### ChainClient Python API
 
