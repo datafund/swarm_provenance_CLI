@@ -1,0 +1,19 @@
+{
+  "type": "prediction",
+  "version": "1.0",
+  "agent_id": "agent-alpha",
+  "market": "BTC/USD",
+  "timestamp": "2025-06-15T08:00:00Z",
+  "prediction": {
+    "direction": "up",
+    "confidence": 0.75,
+    "horizon_hours": 24,
+    "reasoning": "Technical analysis indicates up movement with 75% confidence over 24h"
+  },
+  "metadata": {
+    "model_version": "v2.1",
+    "data_sources": ["price_feed", "order_book", "sentiment"],
+    "features_used": 42
+  },
+  "content_hash": "c5bf979e6fc3a28771ed1e75cea8243b33e201c263f290551d4646c29ba1354c"
+}

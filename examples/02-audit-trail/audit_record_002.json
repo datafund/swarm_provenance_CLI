@@ -1,0 +1,28 @@
+{
+  "event_type": "data_access",
+  "event_id": "EVT-2025-002",
+  "timestamp": "2025-06-15T10:15:00Z",
+  "actor": {
+    "id": "USR-2087",
+    "role": "data_analyst",
+    "department": "analytics"
+  },
+  "action": {
+    "type": "read",
+    "target": "DS-CUSTOMER-EU",
+    "records_accessed": 15420,
+    "description": "Customer segmentation analysis"
+  },
+  "context": {
+    "ip_address": "10.0.2.18",
+    "session_id": "sess-e5f6g7h8",
+    "query_id": "QRY-44102",
+    "execution_time_ms": 2340
+  },
+  "compliance": {
+    "policy": "DATA-POL-001",
+    "regulation": "GDPR-Art30",
+    "data_classification": "personal",
+    "purpose_limitation": "analytics"
+  }
+}
