@@ -14,11 +14,9 @@ Usage:
 
 import argparse
 import hashlib
-import json
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
@@ -75,22 +73,28 @@ def main():
     print(f"SHA256: {original_hash}")
 
     print("\nUploading with --usePool...")
-    result = run_cli("upload", "--file", sample_file, "--usePool", "--json")
+    result = run_cli("upload", "--file", sample_file, "--usePool")
     if result.returncode != 0:
         print(f"Upload failed: {result.stderr or result.stdout}")
         sys.exit(1)
 
-    try:
-        upload_data = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        print(f"Could not parse upload output: {result.stdout}")
+    output = result.stdout
+    print(output.strip())
+
+    # Extract Swarm reference from text output
+    # The CLI prints: "Swarm Reference Hash:\n<hash>"
+    swarm_ref = ""
+    lines = output.splitlines()
+    for i, line in enumerate(lines):
+        if "Swarm Reference Hash:" in line and i + 1 < len(lines):
+            swarm_ref = lines[i + 1].strip()
+            break
+
+    if not swarm_ref or len(swarm_ref) < 64:
+        print(f"Could not extract Swarm reference from output")
         sys.exit(1)
 
-    swarm_ref = upload_data.get("swarm_hash", "")
-    print(f"\nUpload successful!")
-    print(f"Swarm Reference: {swarm_ref}")
-    print(f"Content Hash:    {upload_data.get('content_hash', 'N/A')}")
-    print(f"Stamp ID:        {upload_data.get('stamp_id', 'N/A')}")
+    print(f"\nSwarm Reference: {swarm_ref}")
 
     # --- Step 3: Download ---
     print("\n--- Step 3: Download and verify ---")

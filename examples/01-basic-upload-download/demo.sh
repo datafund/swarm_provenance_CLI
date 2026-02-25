@@ -42,13 +42,14 @@ echo "SHA256: $(shasum -a 256 "$SAMPLE_FILE" | cut -d' ' -f1)"
 echo
 
 echo "Uploading with --usePool (faster stamp acquisition)..."
-UPLOAD_OUTPUT=$(swarm-prov-upload upload --file "$SAMPLE_FILE" --usePool --json 2>&1)
-echo "$UPLOAD_OUTPUT" | python3 -m json.tool 2>/dev/null || echo "$UPLOAD_OUTPUT"
+UPLOAD_OUTPUT=$(swarm-prov-upload upload --file "$SAMPLE_FILE" --usePool 2>&1)
+echo "$UPLOAD_OUTPUT"
 
-# Extract Swarm reference from JSON output
-SWARM_REF=$(echo "$UPLOAD_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['swarm_hash'])" 2>/dev/null)
+# Extract Swarm reference from text output
+# The CLI prints: "Swarm Reference Hash:\n<hash>"
+SWARM_REF=$(echo "$UPLOAD_OUTPUT" | grep -A1 "Swarm Reference Hash:" | tail -1 | tr -d '[:space:]')
 
-if [ -z "$SWARM_REF" ]; then
+if [ -z "$SWARM_REF" ] || [ ${#SWARM_REF} -lt 64 ]; then
     echo "ERROR: Could not extract Swarm reference from upload output."
     echo "Raw output: $UPLOAD_OUTPUT"
     exit 1

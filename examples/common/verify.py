@@ -94,7 +94,12 @@ def parse_upload_output(output: str) -> dict:
     """
     Parse CLI upload output to extract the Swarm reference and metadata.
 
-    Handles both JSON (--json flag) and text output formats.
+    Handles both JSON and text output formats. The upload command outputs
+    text like::
+
+        SUCCESS! Upload complete.
+        Swarm Reference Hash:
+        <64-char hex hash>
 
     Args:
         output: Raw CLI stdout from an upload command.
@@ -104,19 +109,25 @@ def parse_upload_output(output: str) -> dict:
     """
     # Try JSON first
     try:
-        return json.loads(output)
+        data = json.loads(output)
+        # Normalize key name
+        if "swarm_hash" in data and "reference" not in data:
+            data["reference"] = data["swarm_hash"]
+        return data
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Parse text output — look for "Swarm Reference:" or "Reference:" lines
+    # Parse text output
+    # The hash is on the line AFTER "Swarm Reference Hash:"
     result = {}
-    for line in output.splitlines():
-        line = line.strip()
-        if "reference" in line.lower() and ":" in line:
-            result["reference"] = line.split(":", 1)[1].strip()
-        elif "hash" in line.lower() and ":" in line and "reference" not in result:
-            result["reference"] = line.split(":", 1)[1].strip()
-        elif "stamp" in line.lower() and "id" in line.lower() and ":" in line:
-            result["stamp_id"] = line.split(":", 1)[1].strip()
+    lines = output.splitlines()
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if "swarm reference hash" in stripped.lower() and i + 1 < len(lines):
+            candidate = lines[i + 1].strip()
+            if len(candidate) >= 64:
+                result["reference"] = candidate
+        elif "stamp" in stripped.lower() and "id" in stripped.lower() and ":" in stripped:
+            result["stamp_id"] = stripped.split(":", 1)[1].strip()
 
     return result

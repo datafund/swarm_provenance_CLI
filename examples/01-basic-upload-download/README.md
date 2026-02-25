@@ -71,27 +71,6 @@ sha256sum downloads/sample.txt
 
 If the hashes match, the data is intact — no tampering occurred between upload and download.
 
-## JSON Output
-
-For scripting, use the `--json` flag:
-
-```bash
-swarm-prov-upload upload --file sample.txt --usePool --json
-```
-
-Returns:
-
-```json
-{
-  "swarm_hash": "def456...",
-  "content_hash": "a1b2c3...",
-  "stamp_id": "abc123...",
-  "file_name": "sample.txt",
-  "file_size": 634,
-  "provenance_standard": null
-}
-```
-
 ## With Provenance Standard
 
 Tag uploads with a provenance standard identifier:
