@@ -257,11 +257,14 @@ FAKE_STAMP_ID = "b" * 64
 
 
 def _verbose_upload_output(ref_hash=FAKE_HASH, stamp_id=FAKE_STAMP_ID):
-    """Upload output that includes verbose stamp ID line."""
+    """Upload output that includes verbose stamp ID line.
+
+    Matches real CLI format: 'Stamp ID Received: <hex> (Length: 64)'
+    """
     return (
         f"Processing file: sample.txt...\n"
         f"Acquiring stamp from pool...\n"
-        f"  Stamp ID Received: {stamp_id}\n"
+        f"    Stamp ID Received: {stamp_id} (Length: {len(stamp_id)})\n"
         f"Uploading data to Swarm...\n"
         f"\n"
         f"SUCCESS! Upload complete.\n"

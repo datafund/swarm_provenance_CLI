@@ -54,7 +54,7 @@ if [ -z "$FIRST_REF" ] || [ ${#FIRST_REF} -lt 64 ]; then
 fi
 
 # Extract stamp ID from verbose output
-STAMP_ID=$(echo "$UPLOAD_OUTPUT" | grep "Stamp ID Received:" | awk -F'Stamp ID Received: ' '{print $2}' | tr -d '[:space:]')
+STAMP_ID=$(echo "$UPLOAD_OUTPUT" | grep "Stamp ID Received:" | awk -F'Stamp ID Received: ' '{print $2}' | awk '{print $1}' | tr -d '[:space:]')
 if [ -z "$STAMP_ID" ] || [ ${#STAMP_ID} -lt 16 ]; then
     echo "WARNING: Could not extract stamp ID from verbose output"
     echo "Subsequent uploads will purchase new stamps"

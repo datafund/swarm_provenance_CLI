@@ -56,7 +56,7 @@ if [ -z "$SWARM_REF" ] || [ ${#SWARM_REF} -lt 64 ]; then
     exit 1
 fi
 
-STAMP_ID=$(echo "$UPLOAD_OUTPUT" | grep "Stamp ID Received:" | awk -F'Stamp ID Received: ' '{print $2}' | tr -d '[:space:]')
+STAMP_ID=$(echo "$UPLOAD_OUTPUT" | grep "Stamp ID Received:" | awk -F'Stamp ID Received: ' '{print $2}' | awk '{print $1}' | tr -d '[:space:]')
 echo "  Swarm reference: $SWARM_REF"
 
 if [ -z "$STAMP_ID" ] || [ ${#STAMP_ID} -lt 16 ]; then

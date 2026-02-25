@@ -58,12 +58,16 @@ def extract_swarm_ref(output: str) -> str:
 
 
 def extract_stamp_id(output: str) -> str:
-    """Extract stamp ID from verbose CLI output."""
+    """Extract stamp ID from verbose CLI output.
+
+    Handles format: 'Stamp ID Received: <hex> (Length: 64)'
+    """
     for line in output.splitlines():
         if "Stamp ID Received:" in line:
             parts = line.split("Stamp ID Received:")
             if len(parts) > 1:
-                stamp_id = parts[1].strip()
+                # Take first token only (ignore trailing "(Length: 64)" etc.)
+                stamp_id = parts[1].strip().split()[0]
                 if len(stamp_id) >= 16:
                     return stamp_id
     return ""
