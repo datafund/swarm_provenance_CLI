@@ -1966,7 +1966,7 @@ class TestChainGetCommand:
             status=DataStatusEnum.ACTIVE,
             accessors=[],
             transformations=[
-                ChainTransformation(new_data_hash="d" * 64, description="filtered PII"),
+                ChainTransformation(description="filtered PII"),
             ],
         )
 
@@ -2546,7 +2546,7 @@ class TestChainGetFollow:
                 timestamp=1700000000,
                 data_type="swarm-provenance",
                 status=DataStatusEnum.ACTIVE,
-                transformations=[ChainTransformation(new_data_hash=hash_b, description="filtered PII")],
+                transformations=[ChainTransformation(description="filtered PII")],
             ),
             ChainProvenanceRecord(
                 data_hash=hash_b,

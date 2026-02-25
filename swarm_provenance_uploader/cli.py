@@ -1829,8 +1829,11 @@ def chain_get(
     if record.transformations:
         typer.echo(f"\n  Transformations ({len(record.transformations)}):")
         for t in record.transformations:
-            t_hash = f"{t.new_data_hash[:12]}..." if len(t.new_data_hash) > 12 else t.new_data_hash
-            typer.echo(f"    -> {t_hash}: {t.description}")
+            if t.new_data_hash:
+                t_hash = f"{t.new_data_hash[:12]}..." if len(t.new_data_hash) > 12 else t.new_data_hash
+                typer.echo(f"    -> {t_hash}: {t.description}")
+            else:
+                typer.echo(f"    - {t.description}")
 
     if record.accessors:
         typer.echo(f"\n  Accessors ({len(record.accessors)}):")

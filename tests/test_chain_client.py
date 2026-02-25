@@ -151,7 +151,7 @@ def mock_chain_deps():
                 "web3": MagicMock(Web3=mock_web3_class),
             },
         ):
-            # Reset lazy import globals
+            # Reset lazy import globals so they pick up the mocked modules
             import swarm_provenance_uploader.chain.provider as provider_module
             import swarm_provenance_uploader.chain.wallet as wallet_module
             provider_module._Web3 = None
@@ -164,6 +164,10 @@ def mock_chain_deps():
                 "web3_class": mock_web3_class,
                 "contract": mock_contract,
             }
+
+            # Reset lazy import globals so real modules are re-imported next time
+            provider_module._Web3 = None
+            wallet_module._Account = None
 
 
 # --- Contract validation tests ---
@@ -862,146 +866,54 @@ class TestChainClientProvenanceChain:
 
         assert len(chain) == 0
 
-    def test_multi_hop_chain(self, mock_chain_deps):
-        """Tests traversal of a multi-hop provenance chain: A -> B -> C."""
+    def test_chain_with_transformations(self, mock_chain_deps):
+        """Tests chain returns record with transformation descriptions."""
         from swarm_provenance_uploader.core.chain_client import ChainClient
 
-        hash_a = DUMMY_HASH          # "aa...aa"
-        hash_b = "b" * 64
-        hash_c = "c" * 64
+        hash_a = DUMMY_HASH
         hash_a_bytes = bytes.fromhex(hash_a)
-        hash_b_bytes = bytes.fromhex(hash_b)
-        hash_c_bytes = bytes.fromhex(hash_c)
 
-        # Set up contract to return different records depending on which hash is queried.
-        # We use side_effect to return different values for successive calls.
-        call_count = {"n": 0}
-        records = {
-            hash_a_bytes: (
-                hash_a_bytes, DUMMY_ADDRESS, 1700000000, "swarm-provenance",
-                [(hash_b_bytes, "filtered PII")],  # A -> B
-                [], 0,
-            ),
-            hash_b_bytes: (
-                hash_b_bytes, DUMMY_ADDRESS, 1700001000, "swarm-provenance",
-                [(hash_c_bytes, "anonymized")],  # B -> C
-                [], 0,
-            ),
-            hash_c_bytes: (
-                hash_c_bytes, DUMMY_ADDRESS, 1700002000, "swarm-provenance",
-                [],  # C is terminal
-                [], 0,
-            ),
-        }
-
-        # The contract mock uses a single return value, so we need to make
-        # getDataRecord return a new mock each time it's called with different args.
-        original_getDataRecord = mock_chain_deps["contract"].functions.getDataRecord
-
-        def mock_get_data_record(data_hash):
-            mock_call = MagicMock()
-            # data_hash is bytes32 passed by the contract wrapper
-            mock_call.call.return_value = records.get(
-                data_hash,
-                (data_hash, ZERO_ADDRESS, 0, "", [], [], 0),
-            )
-            return mock_call
-
-        mock_chain_deps["contract"].functions.getDataRecord = mock_get_data_record
+        # Contract returns transformations as string[] (descriptions only)
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            hash_a_bytes, DUMMY_ADDRESS, 1700000000, "swarm-provenance",
+            ["filtered PII", "anonymized"],
+            [], 0,
+        )
 
         client = ChainClient(chain="base-sepolia")
         chain = client.get_provenance_chain(swarm_hash=hash_a)
 
-        assert len(chain) == 3
+        # Only the queried record is returned (no new_data_hash links to follow)
+        assert len(chain) == 1
         assert chain[0].data_hash == hash_a
-        assert chain[1].data_hash == hash_b
-        assert chain[2].data_hash == hash_c
-        # Verify transformations are present
-        assert len(chain[0].transformations) == 1
+        assert len(chain[0].transformations) == 2
         assert chain[0].transformations[0].description == "filtered PII"
-        assert len(chain[1].transformations) == 1
-        assert chain[1].transformations[0].description == "anonymized"
-        assert len(chain[2].transformations) == 0
+        assert chain[0].transformations[1].description == "anonymized"
 
     def test_get_provenance_chain_with_depth(self, mock_chain_deps):
-        """Tests that max_depth limits chain traversal."""
+        """Tests that max_depth=0 returns only the root record."""
         from swarm_provenance_uploader.core.chain_client import ChainClient
-
-        hash_a = DUMMY_HASH          # "aa...aa"
-        hash_b = "b" * 64
-        hash_c = "c" * 64
-        hash_a_bytes = bytes.fromhex(hash_a)
-        hash_b_bytes = bytes.fromhex(hash_b)
-        hash_c_bytes = bytes.fromhex(hash_c)
-
-        records = {
-            hash_a_bytes: (
-                hash_a_bytes, DUMMY_ADDRESS, 1700000000, "swarm-provenance",
-                [(hash_b_bytes, "filtered PII")],
-                [], 0,
-            ),
-            hash_b_bytes: (
-                hash_b_bytes, DUMMY_ADDRESS, 1700001000, "swarm-provenance",
-                [(hash_c_bytes, "anonymized")],
-                [], 0,
-            ),
-            hash_c_bytes: (
-                hash_c_bytes, DUMMY_ADDRESS, 1700002000, "swarm-provenance",
-                [],
-                [], 0,
-            ),
-        }
-
-        def mock_get_data_record(data_hash):
-            mock_call = MagicMock()
-            mock_call.call.return_value = records.get(
-                data_hash,
-                (data_hash, ZERO_ADDRESS, 0, "", [], [], 0),
-            )
-            return mock_call
-
-        mock_chain_deps["contract"].functions.getDataRecord = mock_get_data_record
 
         client = ChainClient(chain="base-sepolia")
 
-        # max_depth=1 should return A and B but not C
-        chain = client.get_provenance_chain(swarm_hash=hash_a, max_depth=1)
+        # max_depth=0 should return only the root record
+        chain = client.get_provenance_chain(swarm_hash=DUMMY_HASH, max_depth=0)
 
-        assert len(chain) == 2
-        assert chain[0].data_hash == hash_a
-        assert chain[1].data_hash == hash_b
+        assert len(chain) == 1
+        assert chain[0].data_hash == DUMMY_HASH
 
     def test_get_provenance_chain_with_depth_zero(self, mock_chain_deps):
         """Tests that max_depth=0 returns only the root record."""
         from swarm_provenance_uploader.core.chain_client import ChainClient
 
         hash_a = DUMMY_HASH
-        hash_b = "b" * 64
         hash_a_bytes = bytes.fromhex(hash_a)
-        hash_b_bytes = bytes.fromhex(hash_b)
 
-        records = {
-            hash_a_bytes: (
-                hash_a_bytes, DUMMY_ADDRESS, 1700000000, "swarm-provenance",
-                [(hash_b_bytes, "filtered")],
-                [], 0,
-            ),
-            hash_b_bytes: (
-                hash_b_bytes, DUMMY_ADDRESS, 1700001000, "swarm-provenance",
-                [],
-                [], 0,
-            ),
-        }
-
-        def mock_get_data_record(data_hash):
-            mock_call = MagicMock()
-            mock_call.call.return_value = records.get(
-                data_hash,
-                (data_hash, ZERO_ADDRESS, 0, "", [], [], 0),
-            )
-            return mock_call
-
-        mock_chain_deps["contract"].functions.getDataRecord = mock_get_data_record
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            hash_a_bytes, DUMMY_ADDRESS, 1700000000, "swarm-provenance",
+            ["filtered"],
+            [], 0,
+        )
 
         client = ChainClient(chain="base-sepolia")
         chain = client.get_provenance_chain(swarm_hash=hash_a, max_depth=0)
@@ -1152,13 +1064,13 @@ class TestTransformationParsing:
         from swarm_provenance_uploader.core.chain_client import ChainClient
 
         new_hash_bytes = bytes.fromhex("bb" * 32)
-        # Contract returns TransformationRecord as tuple: (bytes32 newDataHash, string transformation)
+        # Contract returns transformations as string[] (descriptions only)
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
             DUMMY_HASH_BYTES,
             DUMMY_ADDRESS,
             1700000000,
             "swarm-provenance",
-            [(new_hash_bytes, "encrypted: AES-256-GCM")],  # TransformationRecord tuple
+            ["encrypted: AES-256-GCM"],
             [DUMMY_ADDRESS],
             0,
         )
@@ -1167,24 +1079,19 @@ class TestTransformationParsing:
         record = client.get(swarm_hash=DUMMY_HASH)
 
         assert len(record.transformations) == 1
-        assert record.transformations[0].new_data_hash == "bb" * 32
+        assert record.transformations[0].new_data_hash is None
         assert record.transformations[0].description == "encrypted: AES-256-GCM"
 
     def test_get_with_multiple_transformations(self, mock_chain_deps):
         """Tests parsing multiple transformation records."""
         from swarm_provenance_uploader.core.chain_client import ChainClient
 
-        hash1 = bytes.fromhex("bb" * 32)
-        hash2 = bytes.fromhex("cc" * 32)
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
             DUMMY_HASH_BYTES,
             DUMMY_ADDRESS,
             1700000000,
             "swarm-provenance",
-            [
-                (hash1, "filtered PII"),
-                (hash2, "anonymized"),
-            ],
+            ["filtered PII", "anonymized"],
             [],
             0,
         )
@@ -1193,9 +1100,7 @@ class TestTransformationParsing:
         record = client.get(swarm_hash=DUMMY_HASH)
 
         assert len(record.transformations) == 2
-        assert record.transformations[0].new_data_hash == "bb" * 32
         assert record.transformations[0].description == "filtered PII"
-        assert record.transformations[1].new_data_hash == "cc" * 32
         assert record.transformations[1].description == "anonymized"
 
     def test_get_with_accessors(self, mock_chain_deps):

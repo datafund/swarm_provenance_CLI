@@ -25,6 +25,8 @@ Tests are marked with:
 """
 
 import os
+import secrets
+
 import pytest
 import requests
 
@@ -613,6 +615,12 @@ skip_if_no_chain_wallet = pytest.mark.skipif(
 # BLOCKCHAIN INTEGRATION TESTS - LOCAL HARDHAT
 # =============================================================================
 
+
+def _random_hash():
+    """Generate a random 64-char hex hash for idempotent test runs."""
+    return secrets.token_hex(32)
+
+
 @pytest.mark.integration
 @pytest.mark.blockchain
 class TestBlockchainLocalHardhat:
@@ -662,7 +670,7 @@ class TestBlockchainLocalHardhat:
             contract_address=contract,
         )
 
-        test_hash = "aa" * 32  # 64-char hex
+        test_hash = _random_hash()
         result = client.anchor(
             swarm_hash=test_hash,
             data_type="integration-test",
@@ -690,7 +698,7 @@ class TestBlockchainLocalHardhat:
             contract_address=contract,
         )
 
-        test_hash = "bb" * 32
+        test_hash = _random_hash()
         client.anchor(swarm_hash=test_hash, data_type="test")
 
         # Verify it's on-chain
@@ -717,7 +725,7 @@ class TestBlockchainLocalHardhat:
             contract_address=contract,
         )
 
-        test_hash = "cc" * 32
+        test_hash = _random_hash()
         # Register first
         client.anchor(swarm_hash=test_hash, data_type="access-test")
         # Record access
@@ -742,8 +750,8 @@ class TestBlockchainLocalHardhat:
             contract_address=contract,
         )
 
-        orig_hash = "dd" * 32
-        new_hash = "ee" * 32
+        orig_hash = _random_hash()
+        new_hash = _random_hash()
         # Register original
         client.anchor(swarm_hash=orig_hash, data_type="transform-test")
         # Record transformation
@@ -794,7 +802,7 @@ class TestBlockchainLocalHardhat:
             contract_address=contract,
         )
 
-        test_hash = "f1" * 32
+        test_hash = _random_hash()
         # Register first
         client.anchor(swarm_hash=test_hash, data_type="status-test")
 
@@ -822,7 +830,7 @@ class TestBlockchainLocalHardhat:
             contract_address=contract,
         )
 
-        test_hash = "f2" * 32
+        test_hash = _random_hash()
         new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"  # Hardhat account #1
 
         # Register first
@@ -875,8 +883,8 @@ class TestBlockchainLocalHardhat:
             contract_address=contract,
         )
 
-        hash_a = "f3" * 32
-        hash_b = "f4" * 32
+        hash_a = _random_hash()
+        hash_b = _random_hash()
 
         # Anchor original
         client.anchor(swarm_hash=hash_a, data_type="chain-walk-test")
@@ -891,9 +899,11 @@ class TestBlockchainLocalHardhat:
         # Walk the chain
         chain = client.get_provenance_chain(swarm_hash=hash_a)
 
-        # Should have at least A (B may or may not be registered)
+        # Record A should be in the chain with its transformation description
         assert len(chain) >= 1
         assert chain[0].data_hash == hash_a
+        assert len(chain[0].transformations) == 1
+        assert chain[0].transformations[0].description == "Removed PII"
 
     @skip_if_no_hardhat
     @skip_if_no_chain_wallet
@@ -912,12 +922,11 @@ class TestBlockchainLocalHardhat:
             contract_address=contract,
         )
 
-        orig_hash = "f5" * 32
-        new_hash = "f6" * 32
+        orig_hash = _random_hash()
+        new_hash = _random_hash()
 
-        # Anchor both
+        # Anchor original (new_hash is auto-registered by recordTransformation)
         client.anchor(swarm_hash=orig_hash, data_type="protect-test")
-        client.anchor(swarm_hash=new_hash, data_type="protect-test")
 
         # Transform
         client.transform(
@@ -998,7 +1007,7 @@ class TestBlockchainBaseSepolia:
         try:
             client = ChainClient(chain="base-sepolia")
             # Random hash should not be registered
-            random_hash = "ff" * 32
+            random_hash = _random_hash()
             assert client.verify(swarm_hash=random_hash) is False
         except Exception as e:
             pytest.skip(f"Base Sepolia connection failed: {e}")

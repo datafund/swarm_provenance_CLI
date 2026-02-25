@@ -595,15 +595,11 @@ class ChainClient:
                 data_hash=swarm_hash,
             )
 
-        # Parse transformations — each is a TransformationRecord struct
-        # returned by web3.py as a tuple: (bytes32 newDataHash, string transformation)
+        # Parse transformations — contract returns string[] (description only)
         chain_transformations = []
         for t in transformations:
-            new_hash = t[0].hex() if isinstance(t[0], bytes) else str(t[0])
-            description = t[1] if len(t) > 1 else ""
             chain_transformations.append(ChainTransformation(
-                new_data_hash=new_hash,
-                description=description,
+                description=str(t),
             ))
 
         if verbose:
@@ -704,10 +700,14 @@ class ChainClient:
         verbose: bool = False,
     ) -> List[ChainProvenanceRecord]:
         """
-        Get the full provenance chain for a data hash by following transformations.
+        Get the provenance chain for a data hash.
 
-        Retrieves the record for the given hash, then recursively follows
-        any transformations to build the full lineage.
+        Retrieves the record for the given hash. If transformations have
+        new_data_hash links, follows them to build a lineage chain.
+
+        Note: The current contract returns transformation descriptions only
+        (no new_data_hash links), so the chain will typically contain just
+        the queried record. Supply hashes directly to follow known lineages.
 
         Args:
             swarm_hash: Starting Swarm reference hash.
@@ -728,7 +728,6 @@ class ChainClient:
 
         chain = []
         visited = set()
-        # Track (hash, depth) pairs
         to_visit = [(swarm_hash, 0)]
 
         while to_visit:
@@ -745,9 +744,9 @@ class ChainClient:
                 record = self.get(current_hash, verbose=verbose)
                 chain.append(record)
 
-                # Follow transformation links
+                # Follow transformation links if new_data_hash is available
                 for t in record.transformations:
-                    if t.new_data_hash not in visited:
+                    if t.new_data_hash and t.new_data_hash not in visited:
                         to_visit.append((t.new_data_hash, current_depth + 1))
             except DataNotRegisteredError:
                 if verbose:
