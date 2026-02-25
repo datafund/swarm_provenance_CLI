@@ -235,9 +235,17 @@ swarm-prov-upload chain delegate <address> --authorize
 swarm-prov-upload chain delegate <address> --revoke
 
 # Protect: composite workflow (transform + restrict original)
+# Equivalent to: verify ACTIVE → optionally anchor → transform → restrict
 swarm-prov-upload chain protect <original_hash> <new_hash> --description "Removed PII"
 swarm-prov-upload chain protect <orig> <new> --anchor-new --description "Redacted"  # anchor new hash first
+
+# Walk transformation chain (follow lineage)
+swarm-prov-upload chain get <hash> --follow               # full chain
+swarm-prov-upload chain get <hash> --follow --depth 2     # limit depth
+swarm-prov-upload chain get <hash> --follow --json        # JSON output
 ```
+
+> **`chain protect` vs separate commands**: `chain protect` combines verify + anchor + transform + restrict into one command. If the restrict step fails, the command shows a warning (transform already succeeded) and exits 0 with `partial_failure: true` in JSON output. Use `chain transform --restrict-original` for the two-step version without the pre-flight ACTIVE check.
 
 ### Global Flags
 

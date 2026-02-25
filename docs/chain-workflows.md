@@ -439,3 +439,143 @@ alice_client.set_delegate("0xBob...", authorized=False)
 | `get_provenance_chain` | Read | Free | Follows transformation links |
 
 Gas costs are estimates on Base chain. At typical gas prices (~0.001 gwei), each write operation costs fractions of a cent.
+
+## Data Protection Pattern
+
+The `chain protect` command combines multiple steps into a single atomic-intent workflow: replace sensitive data with a clean version and restrict the original.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                        Data Protection Workflow                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+  Manual steps (4 commands):            chain protect (1 command):
+
+  1. chain anchor <new>                 chain protect <orig> <new> \
+  2. chain transform <orig> <new> \       --anchor-new \
+       --description "..."                --description "Removed PII"
+  3. chain status <orig> --set restricted
+  4. chain verify <orig>                Does all 4 steps automatically:
+                                        1. Verify original is ACTIVE
+                                        2. Anchor new hash (--anchor-new)
+                                        3. Record transformation
+                                        4. Restrict original
+```
+
+**CLI commands:**
+```bash
+# Full protect workflow (new hash already anchored)
+swarm-prov-upload chain protect aaa... bbb... --description "Removed PII"
+
+# Protect with auto-anchor of new hash
+swarm-prov-upload chain protect aaa... bbb... --anchor-new --description "Redacted"
+
+# Protect with custom data type for the new hash
+swarm-prov-upload chain protect aaa... bbb... --anchor-new --type dataset -d "Anonymized"
+
+# JSON output includes all sub-operation results
+swarm-prov-upload chain protect aaa... bbb... --json
+```
+
+**Equivalent manual steps:**
+```bash
+# 1. Upload the clean version
+swarm-prov-upload upload --file clean-data.txt
+# Output: bbb...
+
+# 2. Anchor it
+swarm-prov-upload chain anchor bbb... --type dataset
+
+# 3. Record the transformation link
+swarm-prov-upload chain transform aaa... bbb... --description "Removed PII"
+
+# 4. Restrict the original
+swarm-prov-upload chain status aaa... --set restricted
+
+# Alternatively, steps 3+4 in one command:
+swarm-prov-upload chain transform aaa... bbb... --restrict-original -d "Removed PII"
+```
+
+## Depth-Limited Chain Traversal
+
+The `--follow` flag on `chain get` walks the full transformation chain using breadth-first search. Use `--depth` to limit how deep it goes.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                        Depth-Limited Traversal                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+  Chain: A ──> B ──> C ──> D
+
+  --follow              Returns: [A, B, C, D]     (all records)
+  --follow --depth 2    Returns: [A, B, C]         (stops at depth 2)
+  --follow --depth 1    Returns: [A, B]            (stops at depth 1)
+  --follow --depth 0    Returns: [A]               (root only)
+  (no --follow)         Returns: A                 (single record, no chain)
+```
+
+**Default behavior:**
+- Without `--depth`: traverses up to 50 levels (safety cap)
+- `--depth` without `--follow`: warns and is ignored
+- Cycles are detected and skipped (visited set prevents infinite loops)
+
+**CLI commands:**
+```bash
+# Walk full chain
+swarm-prov-upload chain get aaa... --follow
+
+# Limit to 2 levels
+swarm-prov-upload chain get aaa... --follow --depth 2
+
+# JSON output includes chain array, depth count, and root hash
+swarm-prov-upload chain get aaa... --follow --json
+# Output: {"chain": [...], "depth": 4, "root": "aaa..."}
+```
+
+## Error Recovery
+
+### Partial Failures in Protect
+
+The `chain protect` command runs multiple operations sequentially. If a later step fails, earlier steps have already been committed on-chain.
+
+| Step Failed | What Happened | Recovery |
+|------------|---------------|----------|
+| Step 1 (verify) | Nothing committed | Fix preconditions and retry |
+| Step 2 (anchor new) | Nothing committed | Fix anchor issue and retry |
+| Step 3 (transform) | New hash may be anchored | Record transform manually |
+| Step 4 (restrict) | Transform recorded, original still ACTIVE | Restrict manually |
+
+**If restrict fails after transform:**
+```bash
+# The CLI shows a WARNING with the manual command:
+# WARNING: Transform succeeded but failed to restrict original: ...
+#   Restrict manually: swarm-prov-upload chain status <hash> --set restricted
+
+# Run the suggested command:
+swarm-prov-upload chain status aaa... --set restricted
+```
+
+**JSON output for partial failures:**
+```json
+{
+  "transform": { "tx_hash": "0x...", ... },
+  "restrict": null,
+  "partial_failure": true
+}
+```
+
+### Common Error Scenarios
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `not registered on-chain` | Hash not anchored | `chain anchor <hash>` first |
+| `expected ACTIVE` | Original is RESTRICTED/DELETED | Set to ACTIVE first or use different hash |
+| `Transaction failed: reverted` | Not the owner or not authorized | Check owner with `chain get <hash>` |
+| `Cannot connect to chain` | RPC node unreachable | Check `CHAIN_RPC_URL` or network config |
+
+### Exit Codes
+
+| Exit Code | Meaning |
+|-----------|---------|
+| 0 | Success (also for protect with partial restrict failure) |
+| 1 | Error: hash not found, transaction failed, connection error |

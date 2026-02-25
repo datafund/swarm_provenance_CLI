@@ -1009,6 +1009,59 @@ class TestChainClientProvenanceChain:
         assert len(chain) == 1
         assert chain[0].data_hash == hash_a
 
+    def test_get_provenance_chain_default_cap_at_50(self, mock_chain_deps):
+        """Tests that max_depth=None defaults to 50 (safety cap)."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        hash_a = DUMMY_HASH
+        hash_a_bytes = bytes.fromhex(hash_a)
+
+        # Single record with no transformations - just verify the call works
+        # and that None defaults are handled
+        def mock_get_data_record(data_hash):
+            mock_call = MagicMock()
+            if data_hash == hash_a_bytes:
+                mock_call.call.return_value = (
+                    hash_a_bytes, DUMMY_ADDRESS, 1700000000, "swarm-provenance",
+                    [], [], 0,
+                )
+            else:
+                mock_call.call.return_value = (
+                    data_hash, ZERO_ADDRESS, 0, "", [], [], 0,
+                )
+            return mock_call
+
+        mock_chain_deps["contract"].functions.getDataRecord = mock_get_data_record
+
+        client = ChainClient(chain="base-sepolia")
+
+        # max_depth=None should use internal cap of 50, not error
+        chain = client.get_provenance_chain(swarm_hash=hash_a, max_depth=None)
+        assert len(chain) == 1
+
+    def test_get_provenance_chain_negative_depth(self, mock_chain_deps):
+        """Tests that negative max_depth returns empty results (no records traversed)."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        hash_a = DUMMY_HASH
+        hash_a_bytes = bytes.fromhex(hash_a)
+
+        def mock_get_data_record(data_hash):
+            mock_call = MagicMock()
+            mock_call.call.return_value = (
+                hash_a_bytes, DUMMY_ADDRESS, 1700000000, "swarm-provenance",
+                [], [], 0,
+            )
+            return mock_call
+
+        mock_chain_deps["contract"].functions.getDataRecord = mock_get_data_record
+
+        client = ChainClient(chain="base-sepolia")
+
+        # Negative depth: current_depth (0) > effective_max (-1) → skipped
+        chain = client.get_provenance_chain(swarm_hash=hash_a, max_depth=-1)
+        assert len(chain) == 0
+
 
 # --- Models tests ---
 

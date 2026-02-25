@@ -2868,3 +2868,599 @@ class TestChainProtectCommand:
 
         assert result.exit_code == 1
         assert "not registered" in result.stdout.lower()
+
+    def test_protect_restrict_failure_warns(self, mocker):
+        """Tests protect continues with warning when restrict fails after successful transform."""
+        from swarm_provenance_uploader.models import (
+            ChainProvenanceRecord, DataStatusEnum, TransformResult,
+        )
+        from swarm_provenance_uploader.exceptions import ChainTransactionError
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            status=DataStatusEnum.ACTIVE,
+        )
+        mock_client.transform.return_value = TransformResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12345,
+            gas_used=50000,
+            explorer_url=None,
+            original_hash=DUMMY_SWARM_REF,
+            new_hash="c" * 64,
+            description="",
+        )
+        mock_client.set_status.side_effect = ChainTransactionError("reverted")
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "protect", DUMMY_SWARM_REF, "c" * 64]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "WARNING" in result.stdout
+        assert "partially complete" in result.stdout.lower() or "restrict failed" in result.stdout.lower()
+
+    def test_protect_restrict_failure_json(self, mocker):
+        """Tests protect JSON output includes partial_failure when restrict fails."""
+        from swarm_provenance_uploader.models import (
+            ChainProvenanceRecord, DataStatusEnum, TransformResult,
+        )
+        from swarm_provenance_uploader.exceptions import ChainTransactionError
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            status=DataStatusEnum.ACTIVE,
+        )
+        mock_client.transform.return_value = TransformResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12345,
+            gas_used=50000,
+            explorer_url=None,
+            original_hash=DUMMY_SWARM_REF,
+            new_hash="c" * 64,
+            description="",
+        )
+        mock_client.set_status.side_effect = ChainTransactionError("reverted")
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "protect", DUMMY_SWARM_REF, "c" * 64, "--json"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "WARNING" in result.stdout
+        # Extract JSON from mixed output (CliRunner merges stderr into stdout)
+        import json
+        json_start = result.stdout.index("{")
+        output = json.loads(result.stdout[json_start:])
+        assert output["partial_failure"] is True
+        assert output["restrict"] is None
+        assert "transform" in output
+
+    def test_protect_anchor_new_failure(self, mocker):
+        """Tests protect exits when anchor-new fails."""
+        from swarm_provenance_uploader.models import ChainProvenanceRecord, DataStatusEnum
+        from swarm_provenance_uploader.exceptions import ChainTransactionError
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            status=DataStatusEnum.ACTIVE,
+        )
+        mock_client.anchor.side_effect = ChainTransactionError("already registered")
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "protect", DUMMY_SWARM_REF, "c" * 64, "--anchor-new"]
+        )
+
+        assert result.exit_code == 1
+        assert "anchor" in result.stdout.lower()
+        mock_client.transform.assert_not_called()
+
+    def test_protect_transform_failure(self, mocker):
+        """Tests protect exits when transform fails (after successful anchor)."""
+        from swarm_provenance_uploader.models import (
+            ChainProvenanceRecord, DataStatusEnum, AnchorResult,
+        )
+        from swarm_provenance_uploader.exceptions import ChainTransactionError
+
+        new_hash = "d" * 64
+        mock_client = mocker.MagicMock()
+        mock_client.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            status=DataStatusEnum.ACTIVE,
+        )
+        mock_client.anchor.return_value = AnchorResult(
+            tx_hash="0x" + "aa" * 32,
+            block_number=12344,
+            gas_used=40000,
+            explorer_url=None,
+            swarm_hash=new_hash,
+            data_type="swarm-provenance",
+            owner=DUMMY_ADDRESS,
+        )
+        mock_client.transform.side_effect = ChainTransactionError("reverted")
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "protect", DUMMY_SWARM_REF, new_hash, "--anchor-new"]
+        )
+
+        assert result.exit_code == 1
+        assert "transformation" in result.stdout.lower() or "transform" in result.stdout.lower()
+        mock_client.set_status.assert_not_called()
+
+    def test_protect_json_with_anchor_new(self, mocker):
+        """Tests protect JSON output includes anchor key when --anchor-new used."""
+        from swarm_provenance_uploader.models import (
+            ChainProvenanceRecord, DataStatusEnum, TransformResult, AnchorResult,
+        )
+
+        new_hash = "d" * 64
+        mock_client = mocker.MagicMock()
+        mock_client.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            status=DataStatusEnum.ACTIVE,
+        )
+        mock_client.anchor.return_value = AnchorResult(
+            tx_hash="0x" + "aa" * 32,
+            block_number=12344,
+            gas_used=40000,
+            explorer_url=None,
+            swarm_hash=new_hash,
+            data_type="swarm-provenance",
+            owner=DUMMY_ADDRESS,
+        )
+        mock_client.transform.return_value = TransformResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12345,
+            gas_used=50000,
+            explorer_url=None,
+            original_hash=DUMMY_SWARM_REF,
+            new_hash=new_hash,
+            description="",
+        )
+        mock_client.set_status.return_value = AnchorResult(
+            tx_hash="0x" + "cc" * 32,
+            block_number=12346,
+            gas_used=30000,
+            explorer_url=None,
+            swarm_hash=DUMMY_SWARM_REF,
+            data_type="",
+            owner=DUMMY_ADDRESS,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "protect", DUMMY_SWARM_REF, new_hash, "--anchor-new", "--json"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        import json
+        output = json.loads(result.stdout)
+        assert "anchor" in output
+        assert "transform" in output
+        assert "restrict" in output
+        assert output["partial_failure"] is False
+
+    def test_protect_original_deleted(self, mocker):
+        """Tests protect fails when original status is DELETED."""
+        from swarm_provenance_uploader.models import ChainProvenanceRecord, DataStatusEnum
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            status=DataStatusEnum.DELETED,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "protect", DUMMY_SWARM_REF, "c" * 64]
+        )
+
+        assert result.exit_code == 1
+        assert "DELETED" in result.stdout
+        assert "expected ACTIVE" in result.stdout
+
+
+# =============================================================================
+# CHAIN STATUS COMMAND ADDITIONAL TESTS
+# =============================================================================
+
+class TestChainStatusCommandAdditional:
+    """Additional tests for chain status command."""
+
+    def test_status_set_deleted(self, mocker):
+        """Tests chain status --set deleted."""
+        from swarm_provenance_uploader.models import AnchorResult
+
+        mock_client = mocker.MagicMock()
+        mock_client.set_status.return_value = AnchorResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12345,
+            gas_used=50000,
+            explorer_url=None,
+            swarm_hash=DUMMY_SWARM_REF,
+            data_type="",
+            owner=DUMMY_ADDRESS,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "status", DUMMY_SWARM_REF, "--set", "deleted"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "DELETED" in result.stdout
+        mock_client.set_status.assert_called_once_with(DUMMY_SWARM_REF, status=2, verbose=False)
+
+    def test_status_set_case_insensitive(self, mocker):
+        """Tests chain status --set accepts mixed case."""
+        from swarm_provenance_uploader.models import AnchorResult
+
+        mock_client = mocker.MagicMock()
+        mock_client.set_status.return_value = AnchorResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12345,
+            gas_used=50000,
+            explorer_url=None,
+            swarm_hash=DUMMY_SWARM_REF,
+            data_type="",
+            owner=DUMMY_ADDRESS,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "status", DUMMY_SWARM_REF, "--set", "RESTRICTED"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        mock_client.set_status.assert_called_once_with(DUMMY_SWARM_REF, status=1, verbose=False)
+
+    def test_status_query_json(self, mocker):
+        """Tests chain status query mode with --json output."""
+        from swarm_provenance_uploader.models import ChainProvenanceRecord, DataStatusEnum
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            status=DataStatusEnum.RESTRICTED,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "status", DUMMY_SWARM_REF, "--json"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        import json
+        output = json.loads(result.stdout)
+        assert output["status"] == "RESTRICTED"
+        assert output["hash"] == DUMMY_SWARM_REF
+
+    def test_status_query_connection_error(self, mocker):
+        """Tests chain status query handles connection errors."""
+        from swarm_provenance_uploader.exceptions import ChainConnectionError
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.side_effect = ChainConnectionError("timeout", rpc_url="http://localhost:8545")
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "status", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1
+        assert "Cannot connect" in result.stdout
+
+    def test_status_set_connection_error(self, mocker):
+        """Tests chain status --set handles connection errors."""
+        from swarm_provenance_uploader.exceptions import ChainConnectionError
+
+        mock_client = mocker.MagicMock()
+        mock_client.set_status.side_effect = ChainConnectionError("timeout", rpc_url="http://localhost:8545")
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "status", DUMMY_SWARM_REF, "--set", "active"])
+
+        assert result.exit_code == 1
+        assert "Cannot connect" in result.stdout
+
+
+# =============================================================================
+# CHAIN TRANSFER COMMAND ADDITIONAL TESTS
+# =============================================================================
+
+class TestChainTransferCommandAdditional:
+    """Additional tests for chain transfer command."""
+
+    def test_transfer_connection_error(self, mocker):
+        """Tests chain transfer handles connection errors."""
+        from swarm_provenance_uploader.exceptions import ChainConnectionError
+
+        mock_client = mocker.MagicMock()
+        mock_client.transfer_ownership.side_effect = ChainConnectionError("timeout")
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "transfer", DUMMY_SWARM_REF, "--to", DUMMY_ADDRESS]
+        )
+
+        assert result.exit_code == 1
+        assert "Cannot connect" in result.stdout
+
+    def test_transfer_generic_chain_error(self, mocker):
+        """Tests chain transfer handles generic chain errors."""
+        from swarm_provenance_uploader.exceptions import ChainError
+
+        mock_client = mocker.MagicMock()
+        mock_client.transfer_ownership.side_effect = ChainError("not owner")
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "transfer", DUMMY_SWARM_REF, "--to", DUMMY_ADDRESS]
+        )
+
+        assert result.exit_code == 1
+        assert "not owner" in result.stdout
+
+
+# =============================================================================
+# CHAIN DELEGATE COMMAND ADDITIONAL TESTS
+# =============================================================================
+
+class TestChainDelegateCommandAdditional:
+    """Additional tests for chain delegate command."""
+
+    def test_delegate_both_flags_error(self, mocker):
+        """Tests chain delegate fails when both --authorize and --revoke are given."""
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mocker.MagicMock())
+
+        result = runner.invoke(
+            app, ["chain", "delegate", DUMMY_ADDRESS, "--authorize", "--revoke"]
+        )
+
+        assert result.exit_code == 1
+        assert "exactly one" in result.stdout.lower()
+
+    def test_delegate_connection_error(self, mocker):
+        """Tests chain delegate handles connection errors."""
+        from swarm_provenance_uploader.exceptions import ChainConnectionError
+
+        mock_client = mocker.MagicMock()
+        mock_client.set_delegate.side_effect = ChainConnectionError("timeout")
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "delegate", DUMMY_ADDRESS, "--authorize"]
+        )
+
+        assert result.exit_code == 1
+        assert "Cannot connect" in result.stdout
+
+    def test_delegate_json_output(self, mocker):
+        """Tests chain delegate with --json output."""
+        from swarm_provenance_uploader.models import AnchorResult
+
+        delegate_addr = "0x2222222222222222222222222222222222222222"
+        mock_client = mocker.MagicMock()
+        mock_client.set_delegate.return_value = AnchorResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12345,
+            gas_used=50000,
+            explorer_url=None,
+            swarm_hash="",
+            data_type="",
+            owner=DUMMY_ADDRESS,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "delegate", delegate_addr, "--authorize", "--json"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        import json
+        output = json.loads(result.stdout)
+        assert output["tx_hash"] == DUMMY_TX_HASH
+
+
+# =============================================================================
+# CHAIN GET ADDITIONAL TESTS
+# =============================================================================
+
+class TestChainGetAdditional:
+    """Additional tests for chain get command."""
+
+    def test_depth_without_follow_warns(self, mocker):
+        """Tests --depth without --follow shows warning."""
+        from swarm_provenance_uploader.models import ChainProvenanceRecord, DataStatusEnum
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            status=DataStatusEnum.ACTIVE,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "get", DUMMY_SWARM_REF, "--depth", "3"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "no effect" in result.stdout.lower() or "WARNING" in result.stdout
+
+    def test_follow_depth_zero(self, mocker):
+        """Tests --follow --depth 0 returns only root."""
+        from swarm_provenance_uploader.models import ChainProvenanceRecord, DataStatusEnum
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_provenance_chain.return_value = [
+            ChainProvenanceRecord(
+                data_hash=DUMMY_SWARM_REF,
+                owner=DUMMY_ADDRESS,
+                timestamp=1700000000,
+                data_type="swarm-provenance",
+                status=DataStatusEnum.ACTIVE,
+            ),
+        ]
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "get", DUMMY_SWARM_REF, "--follow", "--depth", "0"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        mock_client.get_provenance_chain.assert_called_once_with(
+            DUMMY_SWARM_REF, max_depth=0, verbose=False
+        )
+
+    def test_follow_connection_error(self, mocker):
+        """Tests --follow handles connection errors."""
+        from swarm_provenance_uploader.exceptions import ChainConnectionError
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_provenance_chain.side_effect = ChainConnectionError("timeout", rpc_url="http://localhost:8545")
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "get", DUMMY_SWARM_REF, "--follow"])
+
+        assert result.exit_code == 1
+        assert "Cannot connect" in result.stdout
+
+
+# =============================================================================
+# CHAIN TRANSFORM ADDITIONAL TESTS
+# =============================================================================
+
+class TestChainTransformAdditional:
+    """Additional tests for chain transform command."""
+
+    def test_restrict_original_json_unified_output(self, mocker):
+        """Tests --restrict-original --json outputs a single unified JSON blob."""
+        from swarm_provenance_uploader.models import TransformResult, AnchorResult
+
+        mock_client = mocker.MagicMock()
+        mock_client.transform.return_value = TransformResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12345,
+            gas_used=50000,
+            explorer_url=None,
+            original_hash=DUMMY_SWARM_REF,
+            new_hash="c" * 64,
+            description="filtered",
+        )
+        mock_client.set_status.return_value = AnchorResult(
+            tx_hash="0x" + "cc" * 32,
+            block_number=12346,
+            gas_used=30000,
+            explorer_url=None,
+            swarm_hash=DUMMY_SWARM_REF,
+            data_type="",
+            owner=DUMMY_ADDRESS,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "transform", DUMMY_SWARM_REF, "c" * 64, "--restrict-original", "--json"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        import json
+        output = json.loads(result.stdout)
+        assert "transform" in output
+        assert "restrict" in output
+        assert output["restrict"] is not None
+
+    def test_restrict_original_failure_warns(self, mocker):
+        """Tests --restrict-original shows warning when set_status fails."""
+        from swarm_provenance_uploader.models import TransformResult
+        from swarm_provenance_uploader.exceptions import ChainTransactionError
+
+        mock_client = mocker.MagicMock()
+        mock_client.transform.return_value = TransformResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12345,
+            gas_used=50000,
+            explorer_url=None,
+            original_hash=DUMMY_SWARM_REF,
+            new_hash="c" * 64,
+            description="filtered",
+        )
+        mock_client.set_status.side_effect = ChainTransactionError("reverted")
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "transform", DUMMY_SWARM_REF, "c" * 64, "--restrict-original"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "WARNING" in result.stdout
+        assert "Transformation recorded" in result.stdout
+
+    def test_restrict_original_failure_json(self, mocker):
+        """Tests --restrict-original --json with failed restrict shows null."""
+        from swarm_provenance_uploader.models import TransformResult
+        from swarm_provenance_uploader.exceptions import ChainTransactionError
+
+        mock_client = mocker.MagicMock()
+        mock_client.transform.return_value = TransformResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12345,
+            gas_used=50000,
+            explorer_url=None,
+            original_hash=DUMMY_SWARM_REF,
+            new_hash="c" * 64,
+            description="filtered",
+        )
+        mock_client.set_status.side_effect = ChainTransactionError("reverted")
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "transform", DUMMY_SWARM_REF, "c" * 64, "--restrict-original", "--json"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "WARNING" in result.stdout
+        # Extract JSON from mixed output (CliRunner merges stderr into stdout)
+        import json
+        json_start = result.stdout.index("{")
+        output = json.loads(result.stdout[json_start:])
+        assert output["restrict"] is None
+        assert output["transform"]["tx_hash"] == DUMMY_TX_HASH

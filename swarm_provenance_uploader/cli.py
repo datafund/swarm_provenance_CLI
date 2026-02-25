@@ -1550,6 +1550,9 @@ def chain_get(
     Use --follow to walk the full transformation chain.
     Use --depth to limit traversal depth.
     """
+    if depth is not None and not follow:
+        typer.secho("WARNING: --depth has no effect without --follow.", fg=typer.colors.YELLOW, err=True)
+
     if follow:
         # Chain walking mode
         try:
@@ -1971,8 +1974,23 @@ def chain_transform(
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
-    if output_json and not restrict_original:
-        typer.echo(json.dumps(result.model_dump(), indent=2))
+    # Optionally restrict original
+    status_result = None
+    if restrict_original:
+        try:
+            status_result = client.set_status(original_hash, status=1, verbose=verbose)
+        except exceptions.ChainError as e:
+            typer.secho(f"\nWARNING: Transform succeeded but failed to restrict original: {e}", fg=typer.colors.YELLOW, err=True)
+
+    if output_json:
+        if restrict_original:
+            combined = {
+                "transform": result.model_dump(),
+                "restrict": status_result.model_dump() if status_result else None,
+            }
+            typer.echo(json.dumps(combined, indent=2))
+        else:
+            typer.echo(json.dumps(result.model_dump(), indent=2))
         return
 
     typer.secho(f"\nTransformation recorded!", fg=typer.colors.GREEN, bold=True)
@@ -1986,23 +2004,11 @@ def chain_transform(
     if result.explorer_url:
         typer.echo(f"  Explorer: {result.explorer_url}")
 
-    # Optionally restrict original
-    if restrict_original:
-        try:
-            status_result = client.set_status(original_hash, status=1, verbose=verbose)
-            typer.secho(f"\nOriginal hash restricted!", fg=typer.colors.GREEN)
-            typer.echo(f"  Hash:    {original_hash}")
-            typer.echo(f"  Status:  RESTRICTED")
-            typer.echo(f"  Tx:      {status_result.tx_hash}")
-        except exceptions.ChainError as e:
-            typer.secho(f"\nWARNING: Transform succeeded but failed to restrict original: {e}", fg=typer.colors.YELLOW)
-
-        if output_json:
-            combined = {
-                "transform": result.model_dump(),
-                "restrict": status_result.model_dump() if 'status_result' in dir() else None,
-            }
-            typer.echo(json.dumps(combined, indent=2))
+    if status_result:
+        typer.secho(f"\nOriginal hash restricted!", fg=typer.colors.GREEN)
+        typer.echo(f"  Hash:    {original_hash}")
+        typer.echo(f"  Status:  RESTRICTED")
+        typer.echo(f"  Tx:      {status_result.tx_hash}")
 
 
 @chain_app.command("protect")
@@ -2072,26 +2078,36 @@ def chain_protect(
         raise typer.Exit(code=1)
 
     # Step 4: Restrict original
+    restrict_failed = False
     try:
         status_result = client.set_status(original_hash, status=1, verbose=verbose)
         results["restrict"] = status_result
         if not output_json:
             typer.secho(f"Original hash restricted.", fg=typer.colors.GREEN)
     except exceptions.ChainError as e:
-        typer.secho(f"ERROR: Transform succeeded but failed to restrict original: {e}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+        restrict_failed = True
+        typer.secho(
+            f"\nWARNING: Transform succeeded but failed to restrict original: {e}",
+            fg=typer.colors.YELLOW, err=True,
+        )
+        typer.echo(f"  Restrict manually: swarm-prov-upload chain status {original_hash} --set restricted", err=True)
 
     if output_json:
         output = {}
         if "anchor" in results:
             output["anchor"] = results["anchor"].model_dump()
         output["transform"] = results["transform"].model_dump()
-        output["restrict"] = results["restrict"].model_dump()
+        output["restrict"] = results["restrict"].model_dump() if "restrict" in results else None
+        output["partial_failure"] = restrict_failed
         typer.echo(json.dumps(output, indent=2))
         return
 
-    typer.secho(f"\nProtect complete!", fg=typer.colors.GREEN, bold=True)
-    typer.echo(f"  Original:  {original_hash} -> RESTRICTED")
+    if restrict_failed:
+        typer.secho(f"\nProtect partially complete.", fg=typer.colors.YELLOW, bold=True)
+        typer.echo(f"  Original:  {original_hash} (restrict failed)")
+    else:
+        typer.secho(f"\nProtect complete!", fg=typer.colors.GREEN, bold=True)
+        typer.echo(f"  Original:  {original_hash} -> RESTRICTED")
     typer.echo(f"  New:       {new_hash}")
     if description:
         typer.echo(f"  Desc:      {description}")
