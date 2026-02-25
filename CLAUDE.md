@@ -174,6 +174,16 @@ swarm-prov-upload chain transform <orig> <new> --description "..."           # R
 swarm-prov-upload chain transform <orig> <new> --restrict-original           # Transform + restrict original
 swarm-prov-upload chain protect <orig> <new> --description "..."             # Composite: transform + restrict
 swarm-prov-upload chain protect <orig> <new> --anchor-new                    # Protect with auto-anchor
+
+# Collection/manifest upload (directory as Swarm manifest, gateway only)
+swarm-prov-upload upload-collection /path/to/directory                       # Upload directory
+swarm-prov-upload upload-collection /path/to/directory --std "PROV-STD-V1"   # With provenance standard
+swarm-prov-upload upload-collection /path/to/directory --duration 168        # Custom stamp duration
+swarm-prov-upload upload-collection /path/to/directory --usePool             # Use pooled stamp
+swarm-prov-upload upload-collection /path/to/directory --stamp-id <id>       # Reuse existing stamp
+swarm-prov-upload upload-collection /path/to/directory --json                # JSON output
+swarm-prov-upload upload-collection /path/to/directory --deferred            # Deferred upload
+swarm-prov-upload upload-collection /path/to/directory --redundancy          # With redundancy
 ```
 
 ## Architecture
@@ -260,11 +270,24 @@ The application follows a modular architecture with clear separation of concerns
 - `ChainWalletInfo`: Wallet balance and chain configuration info
 - `SignedDocumentResponse`: Response from upload with sign=notary
 
+**Collection Models**: Schemas for collection/manifest uploads:
+- `ManifestUploadTiming`: Optional timing breakdown from manifest upload
+- `ManifestUploadResponse`: Response with reference, file_count, timing
+- `CollectionFileInfo`: Per-file info (path, size, content_hash)
+- `CollectionProvenanceMetadata`: Full provenance metadata for a collection upload
+
 **Upload Process**:
 1. File reading and SHA256 hashing (`file_utils.py`)
 2. Postage stamp purchasing and validation (via selected backend client)
 3. Metadata wrapping (`metadata_builder.py`)
 4. Upload to Swarm network (via selected backend client)
+
+**Collection Upload Process** (gateway only):
+1. Directory scanning and per-file SHA-256 hashing (`file_utils.py`)
+2. TAR archive creation (uncompressed, `file_utils.py`)
+3. Postage stamp acquisition (purchase, pool, or existing)
+4. Upload TAR as Swarm manifest via `gateway_client.upload_manifest()`
+5. Files accessible at `bzz/<reference>/path/to/file`
 
 **Download Process**:
 1. Metadata retrieval from Swarm (via selected backend client)
@@ -314,6 +337,7 @@ The test suite has two layers:
 ### Unit Tests (Mocked)
 - `test_cli.py`: CLI command tests with mocked backends
 - `test_gateway_client.py`: GatewayClient tests with mocked HTTP
+- `test_file_utils.py`: TAR creation and directory hashing tests
 - `test_notary_utils.py`: Notary signature verification tests with mocked crypto
 - `test_x402_client.py`: X402Client tests with mocked eth-account/web3
 - `test_chain_client.py`: ChainClient tests with mocked web3/eth-account

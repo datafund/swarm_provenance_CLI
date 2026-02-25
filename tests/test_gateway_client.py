@@ -1064,3 +1064,101 @@ class TestGatewayClientNotary:
 
         with pytest.raises(InvalidDocumentFormatError):
             client.upload_data_with_signing(b'{"invalid": "document"}', DUMMY_STAMP)
+
+
+class TestGatewayClientManifest:
+    """Tests for manifest/collection upload."""
+
+    def test_upload_manifest_success(self, requests_mock, tmp_path):
+        """Tests successful manifest upload."""
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/data/manifest",
+            json={
+                "reference": DUMMY_SWARM_REF,
+                "file_count": 3,
+                "message": "Manifest uploaded successfully",
+            },
+        )
+
+        # Create a small tar file
+        import tarfile
+        tar_path = tmp_path / "test.tar"
+        file1 = tmp_path / "file1.txt"
+        file1.write_text("hello")
+        with tarfile.open(tar_path, "w") as tar:
+            tar.add(str(file1), arcname="file1.txt")
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        result = client.upload_manifest(str(tar_path), DUMMY_STAMP)
+
+        assert result.reference == DUMMY_SWARM_REF
+        assert result.file_count == 3
+        assert result.message == "Manifest uploaded successfully"
+
+    def test_upload_manifest_with_timing(self, requests_mock, tmp_path):
+        """Tests manifest upload with timing info."""
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/data/manifest",
+            json={
+                "reference": DUMMY_SWARM_REF,
+                "file_count": 2,
+                "timing": {
+                    "stamp_check_ms": 50,
+                    "upload_ms": 1200,
+                    "total_ms": 1250,
+                },
+            },
+        )
+
+        import tarfile
+        tar_path = tmp_path / "test.tar"
+        file1 = tmp_path / "f.txt"
+        file1.write_text("data")
+        with tarfile.open(tar_path, "w") as tar:
+            tar.add(str(file1), arcname="f.txt")
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        result = client.upload_manifest(str(tar_path), DUMMY_STAMP, include_timing=True)
+
+        assert result.reference == DUMMY_SWARM_REF
+        assert result.timing is not None
+        assert result.timing.total_ms == 1250
+        assert result.timing.upload_ms == 1200
+
+    def test_upload_manifest_invalid_stamp(self, requests_mock, tmp_path):
+        """Tests manifest upload with invalid stamp returns error."""
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/data/manifest",
+            status_code=400,
+            json={"detail": "Invalid stamp"},
+        )
+
+        import tarfile
+        tar_path = tmp_path / "test.tar"
+        file1 = tmp_path / "f.txt"
+        file1.write_text("data")
+        with tarfile.open(tar_path, "w") as tar:
+            tar.add(str(file1), arcname="f.txt")
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        with pytest.raises(Exception):
+            client.upload_manifest(str(tar_path), "bad_stamp")
+
+    def test_upload_manifest_server_error(self, requests_mock, tmp_path):
+        """Tests manifest upload handles 500 error."""
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/data/manifest",
+            status_code=500,
+            json={"detail": "Internal server error"},
+        )
+
+        import tarfile
+        tar_path = tmp_path / "test.tar"
+        file1 = tmp_path / "f.txt"
+        file1.write_text("data")
+        with tarfile.open(tar_path, "w") as tar:
+            tar.add(str(file1), arcname="f.txt")
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        with pytest.raises(Exception):
+            client.upload_manifest(str(tar_path), DUMMY_STAMP)

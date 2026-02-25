@@ -1037,3 +1037,62 @@ class TestBlockchainBaseSepolia:
             assert client.verify(swarm_hash=test_hash) is True
         except Exception as e:
             pytest.skip(f"Base Sepolia anchor failed: {e}")
+
+
+# =============================================================================
+# MANIFEST / COLLECTION UPLOAD TESTS
+# =============================================================================
+
+class TestGatewayManifestUpload:
+    """Integration tests for manifest/collection upload via gateway."""
+
+    @pytest.mark.integration
+    @pytest.mark.gateway
+    def test_gateway_manifest_upload(self, gateway_client, tmp_path):
+        """Upload a directory as a manifest and verify reference is returned."""
+        import tarfile
+        from swarm_provenance_uploader.core.file_utils import create_tar_from_directory
+
+        # Create temp directory with test files
+        test_dir = tmp_path / "test_collection"
+        test_dir.mkdir()
+        (test_dir / "readme.txt").write_text("Test collection readme")
+        sub = test_dir / "data"
+        sub.mkdir()
+        (sub / "values.csv").write_text("x,y\n1,2\n3,4")
+
+        # Create TAR
+        tar_path = tmp_path / "collection.tar"
+        create_tar_from_directory(test_dir, tar_path)
+        assert tar_path.exists()
+
+        # First purchase a stamp
+        try:
+            stamp_id = gateway_client.purchase_stamp(duration_hours=25, verbose=True)
+        except Exception as e:
+            pytest.skip(f"Could not purchase stamp: {e}")
+
+        # Wait for stamp to be usable
+        import time
+        for _ in range(12):
+            stamp = gateway_client.get_stamp(stamp_id)
+            if stamp and stamp.usable:
+                break
+            time.sleep(10)
+        else:
+            pytest.skip("Stamp did not become usable in time")
+
+        # Upload manifest
+        result = gateway_client.upload_manifest(
+            tar_path=str(tar_path),
+            stamp_id=stamp_id,
+            verbose=True,
+        )
+
+        print(f"\n=== Manifest Upload Result ===")
+        print(f"  Reference: {result.reference}")
+        print(f"  File count: {result.file_count}")
+        print(f"  Message: {result.message}")
+
+        assert result.reference is not None
+        assert len(result.reference) == 64  # Swarm hash length

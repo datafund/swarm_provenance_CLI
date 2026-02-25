@@ -41,6 +41,8 @@ from ..models import (
     NotaryInfoResponse,
     NotaryStatusResponse,
     SignedDocumentResponse,
+    ManifestUploadResponse,
+    ManifestUploadTiming,
 )
 
 
@@ -1050,3 +1052,98 @@ class GatewayClient:
             if verbose:
                 print(f"ERROR: Upload with signing failed: {e}")
             raise ConnectionError(f"Failed to upload data with signing: {e}") from e
+
+    def upload_manifest(
+        self,
+        tar_path: str,
+        stamp_id: str,
+        validate_stamp: bool = True,
+        deferred: bool = False,
+        include_timing: bool = False,
+        redundancy: bool = False,
+        verbose: bool = False,
+    ) -> ManifestUploadResponse:
+        """Upload a TAR archive as a Swarm manifest.
+
+        Creates a manifest that preserves directory structure and allows
+        individual file access via path-based URLs.
+
+        Args:
+            tar_path: Path to the TAR archive file.
+            stamp_id: Postage stamp ID to use.
+            validate_stamp: Whether to validate stamp before upload.
+            deferred: Use deferred upload mode.
+            include_timing: Include timing breakdown in response.
+            redundancy: Enable redundancy for the upload.
+            verbose: Enable debug output.
+
+        Returns:
+            ManifestUploadResponse with reference and file count.
+        """
+        url = self._make_url("/api/v1/data/manifest")
+        params = {"stamp_id": stamp_id.lower()}
+        if not validate_stamp:
+            params["validate_stamp"] = "false"
+        if deferred:
+            params["deferred"] = "true"
+        if include_timing:
+            params["include_timing"] = "true"
+        if redundancy:
+            params["redundancy"] = "true"
+
+        if verbose:
+            print(f"--- DEBUG: Upload Manifest ---")
+            print(f"URL: POST {url}")
+            print(f"Params: {params}")
+            print(f"TAR file: {tar_path}")
+
+        try:
+            with open(tar_path, "rb") as f:
+                tar_data = f.read()
+
+            if verbose:
+                print(f"DEBUG: TAR size: {len(tar_data)} bytes")
+
+            files = {"file": ("collection.tar", tar_data, "application/x-tar")}
+            headers = {}
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+
+            response = self._make_paid_request(
+                "POST",
+                url,
+                params=params,
+                files=files,
+                headers=headers,
+                timeout=120,
+                verbose=verbose,
+            )
+
+            if verbose:
+                print(f"DEBUG: Upload manifest status: {response.status_code}")
+
+            response.raise_for_status()
+            data = response.json()
+
+            timing = None
+            if include_timing and "timing" in data:
+                timing = ManifestUploadTiming.model_validate(data["timing"])
+
+            result = ManifestUploadResponse(
+                reference=data.get("reference", ""),
+                file_count=data.get("file_count"),
+                message=data.get("message"),
+                timing=timing,
+            )
+
+            if verbose:
+                print(f"DEBUG: Manifest reference: {result.reference}")
+                if result.file_count is not None:
+                    print(f"DEBUG: File count: {result.file_count}")
+
+            return result
+
+        except requests.exceptions.RequestException as e:
+            if verbose:
+                print(f"ERROR: Upload manifest failed: {e}")
+            raise ConnectionError(f"Failed to upload manifest: {e}") from e

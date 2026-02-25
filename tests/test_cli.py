@@ -3464,3 +3464,159 @@ class TestChainTransformAdditional:
         output = json.loads(result.stdout[json_start:])
         assert output["restrict"] is None
         assert output["transform"]["tx_hash"] == DUMMY_TX_HASH
+
+
+# =============================================================================
+# UPLOAD-COLLECTION TESTS
+# =============================================================================
+
+class TestUploadCollectionCommand:
+    """Tests for upload-collection command."""
+
+    def _mock_gateway_for_collection(self, mocker):
+        """Set up common mocks for collection upload tests."""
+        from swarm_provenance_uploader.models import ManifestUploadResponse
+
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.return_value = DUMMY_STAMP
+        mock_client.upload_manifest.return_value = ManifestUploadResponse(
+            reference=DUMMY_SWARM_REF,
+            file_count=2,
+            message="Manifest uploaded",
+        )
+        mocker.patch(
+            "swarm_provenance_uploader.cli._get_gateway_client_with_x402",
+            return_value=mock_client,
+        )
+        return mock_client
+
+    def test_upload_collection_success(self, mocker):
+        """Tests full collection upload flow."""
+        mock_client = self._mock_gateway_for_collection(mocker)
+
+        with runner.isolated_filesystem():
+            import os
+            os.makedirs("mydir/sub")
+            with open("mydir/a.txt", "w") as f:
+                f.write("hello")
+            with open("mydir/sub/b.txt", "w") as f:
+                f.write("world")
+
+            result = runner.invoke(
+                app, ["upload-collection", "mydir", "--std", "TEST-V1"]
+            )
+
+            assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+            assert "SUCCESS" in result.stdout
+            assert DUMMY_SWARM_REF in result.stdout
+            assert "a.txt" in result.stdout
+            assert "sub/b.txt" in result.stdout
+            mock_client.purchase_stamp.assert_called_once()
+            mock_client.upload_manifest.assert_called_once()
+
+    def test_upload_collection_json(self, mocker):
+        """Tests JSON output format."""
+        self._mock_gateway_for_collection(mocker)
+
+        with runner.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/data.csv", "w") as f:
+                f.write("a,b\n1,2")
+
+            result = runner.invoke(
+                app, ["upload-collection", "mydir", "--json"]
+            )
+
+            assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+            import json
+            # Find the JSON object in the output
+            lines = result.stdout.strip().split("\n")
+            # JSON output starts with '{'
+            json_start = next(i for i, l in enumerate(lines) if l.strip().startswith("{"))
+            json_text = "\n".join(lines[json_start:])
+            output = json.loads(json_text)
+            assert output["swarm_reference"] == DUMMY_SWARM_REF
+            assert output["file_count"] == 1
+            assert len(output["files"]) == 1
+
+    def test_upload_collection_not_a_directory(self):
+        """Tests error when path is a file, not a directory."""
+        with runner.isolated_filesystem():
+            with open("notadir.txt", "w") as f:
+                f.write("data")
+
+            result = runner.invoke(
+                app, ["upload-collection", "notadir.txt"]
+            )
+
+            assert result.exit_code != 0
+            assert "Not a directory" in result.stdout
+
+    def test_upload_collection_empty_directory(self):
+        """Tests error on empty directory."""
+        with runner.isolated_filesystem():
+            import os
+            os.mkdir("emptydir")
+
+            result = runner.invoke(
+                app, ["upload-collection", "emptydir"]
+            )
+
+            assert result.exit_code != 0
+            assert "empty" in result.stdout.lower()
+
+    def test_upload_collection_with_pool(self, mocker):
+        """Tests collection upload using pooled stamp."""
+        from swarm_provenance_uploader.models import ManifestUploadResponse, AcquireStampResponse
+
+        mock_client = mocker.MagicMock()
+        mock_client.acquire_stamp_from_pool.return_value = AcquireStampResponse(
+            success=True,
+            batch_id=DUMMY_STAMP,
+            depth=17,
+            size_name="small",
+            message="Acquired",
+            fallback_used=False,
+        )
+        mock_client.upload_manifest.return_value = ManifestUploadResponse(
+            reference=DUMMY_SWARM_REF,
+            file_count=1,
+            message="OK",
+        )
+        mocker.patch(
+            "swarm_provenance_uploader.cli._get_gateway_client_with_x402",
+            return_value=mock_client,
+        )
+
+        with runner.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/file.txt", "w") as f:
+                f.write("data")
+
+            result = runner.invoke(
+                app, ["upload-collection", "mydir", "--usePool"]
+            )
+
+            assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+            assert "SUCCESS" in result.stdout
+            mock_client.acquire_stamp_from_pool.assert_called_once()
+            mock_client.upload_manifest.assert_called_once()
+
+    def test_upload_collection_local_backend(self, mocker):
+        """Tests error when using local backend (gateway only)."""
+        _backend_config["backend"] = "local"
+
+        with runner.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/file.txt", "w") as f:
+                f.write("data")
+
+            result = runner.invoke(
+                app, ["upload-collection", "mydir"]
+            )
+
+            assert result.exit_code != 0
+            assert "gateway" in result.stdout.lower()

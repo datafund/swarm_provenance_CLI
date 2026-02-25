@@ -366,6 +366,39 @@ swarm-prov-upload upload --file /path/to/data.txt --usePool
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads --verbose
 ```
 
+### Collection Upload (Gateway only)
+
+Upload a directory as a Swarm manifest. Files are accessible via path-based URLs (`bzz/<reference>/path/to/file`).
+
+```bash
+# Upload a directory as a collection
+swarm-prov-upload upload-collection /path/to/directory
+
+# With provenance standard and custom stamp duration
+swarm-prov-upload upload-collection /path/to/directory --std "PROV-STD-V1" --duration 168
+
+# Using pooled stamp (faster)
+swarm-prov-upload upload-collection /path/to/directory --usePool
+
+# JSON output with provenance metadata
+swarm-prov-upload upload-collection /path/to/directory --json
+
+# With existing stamp, deferred upload, and redundancy
+swarm-prov-upload upload-collection /path/to/directory --stamp-id <id> --deferred --redundancy
+```
+
+**Collection Options:**
+| Option | Description |
+|--------|-------------|
+| `--std` | Provenance standard identifier |
+| `--duration`, `-d` | Stamp validity in hours (min 24) |
+| `--size` | Stamp size preset: `small`, `medium`, `large` |
+| `--stamp-id`, `-s` | Use existing stamp (skip purchase) |
+| `--usePool` | Acquire stamp from pool (faster) |
+| `--deferred` | Deferred upload mode |
+| `--redundancy` | Enable redundancy |
+| `--json` | Output result as JSON |
+
 **Upload Options:**
 | Option | Description |
 |--------|-------------|
@@ -623,7 +656,8 @@ Use `swarm-prov-upload --help` for all options.
 │  │ GLOBAL OPTIONS  │  │ DATA COMMANDS    │  │ INFO COMMANDS                   │ │
 │  │                 │  │                  │  │                                 │ │
 │  │ --backend       │  │ upload           │  │ health                          │ │
-│  │   gateway|local │  │ download         │  │ wallet (gateway)                │ │
+│  │   gateway|local │  │ upload-collection│  │ wallet (gateway)                │ │
+│  │                 │  │ download         │  │                                 │ │
 │  │ --gateway-url   │  │                  │  │ chequebook (gateway)            │ │
 │  │ --x402          │  ├──────────────────┤  │                                 │ │
 │  │ --auto-pay      │  │ STAMPS COMMANDS  │  ├─────────────────────────────────┤ │
@@ -660,8 +694,9 @@ Use `swarm-prov-upload --help` for all options.
 │  │ • SHA256 hashing  │  │ • Pydantic      │  │ • Gateway API wrapper        │  │
 │  │ • Base64 encode   │  │   validation    │  │ • Full feature support       │  │
 │  │ • Base64 decode   │  │ • JSON          │  │ • x402 payment integration   │  │
-│  │ • Size calculation│  │   serialization │  │                              │  │
-│  │ • Error handling  │  │ • Metadata      │  │ swarm_client.py (local)      │  │
+│  │ • Size calculation│  │   serialization │  │ • Manifest/collection upload │  │
+│  │ • TAR archiving   │  │ • Metadata      │  │                              │  │
+│  │ • Dir hashing     │  │   wrapping      │  │ swarm_client.py (local)      │  │
 │  │                   │  │   wrapping      │  │ • Direct Bee API             │  │
 │  ├───────────────────┤  │                 │  │ • Local/self-hosted          │  │
 │  │ X402_CLIENT.PY    │  │                 │  │                              │  │
@@ -797,6 +832,7 @@ Use `swarm-prov-upload --help` for all options.
 │  • Content-addressable            • Comprehensive error handling              │
 │  • Censorship resistant           • Retry logic with backoff                  │
 │  • Persistent & redundant         • Environment configuration                 │
+│  • Collection/manifest upload     • JSON output for automation                │
 │                                                                                 │
 │  🏷️  PROVENANCE METADATA           🧪 TESTING & RELIABILITY                   │
 │  • Standard identifier support    • Mock-based test suite                     │
