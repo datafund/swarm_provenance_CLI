@@ -253,9 +253,9 @@ class DataStatusEnum(IntEnum):
 
 
 class ChainTransformation(BaseModel):
-    """A transformation recorded on-chain linking two data hashes."""
-    new_data_hash: str = Field(description="Hash of the transformed data")
+    """A transformation recorded on-chain."""
     description: str = Field(description="Description of the transformation")
+    new_data_hash: Optional[str] = Field(default=None, description="Hash of the transformed data (if available)")
 
 
 class ChainProvenanceRecord(BaseModel):
