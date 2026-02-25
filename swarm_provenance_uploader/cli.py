@@ -752,6 +752,190 @@ def download(
         raise typer.Exit(code=1)
 
 
+@app.command("upload-collection")
+def upload_collection(
+    directory: Annotated[str, typer.Argument(help="Path to the directory to upload as a collection.")],
+    provenance_standard: Annotated[Optional[str], typer.Option("--std", help="Identifier for the provenance standard used (optional).")] = None,
+    duration: Annotated[Optional[int], typer.Option("--duration", "-d", help="Stamp validity in hours (min 24, gateway only).")] = None,
+    size: Annotated[Optional[str], typer.Option("--size", help="Stamp size preset: 'small', 'medium', 'large' (gateway only).")] = None,
+    stamp_id: Annotated[Optional[str], typer.Option("--stamp-id", "-s", help="Existing stamp ID to reuse (skips stamp purchase).")] = None,
+    use_pool: Annotated[bool, typer.Option("--usePool", help="Acquire stamp from pool instead of purchasing (faster ~5s vs >1min).")] = False,
+    deferred: Annotated[bool, typer.Option("--deferred", help="Use deferred upload mode.")] = False,
+    redundancy: Annotated[bool, typer.Option("--redundancy", help="Enable redundancy for the upload.")] = False,
+    output_json: Annotated[bool, typer.Option("--json", help="Output result as JSON.")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False,
+):
+    """Upload a directory as a Swarm manifest (collection).
+
+    Creates a TAR archive from the directory and uploads it to the gateway
+    as a Swarm manifest. Files are accessible via path-based URLs:
+    bzz/<reference>/path/to/file
+
+    Gateway only — local Bee backend is not supported for manifest uploads.
+    """
+    import tempfile
+
+    # Gateway-only check
+    if _backend_config["backend"] != "gateway":
+        typer.secho(
+            "ERROR: 'upload-collection' requires gateway backend. Use --backend gateway",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # Validate directory
+    dir_path = Path(directory).resolve()
+    if not dir_path.is_dir():
+        typer.secho(f"ERROR: Not a directory: {directory}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    # Check non-empty
+    all_files = [f for f in dir_path.rglob("*") if f.is_file()]
+    if not all_files:
+        typer.secho(f"ERROR: Directory is empty: {directory}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    gateway_url = _backend_config["gateway_url"]
+
+    if verbose:
+        typer.echo("Verbose mode enabled.")
+        typer.echo(f"--> Collection Upload Config:")
+        typer.echo(f"    Directory: {dir_path}")
+        typer.echo(f"    Gateway URL: {gateway_url}")
+        typer.echo(f"    File count: {len(all_files)}")
+        if duration:
+            typer.echo(f"    Duration: {duration} hours")
+        if size:
+            typer.echo(f"    Size: {size}")
+        if deferred:
+            typer.echo(f"    Deferred: Yes")
+        if redundancy:
+            typer.echo(f"    Redundancy: Yes")
+    else:
+        typer.echo(f"Processing directory: {dir_path.name}/ ({len(all_files)} files)...")
+
+    # Scan directory: per-file hashes
+    try:
+        collection_hash, file_infos = file_utils.calculate_directory_hash_and_files(dir_path)
+    except ValueError as e:
+        typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    total_size = sum(f["size"] for f in file_infos)
+
+    if verbose:
+        typer.echo(f"    Collection hash: {collection_hash}")
+        typer.echo(f"    Total size: {total_size} bytes")
+        for fi in file_infos:
+            typer.echo(f"    File: {fi['path']} ({fi['size']} bytes) hash={fi['content_hash'][:16]}...")
+
+    # Create TAR in temp directory
+    try:
+        tmp_dir = tempfile.mkdtemp()
+        tar_path = Path(tmp_dir) / "collection.tar"
+        file_utils.create_tar_from_directory(dir_path, tar_path)
+        tar_size = tar_path.stat().st_size
+        if verbose:
+            typer.echo(f"    TAR archive created: {tar_size} bytes")
+    except (ValueError, OSError) as e:
+        typer.secho(f"ERROR: Failed creating TAR archive: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    # Acquire stamp
+    try:
+        gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
+
+        if stamp_id:
+            typer.echo(f"Using existing stamp: ...{stamp_id[-12:]}")
+        elif use_pool:
+            typer.echo("Acquiring stamp from pool...")
+            acquire_result = gw_client.acquire_stamp_from_pool(size=size, verbose=verbose)
+            stamp_id = acquire_result.batch_id
+            if verbose:
+                typer.echo(f"    Stamp ID: {stamp_id}")
+            else:
+                msg = f"Stamp acquired from pool (ID: ...{stamp_id[-12:]})"
+                if acquire_result.fallback_used:
+                    msg += " [fallback size]"
+                typer.echo(msg)
+        else:
+            typer.echo("Purchasing postage stamp...")
+            stamp_id = gw_client.purchase_stamp(
+                duration_hours=duration,
+                size=size,
+                verbose=verbose,
+            )
+            if verbose:
+                typer.echo(f"    Stamp ID: {stamp_id}")
+            else:
+                typer.echo(f"Postage stamp purchased (ID: ...{stamp_id[-12:]})")
+
+    except exceptions.PoolNotEnabledError:
+        typer.secho("ERROR: Stamp pool is not enabled on this gateway.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except exceptions.PaymentRequiredError as e:
+        typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
+        typer.echo("Use --x402 to enable x402 payments, or use a gateway without x402 mode.")
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"ERROR: Failed acquiring stamp: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    # Upload manifest
+    typer.echo("Uploading collection to Swarm...")
+    try:
+        result = gw_client.upload_manifest(
+            tar_path=str(tar_path),
+            stamp_id=stamp_id,
+            deferred=deferred,
+            include_timing=verbose,
+            redundancy=redundancy,
+            verbose=verbose,
+        )
+    except exceptions.PaymentRequiredError:
+        typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"ERROR: Failed uploading collection: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    finally:
+        # Cleanup temp TAR
+        try:
+            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+    # Output
+    if output_json:
+        from .models import CollectionFileInfo, CollectionProvenanceMetadata
+        metadata = CollectionProvenanceMetadata(
+            collection_hash=collection_hash,
+            files=[CollectionFileInfo(**fi) for fi in file_infos],
+            total_size=total_size,
+            file_count=len(file_infos),
+            stamp_id=stamp_id,
+            swarm_reference=result.reference,
+            provenance_standard=provenance_standard,
+        )
+        typer.echo(metadata.model_dump_json(indent=2))
+    else:
+        typer.secho(f"\nSUCCESS! Collection uploaded.", fg=typer.colors.GREEN, bold=True)
+        typer.echo("Swarm Manifest Reference:")
+        typer.secho(f"{result.reference}", fg=typer.colors.CYAN)
+        typer.echo(f"\nFiles ({len(file_infos)}):")
+        for fi in file_infos:
+            typer.echo(f"  {fi['path']} ({fi['size']} bytes)")
+        typer.echo(f"\nTotal size: {total_size} bytes")
+        typer.echo(f"Collection hash: {collection_hash}")
+        if provenance_standard:
+            typer.echo(f"Provenance standard: {provenance_standard}")
+        typer.echo(f"\nAccess files at:")
+        bzz_base = f"bzz/{result.reference}"
+        for fi in file_infos:
+            typer.echo(f"  {bzz_base}/{fi['path']}")
+
+
 # --- Stamps Subcommands ---
 
 def _format_ttl(seconds: int) -> str:

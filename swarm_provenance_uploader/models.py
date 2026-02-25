@@ -310,3 +310,38 @@ class ChainWalletInfo(BaseModel):
     balance_eth: str = Field(description="Balance formatted as ETH string")
     chain: str = Field(description="Chain name (e.g., 'base-sepolia')")
     contract_address: str = Field(description="DataProvenance contract address")
+
+
+# --- Collection / Manifest Upload Models ---
+
+class ManifestUploadTiming(BaseModel):
+    """Optional timing breakdown from manifest upload."""
+    stamp_check_ms: Optional[int] = Field(default=None, description="Time spent checking stamp in milliseconds")
+    upload_ms: Optional[int] = Field(default=None, description="Time spent uploading in milliseconds")
+    total_ms: Optional[int] = Field(default=None, description="Total request time in milliseconds")
+
+
+class ManifestUploadResponse(BaseModel):
+    """Response from uploading a TAR archive as a Swarm manifest."""
+    reference: str = Field(description="Swarm manifest reference hash")
+    file_count: Optional[int] = Field(default=None, description="Number of files in the manifest")
+    message: Optional[str] = Field(default=None, description="Status message")
+    timing: Optional[ManifestUploadTiming] = Field(default=None, description="Timing breakdown if requested")
+
+
+class CollectionFileInfo(BaseModel):
+    """Information about a single file within a collection."""
+    path: str = Field(description="Relative path of the file within the collection")
+    size: int = Field(description="File size in bytes")
+    content_hash: str = Field(description="SHA-256 hash of the file content")
+
+
+class CollectionProvenanceMetadata(BaseModel):
+    """Provenance metadata for a collection (directory) upload."""
+    collection_hash: str = Field(description="SHA-256 hash representing the entire collection")
+    files: List[CollectionFileInfo] = Field(description="List of files in the collection")
+    total_size: int = Field(description="Total size of all files in bytes")
+    file_count: int = Field(description="Number of files in the collection")
+    stamp_id: str = Field(description="Swarm postage stamp ID used for this upload")
+    swarm_reference: str = Field(description="Swarm manifest reference hash")
+    provenance_standard: Optional[str] = Field(default=None, description="Provenance standard identifier")
