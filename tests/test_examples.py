@@ -6,8 +6,12 @@ Unit tests verify:
 - demo workflow: full upload/download/verify cycle with mocked CLI
 - 02-audit-trail: multi-record upload with --std AUDIT-LOG-V1
 - 03-scientific-data: PROV-O standard with --duration 720
+- 04-batch-processing: stamp reuse across multiple uploads
 - 05-encrypted-data: encryption workflow with --enc AES-256-GCM
 - 06-market-memory: canonical hashing and prediction→observation linking
+- 07-stamp-management: full stamp lifecycle commands
+- 08-ci-cd-integration: CI/CD artifact archival with CI-ARTIFACT-V1
+- 09-verification: tamper detection and integrity verification
 
 Integration tests (marked @pytest.mark.gateway) run actual demos
 against a live gateway — skipped when gateway is unavailable.
@@ -30,8 +34,12 @@ EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
 DEMO_DIR = EXAMPLES_DIR / "01-basic-upload-download"
 AUDIT_DIR = EXAMPLES_DIR / "02-audit-trail"
 SCIENCE_DIR = EXAMPLES_DIR / "03-scientific-data"
+BATCH_DIR = EXAMPLES_DIR / "04-batch-processing"
 ENCRYPTED_DIR = EXAMPLES_DIR / "05-encrypted-data"
 MARKET_DIR = EXAMPLES_DIR / "06-market-memory"
+STAMP_DIR = EXAMPLES_DIR / "07-stamp-management"
+CICD_DIR = EXAMPLES_DIR / "08-ci-cd-integration"
+VERIFY_DIR = EXAMPLES_DIR / "09-verification"
 sys.path.insert(0, str(EXAMPLES_DIR))
 
 from common.sample_generator import generate_text_file, generate_json_file, generate_csv_file
@@ -243,6 +251,39 @@ def _upload_success_output(ref_hash=FAKE_HASH):
         f"Swarm Reference Hash:\n"
         f"{ref_hash}\n"
     )
+
+
+FAKE_STAMP_ID = "b" * 64
+
+
+def _verbose_upload_output(ref_hash=FAKE_HASH, stamp_id=FAKE_STAMP_ID):
+    """Upload output that includes verbose stamp ID line."""
+    return (
+        f"Processing file: sample.txt...\n"
+        f"Acquiring stamp from pool...\n"
+        f"  Stamp ID Received: {stamp_id}\n"
+        f"Uploading data to Swarm...\n"
+        f"\n"
+        f"SUCCESS! Upload complete.\n"
+        f"Swarm Reference Hash:\n"
+        f"{ref_hash}\n"
+    )
+
+
+def _stamps_list_output():
+    return "Stamps:\n  ID: abc123... | Depth: 17 | Amount: 10000000 | Usable: true\n"
+
+
+def _stamps_info_output(stamp_id=FAKE_STAMP_ID):
+    return f"Stamp ID: {stamp_id}\nDepth: 17\nAmount: 10000000\nUsable: true\nTTL: 86400\n"
+
+
+def _stamps_check_output():
+    return "Stamp health: OK\n"
+
+
+def _stamps_pool_status_output():
+    return "Pool enabled: true\nAvailable stamps: 5\n"
 
 
 class TestDemoShellScript:
@@ -1559,5 +1600,1186 @@ class TestMarketMemoryIntegration:
         )
         assert result.returncode == 0, (
             f"Market memory shell demo failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert "PASS" in result.stdout
+
+
+# =============================================================================
+# EXAMPLE 04: BATCH PROCESSING TESTS
+# =============================================================================
+
+
+class TestBatchProcessingShellScript:
+    """Tests for the 04-batch-processing bash demo script."""
+
+    def test_shell_script_is_valid_bash(self):
+        result = subprocess.run(
+            ["bash", "-n", str(BATCH_DIR / "demo.sh")],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"Bash syntax error: {result.stderr}"
+
+    def test_shell_script_is_executable(self):
+        assert os.access(str(BATCH_DIR / "demo.sh"), os.X_OK)
+
+    def test_shell_script_has_shebang(self):
+        content = (BATCH_DIR / "demo.sh").read_text()
+        assert content.startswith("#!/usr/bin/env bash")
+
+    def test_shell_script_uses_strict_mode(self):
+        content = (BATCH_DIR / "demo.sh").read_text()
+        assert "set -euo pipefail" in content
+
+    def test_shell_script_uses_size_medium(self):
+        content = (BATCH_DIR / "demo.sh").read_text()
+        assert "--size medium" in content
+
+    def test_shell_script_uses_stamp_id(self):
+        content = (BATCH_DIR / "demo.sh").read_text()
+        assert "--stamp-id" in content
+
+
+class TestBatchProcessingSampleFiles:
+    """Tests for batch processing sample JSON files."""
+
+    @pytest.mark.parametrize("filename", [
+        "sample_files/log_entry_001.json",
+        "sample_files/log_entry_002.json",
+        "sample_files/log_entry_003.json",
+    ])
+    def test_log_entry_exists(self, filename):
+        assert (BATCH_DIR / filename).exists()
+
+    @pytest.mark.parametrize("filename", [
+        "sample_files/log_entry_001.json",
+        "sample_files/log_entry_002.json",
+        "sample_files/log_entry_003.json",
+    ])
+    def test_log_entry_is_valid_json(self, filename):
+        data = json.loads((BATCH_DIR / filename).read_text())
+        assert "log_id" in data
+        assert "timestamp" in data
+        assert "level" in data
+        assert "service" in data
+        assert "event" in data
+
+    def test_log_entries_have_distinct_levels(self):
+        levels = set()
+        for filename in ["sample_files/log_entry_001.json", "sample_files/log_entry_002.json",
+                         "sample_files/log_entry_003.json"]:
+            data = json.loads((BATCH_DIR / filename).read_text())
+            levels.add(data["level"])
+        assert len(levels) == 3
+
+
+class TestBatchUploadHelper:
+    """Tests for batch_upload.py helper functions."""
+
+    def _load_module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "batch_upload", str(BATCH_DIR / "batch_upload.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_extract_stamp_id(self):
+        mod = self._load_module()
+        output = f"  Stamp ID Received: {FAKE_STAMP_ID}\nOther output\n"
+        assert mod.extract_stamp_id(output) == FAKE_STAMP_ID
+
+    def test_extract_stamp_id_empty(self):
+        mod = self._load_module()
+        assert mod.extract_stamp_id("No stamp here\n") == ""
+
+
+class TestBatchProcessingPythonDemo:
+    """Tests for 04-batch-processing/run_demo.py with mocked CLI."""
+
+    def _load_demo(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "batch_demo", str(BATCH_DIR / "run_demo.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_full_workflow(self, tmp_path, monkeypatch):
+        """Test uploading 3 files with stamp reuse, downloading and verifying."""
+        sample_dir = tmp_path / "sample_files"
+        sample_dir.mkdir()
+        for f in ["log_entry_001.json", "log_entry_002.json", "log_entry_003.json"]:
+            content = (BATCH_DIR / "sample_files" / f).read_bytes()
+            (sample_dir / f).write_bytes(content)
+
+        upload_count = {"n": 0}
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "upload":
+                upload_count["n"] += 1
+                cmd_str = " ".join(str(c) for c in cmd)
+                if "-v" in cmd_str:
+                    return _make_completed_process(
+                        stdout=_verbose_upload_output()
+                    )
+                return _make_completed_process(stdout=_upload_success_output())
+            elif subcmd == "download":
+                dl_dir = tmp_path / "downloads"
+                dl_dir.mkdir(exist_ok=True)
+                content = (sample_dir / "log_entry_001.json").read_bytes()
+                (dl_dir / f"{FAKE_HASH}.data").write_bytes(content)
+                return _make_completed_process(stdout="Downloaded.\n")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py", "--files",
+            "sample_files/log_entry_001.json",
+            "sample_files/log_entry_002.json",
+            "sample_files/log_entry_003.json",
+        ])
+        mod.main()
+        assert upload_count["n"] == 3
+
+    def test_pool_fallback(self, tmp_path, monkeypatch):
+        """Test fallback when pool is unavailable."""
+        sample_dir = tmp_path / "sample_files"
+        sample_dir.mkdir()
+        content = (BATCH_DIR / "sample_files" / "log_entry_001.json").read_bytes()
+        (sample_dir / "log_entry_001.json").write_bytes(content)
+
+        upload_calls = {"n": 0}
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "upload":
+                upload_calls["n"] += 1
+                cmd_str = " ".join(str(c) for c in cmd)
+                if "--usePool" in cmd_str:
+                    return _make_completed_process(returncode=1, stderr="No pool")
+                return _make_completed_process(stdout=_verbose_upload_output())
+            elif subcmd == "download":
+                dl_dir = tmp_path / "downloads"
+                dl_dir.mkdir(exist_ok=True)
+                (dl_dir / f"{FAKE_HASH}.data").write_bytes(content)
+                return _make_completed_process(stdout="Downloaded.\n")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py", "--files", "sample_files/log_entry_001.json"
+        ])
+        mod.main()
+        assert upload_calls["n"] == 2
+
+    def test_upload_failure_exits(self, tmp_path, monkeypatch):
+        """Test that total upload failure exits with code 1."""
+        sample_dir = tmp_path / "sample_files"
+        sample_dir.mkdir()
+        (sample_dir / "log_entry_001.json").write_text('{"test": true}')
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "upload":
+                return _make_completed_process(returncode=1, stderr="Failed")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py", "--files", "sample_files/log_entry_001.json"
+        ])
+        with pytest.raises(SystemExit) as exc_info:
+            mod.main()
+        assert exc_info.value.code == 1
+
+    def test_hash_mismatch_exits(self, tmp_path, monkeypatch):
+        """Test that hash mismatch on download exits with code 1."""
+        sample_dir = tmp_path / "sample_files"
+        sample_dir.mkdir()
+        (sample_dir / "log_entry_001.json").write_bytes(b"original content")
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "upload":
+                return _make_completed_process(stdout=_verbose_upload_output())
+            elif subcmd == "download":
+                dl_dir = tmp_path / "downloads"
+                dl_dir.mkdir(exist_ok=True)
+                (dl_dir / f"{FAKE_HASH}.data").write_bytes(b"different content")
+                return _make_completed_process(stdout="Downloaded.\n")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py", "--files", "sample_files/log_entry_001.json"
+        ])
+        with pytest.raises(SystemExit) as exc_info:
+            mod.main()
+        assert exc_info.value.code == 1
+
+    def test_missing_file_exits(self, tmp_path, monkeypatch):
+        """Test exit when input file doesn't exist."""
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py", "--files", "sample_files/nonexistent.json"
+        ])
+        with pytest.raises(SystemExit) as exc_info:
+            mod.main()
+        assert exc_info.value.code == 1
+
+
+# =============================================================================
+# EXAMPLE 07: STAMP MANAGEMENT TESTS
+# =============================================================================
+
+
+class TestStampManagementShellScript:
+    """Tests for the 07-stamp-management bash demo script."""
+
+    def test_shell_script_is_valid_bash(self):
+        result = subprocess.run(
+            ["bash", "-n", str(STAMP_DIR / "demo.sh")],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"Bash syntax error: {result.stderr}"
+
+    def test_shell_script_is_executable(self):
+        assert os.access(str(STAMP_DIR / "demo.sh"), os.X_OK)
+
+    def test_shell_script_has_shebang(self):
+        content = (STAMP_DIR / "demo.sh").read_text()
+        assert content.startswith("#!/usr/bin/env bash")
+
+    def test_shell_script_uses_strict_mode(self):
+        content = (STAMP_DIR / "demo.sh").read_text()
+        assert "set -euo pipefail" in content
+
+    def test_shell_script_uses_stamps_commands(self):
+        content = (STAMP_DIR / "demo.sh").read_text()
+        assert "stamps pool-status" in content
+        assert "stamps list" in content
+        assert "stamps info" in content
+        assert "stamps check" in content
+
+
+class TestStampManagementSampleFiles:
+    """Tests for stamp management sample files."""
+
+    def test_sample_data_exists(self):
+        assert (STAMP_DIR / "sample_data.txt").exists()
+
+    def test_sample_data_has_content(self):
+        content = (STAMP_DIR / "sample_data.txt").read_text()
+        assert len(content) > 0
+        assert "Stamp" in content
+
+
+class TestStampLifecycleHelper:
+    """Tests for stamp_lifecycle.py helper functions."""
+
+    def _load_module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "stamp_lifecycle", str(STAMP_DIR / "stamp_lifecycle.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_extract_stamp_id(self):
+        mod = self._load_module()
+        output = f"  Stamp ID Received: {FAKE_STAMP_ID}\nOther output\n"
+        assert mod.extract_stamp_id(output) == FAKE_STAMP_ID
+
+    def test_extract_stamp_id_empty(self):
+        mod = self._load_module()
+        assert mod.extract_stamp_id("No stamp here\n") == ""
+
+
+class TestStampManagementPythonDemo:
+    """Tests for 07-stamp-management/run_demo.py with mocked CLI."""
+
+    def _load_demo(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "stamp_demo", str(STAMP_DIR / "run_demo.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_full_workflow(self, tmp_path, monkeypatch):
+        """Test upload, stamps list, info, check lifecycle."""
+        (tmp_path / "sample_data.txt").write_bytes(
+            (STAMP_DIR / "sample_data.txt").read_bytes()
+        )
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "upload":
+                return _make_completed_process(
+                    stdout=_verbose_upload_output()
+                )
+            elif subcmd == "stamps":
+                cmd_str = " ".join(str(c) for c in cmd)
+                if "pool-status" in cmd_str:
+                    return _make_completed_process(stdout=_stamps_pool_status_output())
+                elif "list" in cmd_str:
+                    return _make_completed_process(stdout=_stamps_list_output())
+                elif "info" in cmd_str:
+                    return _make_completed_process(stdout=_stamps_info_output())
+                elif "check" in cmd_str:
+                    return _make_completed_process(stdout=_stamps_check_output())
+                return _make_completed_process(stdout="OK\n")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py", "--file", "sample_data.txt"
+        ])
+        mod.main()
+
+    def test_pool_fallback(self, tmp_path, monkeypatch):
+        """Test fallback when pool is unavailable."""
+        (tmp_path / "sample_data.txt").write_bytes(
+            (STAMP_DIR / "sample_data.txt").read_bytes()
+        )
+
+        upload_calls = {"n": 0}
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "upload":
+                upload_calls["n"] += 1
+                cmd_str = " ".join(str(c) for c in cmd)
+                if "--usePool" in cmd_str:
+                    return _make_completed_process(returncode=1, stderr="No pool")
+                return _make_completed_process(stdout=_verbose_upload_output())
+            elif subcmd == "stamps":
+                return _make_completed_process(stdout="OK\n")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py", "--file", "sample_data.txt"
+        ])
+        mod.main()
+        assert upload_calls["n"] == 2
+
+    def test_upload_failure_exits(self, tmp_path, monkeypatch):
+        """Test exit when upload fails."""
+        (tmp_path / "sample_data.txt").write_text("test data")
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "upload":
+                return _make_completed_process(returncode=1, stderr="Failed")
+            elif subcmd == "stamps":
+                return _make_completed_process(stdout="OK\n")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py", "--file", "sample_data.txt"
+        ])
+        with pytest.raises(SystemExit) as exc_info:
+            mod.main()
+        assert exc_info.value.code == 1
+
+    def test_missing_file_exits(self, tmp_path, monkeypatch):
+        """Test exit when file doesn't exist."""
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "stamps":
+                return _make_completed_process(stdout="OK\n")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py", "--file", "nonexistent.txt"
+        ])
+        with pytest.raises(SystemExit) as exc_info:
+            mod.main()
+        assert exc_info.value.code == 1
+
+    def test_no_stamp_id_graceful(self, tmp_path, monkeypatch):
+        """Test graceful handling when stamp ID cannot be extracted."""
+        (tmp_path / "sample_data.txt").write_text("test data")
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "upload":
+                # No stamp ID in output
+                return _make_completed_process(stdout=_upload_success_output())
+            elif subcmd == "stamps":
+                return _make_completed_process(stdout="OK\n")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py", "--file", "sample_data.txt"
+        ])
+        # Should not raise — gracefully skips lifecycle steps
+        mod.main()
+
+
+# =============================================================================
+# EXAMPLE 08: CI/CD INTEGRATION TESTS
+# =============================================================================
+
+
+class TestCiCdShellScript:
+    """Tests for the 08-ci-cd-integration bash demo script."""
+
+    def test_shell_script_is_valid_bash(self):
+        result = subprocess.run(
+            ["bash", "-n", str(CICD_DIR / "demo.sh")],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"Bash syntax error: {result.stderr}"
+
+    def test_shell_script_is_executable(self):
+        assert os.access(str(CICD_DIR / "demo.sh"), os.X_OK)
+
+    def test_shell_script_has_shebang(self):
+        content = (CICD_DIR / "demo.sh").read_text()
+        assert content.startswith("#!/usr/bin/env bash")
+
+    def test_shell_script_uses_strict_mode(self):
+        content = (CICD_DIR / "demo.sh").read_text()
+        assert "set -euo pipefail" in content
+
+    def test_shell_script_uses_ci_artifact_std(self):
+        content = (CICD_DIR / "demo.sh").read_text()
+        assert '--std "CI-ARTIFACT-V1"' in content
+
+
+class TestCiCdSampleFiles:
+    """Tests for CI/CD sample artifacts."""
+
+    def test_build_info_exists(self):
+        assert (CICD_DIR / "sample_artifacts" / "build_info.json").exists()
+
+    def test_build_info_is_valid_json(self):
+        data = json.loads((CICD_DIR / "sample_artifacts" / "build_info.json").read_text())
+        assert "project" in data
+        assert "version" in data
+        assert "build_number" in data
+        assert "git_commit" in data
+
+    def test_release_notes_exists(self):
+        assert (CICD_DIR / "sample_artifacts" / "release_notes.txt").exists()
+
+    def test_release_notes_has_content(self):
+        content = (CICD_DIR / "sample_artifacts" / "release_notes.txt").read_text()
+        assert len(content) > 0
+        assert "Release" in content
+
+
+class TestCiCdYamlConfigs:
+    """Tests for CI/CD YAML configuration files."""
+
+    def test_github_action_exists(self):
+        assert (CICD_DIR / "github-action.yml").exists()
+
+    def test_github_action_has_swarm_commands(self):
+        content = (CICD_DIR / "github-action.yml").read_text()
+        assert "swarm-prov-upload" in content
+        assert "CI-ARTIFACT-V1" in content
+
+    def test_gitlab_ci_exists(self):
+        assert (CICD_DIR / "gitlab-ci.yml").exists()
+
+    def test_gitlab_ci_has_swarm_commands(self):
+        content = (CICD_DIR / "gitlab-ci.yml").read_text()
+        assert "swarm-prov-upload" in content
+        assert "CI-ARTIFACT-V1" in content
+
+
+class TestCiCdPythonDemo:
+    """Tests for 08-ci-cd-integration/run_demo.py with mocked CLI."""
+
+    def _load_demo(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "cicd_demo", str(CICD_DIR / "run_demo.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_full_workflow(self, tmp_path, monkeypatch):
+        """Test uploading 2 artifacts, downloading and verifying one."""
+        artifacts_dir = tmp_path / "sample_artifacts"
+        artifacts_dir.mkdir()
+        for f in ["build_info.json", "release_notes.txt"]:
+            content = (CICD_DIR / "sample_artifacts" / f).read_bytes()
+            (artifacts_dir / f).write_bytes(content)
+
+        upload_count = {"n": 0}
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "upload":
+                upload_count["n"] += 1
+                cmd_str = " ".join(str(c) for c in cmd)
+                assert "CI-ARTIFACT-V1" in cmd_str
+                return _make_completed_process(stdout=_upload_success_output())
+            elif subcmd == "download":
+                dl_dir = tmp_path / "downloads"
+                dl_dir.mkdir(exist_ok=True)
+                content = (artifacts_dir / "build_info.json").read_bytes()
+                (dl_dir / f"{FAKE_HASH}.data").write_bytes(content)
+                return _make_completed_process(stdout="Downloaded.\n")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py", "--artifacts",
+            "sample_artifacts/build_info.json",
+            "sample_artifacts/release_notes.txt",
+        ])
+        mod.main()
+        assert upload_count["n"] == 2
+
+    def test_pool_fallback(self, tmp_path, monkeypatch):
+        """Test fallback when pool is unavailable."""
+        artifacts_dir = tmp_path / "sample_artifacts"
+        artifacts_dir.mkdir()
+        content = (CICD_DIR / "sample_artifacts" / "build_info.json").read_bytes()
+        (artifacts_dir / "build_info.json").write_bytes(content)
+
+        upload_calls = {"n": 0}
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "upload":
+                upload_calls["n"] += 1
+                cmd_str = " ".join(str(c) for c in cmd)
+                if "--usePool" in cmd_str:
+                    return _make_completed_process(returncode=1, stderr="No pool")
+                return _make_completed_process(stdout=_upload_success_output())
+            elif subcmd == "download":
+                dl_dir = tmp_path / "downloads"
+                dl_dir.mkdir(exist_ok=True)
+                (dl_dir / f"{FAKE_HASH}.data").write_bytes(content)
+                return _make_completed_process(stdout="Downloaded.\n")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py", "--artifacts", "sample_artifacts/build_info.json"
+        ])
+        mod.main()
+        assert upload_calls["n"] == 2
+
+    def test_upload_failure_exits(self, tmp_path, monkeypatch):
+        """Test that total upload failure exits with code 1."""
+        artifacts_dir = tmp_path / "sample_artifacts"
+        artifacts_dir.mkdir()
+        (artifacts_dir / "build_info.json").write_text('{"test": true}')
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "upload":
+                return _make_completed_process(returncode=1, stderr="Failed")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py", "--artifacts", "sample_artifacts/build_info.json"
+        ])
+        with pytest.raises(SystemExit) as exc_info:
+            mod.main()
+        assert exc_info.value.code == 1
+
+    def test_missing_file_exits(self, tmp_path, monkeypatch):
+        """Test exit when artifact file doesn't exist."""
+        mod = self._load_demo()
+        mod.SCRIPT_DIR = tmp_path
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            return _make_completed_process()
+
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py", "--artifacts", "sample_artifacts/nonexistent.json"
+        ])
+        with pytest.raises(SystemExit) as exc_info:
+            mod.main()
+        assert exc_info.value.code == 1
+
+
+# =============================================================================
+# EXAMPLE 09: VERIFICATION & INTEGRITY TESTS
+# =============================================================================
+
+
+class TestVerificationShellScript:
+    """Tests for the 09-verification bash demo script."""
+
+    def test_shell_script_is_valid_bash(self):
+        result = subprocess.run(
+            ["bash", "-n", str(VERIFY_DIR / "demo.sh")],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"Bash syntax error: {result.stderr}"
+
+    def test_shell_script_is_executable(self):
+        assert os.access(str(VERIFY_DIR / "demo.sh"), os.X_OK)
+
+    def test_shell_script_has_shebang(self):
+        content = (VERIFY_DIR / "demo.sh").read_text()
+        assert content.startswith("#!/usr/bin/env bash")
+
+    def test_shell_script_uses_strict_mode(self):
+        content = (VERIFY_DIR / "demo.sh").read_text()
+        assert "set -euo pipefail" in content
+
+    def test_shell_script_uses_verify_flag(self):
+        content = (VERIFY_DIR / "demo.sh").read_text()
+        assert "--verify" in content
+
+
+class TestVerificationSampleFiles:
+    """Tests for verification sample files."""
+
+    def test_original_exists(self):
+        assert (VERIFY_DIR / "sample_document.txt").exists()
+
+    def test_tampered_exists(self):
+        assert (VERIFY_DIR / "sample_document_tampered.txt").exists()
+
+    def test_original_has_content(self):
+        content = (VERIFY_DIR / "sample_document.txt").read_text()
+        assert len(content) > 0
+        assert "AGREEMENT" in content
+
+    def test_files_are_different(self):
+        original = (VERIFY_DIR / "sample_document.txt").read_bytes()
+        tampered = (VERIFY_DIR / "sample_document_tampered.txt").read_bytes()
+        assert original != tampered
+
+    def test_files_have_different_hashes(self):
+        orig_hash = hashlib.sha256(
+            (VERIFY_DIR / "sample_document.txt").read_bytes()
+        ).hexdigest()
+        tamp_hash = hashlib.sha256(
+            (VERIFY_DIR / "sample_document_tampered.txt").read_bytes()
+        ).hexdigest()
+        assert orig_hash != tamp_hash
+
+
+class TestTamperDetectionHelper:
+    """Tests for tamper_detection.py helper."""
+
+    def _load_module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "tamper_detection", str(VERIFY_DIR / "tamper_detection.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_find_differences(self):
+        mod = self._load_module()
+        diffs = mod.find_differences(
+            str(VERIFY_DIR / "sample_document.txt"),
+            str(VERIFY_DIR / "sample_document_tampered.txt"),
+        )
+        assert len(diffs) > 0
+        # The tampered file changes "24 months" to "36 months"
+        changed_text = " ".join(d["tampered"] for d in diffs)
+        assert "36" in changed_text
+
+    def test_identical_files_no_diffs(self, tmp_path):
+        mod = self._load_module()
+        f1 = tmp_path / "same1.txt"
+        f2 = tmp_path / "same2.txt"
+        f1.write_text("identical\ncontent\n")
+        f2.write_text("identical\ncontent\n")
+        diffs = mod.find_differences(str(f1), str(f2))
+        assert len(diffs) == 0
+
+
+class TestIntegrityCheckerHelper:
+    """Tests for integrity_checker.py helper."""
+
+    def _load_module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "integrity_checker", str(VERIFY_DIR / "integrity_checker.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_verify_reference_match(self, tmp_path, monkeypatch):
+        """Test successful verification with matching hash."""
+        mod = self._load_module()
+        original_content = b"test document content"
+        expected_hash = hashlib.sha256(original_content).hexdigest()
+        output_dir = str(tmp_path / "verify_dl")
+
+        def mock_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "download":
+                dl_dir = tmp_path / "verify_dl"
+                dl_dir.mkdir(exist_ok=True)
+                (dl_dir / f"{FAKE_HASH}.data").write_bytes(original_content)
+                return _make_completed_process(stdout="Downloaded.\n")
+            return _make_completed_process()
+
+        monkeypatch.setattr(mod.subprocess, "run", mock_run)
+        report = mod.verify_reference(FAKE_HASH, expected_hash, output_dir)
+        assert report["status"] == "PASS"
+        assert report["match"] is True
+
+    def test_verify_reference_mismatch(self, tmp_path, monkeypatch):
+        """Test failed verification with mismatched hash."""
+        mod = self._load_module()
+        output_dir = str(tmp_path / "verify_dl")
+
+        def mock_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "download":
+                dl_dir = tmp_path / "verify_dl"
+                dl_dir.mkdir(exist_ok=True)
+                (dl_dir / f"{FAKE_HASH}.data").write_bytes(b"different content")
+                return _make_completed_process(stdout="Downloaded.\n")
+            return _make_completed_process()
+
+        monkeypatch.setattr(mod.subprocess, "run", mock_run)
+        report = mod.verify_reference(FAKE_HASH, "0" * 64, output_dir)
+        assert report["status"] == "FAIL"
+        assert report["match"] is False
+
+
+class TestVerificationPythonDemo:
+    """Tests for 09-verification/run_demo.py with mocked CLI."""
+
+    def _load_demo(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "verify_demo", str(VERIFY_DIR / "run_demo.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_full_workflow(self, tmp_path, monkeypatch):
+        """Test upload, verify, tamper detect, --verify workflow."""
+        original_content = (VERIFY_DIR / "sample_document.txt").read_bytes()
+        (tmp_path / "sample_document.txt").write_bytes(original_content)
+        (tmp_path / "sample_document_tampered.txt").write_bytes(
+            (VERIFY_DIR / "sample_document_tampered.txt").read_bytes()
+        )
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "upload":
+                return _make_completed_process(stdout=_upload_success_output())
+            elif subcmd == "download":
+                dl_dir = tmp_path / "downloads"
+                dl_dir.mkdir(exist_ok=True)
+                # Clear existing files
+                for f in dl_dir.iterdir():
+                    f.unlink()
+                (dl_dir / f"{FAKE_HASH}.data").write_bytes(original_content)
+                return _make_completed_process(stdout="Downloaded.\n")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py",
+            "--file", "sample_document.txt",
+            "--tampered", "sample_document_tampered.txt",
+        ])
+        mod.main()
+
+    def test_pool_fallback(self, tmp_path, monkeypatch):
+        """Test fallback when pool is unavailable."""
+        original_content = (VERIFY_DIR / "sample_document.txt").read_bytes()
+        (tmp_path / "sample_document.txt").write_bytes(original_content)
+        (tmp_path / "sample_document_tampered.txt").write_bytes(
+            (VERIFY_DIR / "sample_document_tampered.txt").read_bytes()
+        )
+
+        upload_calls = {"n": 0}
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "upload":
+                upload_calls["n"] += 1
+                cmd_str = " ".join(str(c) for c in cmd)
+                if "--usePool" in cmd_str:
+                    return _make_completed_process(returncode=1, stderr="No pool")
+                return _make_completed_process(stdout=_upload_success_output())
+            elif subcmd == "download":
+                dl_dir = tmp_path / "downloads"
+                dl_dir.mkdir(exist_ok=True)
+                for f in dl_dir.iterdir():
+                    f.unlink()
+                (dl_dir / f"{FAKE_HASH}.data").write_bytes(original_content)
+                return _make_completed_process(stdout="Downloaded.\n")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py",
+            "--file", "sample_document.txt",
+            "--tampered", "sample_document_tampered.txt",
+        ])
+        mod.main()
+        assert upload_calls["n"] == 2
+
+    def test_upload_failure_exits(self, tmp_path, monkeypatch):
+        """Test exit when upload fails."""
+        (tmp_path / "sample_document.txt").write_text("test data")
+        (tmp_path / "sample_document_tampered.txt").write_text("tampered")
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "upload":
+                return _make_completed_process(returncode=1, stderr="Failed")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py",
+            "--file", "sample_document.txt",
+            "--tampered", "sample_document_tampered.txt",
+        ])
+        with pytest.raises(SystemExit) as exc_info:
+            mod.main()
+        assert exc_info.value.code == 1
+
+    def test_hash_mismatch_exits(self, tmp_path, monkeypatch):
+        """Test exit when downloaded file doesn't match original."""
+        (tmp_path / "sample_document.txt").write_bytes(b"original content")
+        (tmp_path / "sample_document_tampered.txt").write_bytes(b"tampered content")
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "upload":
+                return _make_completed_process(stdout=_upload_success_output())
+            elif subcmd == "download":
+                dl_dir = tmp_path / "downloads"
+                dl_dir.mkdir(exist_ok=True)
+                for f in dl_dir.iterdir():
+                    f.unlink()
+                (dl_dir / f"{FAKE_HASH}.data").write_bytes(b"corrupted data")
+                return _make_completed_process(stdout="Downloaded.\n")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py",
+            "--file", "sample_document.txt",
+            "--tampered", "sample_document_tampered.txt",
+        ])
+        with pytest.raises(SystemExit) as exc_info:
+            mod.main()
+        assert exc_info.value.code == 1
+
+    def test_missing_file_exits(self, tmp_path, monkeypatch):
+        """Test exit when original file doesn't exist."""
+        mod = self._load_demo()
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py",
+            "--file", "nonexistent.txt",
+            "--tampered", "also_missing.txt",
+        ])
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            return _make_completed_process()
+
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        with pytest.raises(SystemExit) as exc_info:
+            mod.main()
+        assert exc_info.value.code == 1
+
+    def test_tampered_identical_fails(self, tmp_path, monkeypatch):
+        """Test that identical original and tampered files cause exit."""
+        content = b"same content for both"
+        (tmp_path / "sample_document.txt").write_bytes(content)
+        (tmp_path / "sample_document_tampered.txt").write_bytes(content)
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "upload":
+                return _make_completed_process(stdout=_upload_success_output())
+            elif subcmd == "download":
+                dl_dir = tmp_path / "downloads"
+                dl_dir.mkdir(exist_ok=True)
+                for f in dl_dir.iterdir():
+                    f.unlink()
+                (dl_dir / f"{FAKE_HASH}.data").write_bytes(content)
+                return _make_completed_process(stdout="Downloaded.\n")
+            return _make_completed_process()
+
+        mod = self._load_demo()
+        monkeypatch.setattr(mod.subprocess, "run", mock_subprocess_run)
+        mod.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", [
+            "run_demo.py",
+            "--file", "sample_document.txt",
+            "--tampered", "sample_document_tampered.txt",
+        ])
+        with pytest.raises(SystemExit) as exc_info:
+            mod.main()
+        assert exc_info.value.code == 1
+
+
+# =============================================================================
+# INTEGRATION TESTS — new examples
+# =============================================================================
+
+
+@pytest.mark.integration
+@pytest.mark.gateway
+class TestBatchProcessingIntegration:
+    """Integration tests for 04-batch-processing demos."""
+
+    @skip_if_no_gateway_upload
+    def test_python_demo_e2e(self):
+        cli_path = _venv_cli_path()
+        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        env = os.environ.copy()
+        env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
+
+        result = subprocess.run(
+            [venv_python, str(BATCH_DIR / "run_demo.py")],
+            capture_output=True, text=True,
+            timeout=300,
+            env=env,
+        )
+        assert result.returncode == 0, (
+            f"Batch processing demo failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert "PASS" in result.stdout
+
+    @skip_if_no_gateway_upload
+    def test_shell_demo_e2e(self):
+        cli_path = _venv_cli_path()
+        env = os.environ.copy()
+        env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
+
+        result = subprocess.run(
+            ["bash", str(BATCH_DIR / "demo.sh")],
+            capture_output=True, text=True,
+            timeout=300,
+            env=env,
+        )
+        assert result.returncode == 0, (
+            f"Batch processing shell demo failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert "PASS" in result.stdout
+
+
+@pytest.mark.integration
+@pytest.mark.gateway
+class TestStampManagementIntegration:
+    """Integration tests for 07-stamp-management demos."""
+
+    @skip_if_no_gateway_upload
+    def test_python_demo_e2e(self):
+        cli_path = _venv_cli_path()
+        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        env = os.environ.copy()
+        env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
+
+        result = subprocess.run(
+            [venv_python, str(STAMP_DIR / "run_demo.py")],
+            capture_output=True, text=True,
+            timeout=300,
+            env=env,
+        )
+        assert result.returncode == 0, (
+            f"Stamp management demo failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert "PASS" in result.stdout
+
+    @skip_if_no_gateway_upload
+    def test_shell_demo_e2e(self):
+        cli_path = _venv_cli_path()
+        env = os.environ.copy()
+        env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
+
+        result = subprocess.run(
+            ["bash", str(STAMP_DIR / "demo.sh")],
+            capture_output=True, text=True,
+            timeout=300,
+            env=env,
+        )
+        assert result.returncode == 0, (
+            f"Stamp management shell demo failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert "PASS" in result.stdout
+
+
+@pytest.mark.integration
+@pytest.mark.gateway
+class TestCiCdIntegration:
+    """Integration tests for 08-ci-cd-integration demos."""
+
+    @skip_if_no_gateway_upload
+    def test_python_demo_e2e(self):
+        cli_path = _venv_cli_path()
+        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        env = os.environ.copy()
+        env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
+
+        result = subprocess.run(
+            [venv_python, str(CICD_DIR / "run_demo.py")],
+            capture_output=True, text=True,
+            timeout=300,
+            env=env,
+        )
+        assert result.returncode == 0, (
+            f"CI/CD demo failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert "PASS" in result.stdout
+
+    @skip_if_no_gateway_upload
+    def test_shell_demo_e2e(self):
+        cli_path = _venv_cli_path()
+        env = os.environ.copy()
+        env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
+
+        result = subprocess.run(
+            ["bash", str(CICD_DIR / "demo.sh")],
+            capture_output=True, text=True,
+            timeout=300,
+            env=env,
+        )
+        assert result.returncode == 0, (
+            f"CI/CD shell demo failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert "PASS" in result.stdout
+
+
+@pytest.mark.integration
+@pytest.mark.gateway
+class TestVerificationIntegration:
+    """Integration tests for 09-verification demos."""
+
+    @skip_if_no_gateway_upload
+    def test_python_demo_e2e(self):
+        cli_path = _venv_cli_path()
+        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        env = os.environ.copy()
+        env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
+
+        result = subprocess.run(
+            [venv_python, str(VERIFY_DIR / "run_demo.py")],
+            capture_output=True, text=True,
+            timeout=300,
+            env=env,
+        )
+        assert result.returncode == 0, (
+            f"Verification demo failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert "PASS" in result.stdout
+
+    @skip_if_no_gateway_upload
+    def test_shell_demo_e2e(self):
+        cli_path = _venv_cli_path()
+        env = os.environ.copy()
+        env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
+
+        result = subprocess.run(
+            ["bash", str(VERIFY_DIR / "demo.sh")],
+            capture_output=True, text=True,
+            timeout=300,
+            env=env,
+        )
+        assert result.returncode == 0, (
+            f"Verification shell demo failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
         assert "PASS" in result.stdout

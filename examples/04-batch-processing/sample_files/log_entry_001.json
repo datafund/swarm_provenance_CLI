@@ -1,0 +1,18 @@
+{
+  "log_id": "LOG-2024-001",
+  "timestamp": "2024-01-15T09:30:00Z",
+  "level": "INFO",
+  "service": "auth-gateway",
+  "event": "user_login",
+  "details": {
+    "user_id": "usr_7a3b2c",
+    "ip_address": "192.168.1.42",
+    "method": "oauth2",
+    "success": true
+  },
+  "metadata": {
+    "region": "eu-west-1",
+    "version": "2.4.1",
+    "correlation_id": "corr-abc123"
+  }
+}

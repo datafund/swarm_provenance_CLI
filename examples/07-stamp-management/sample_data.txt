@@ -1,0 +1,20 @@
+Stamp Management Demo - Sample Data
+=====================================
+
+This file is used to demonstrate postage stamp lifecycle management.
+
+When uploaded to Swarm, a postage stamp is purchased (or acquired from the pool)
+to pay for storage. This stamp has properties like:
+
+- Batch ID: Unique identifier for the stamp
+- Depth: Determines the number of chunks covered
+- Amount: BZZ tokens locked for storage
+- Utilization: How much of the stamp capacity is used
+- TTL: Time-to-live before the stamp expires
+
+Use the stamps subcommands to inspect and manage your stamps:
+  stamps list       - Show all stamps
+  stamps info <id>  - Detailed stamp information
+  stamps check <id> - Health check a stamp
+  stamps extend <id> --amount <n> - Top up a stamp
+  stamps pool-status - Check the stamp pool

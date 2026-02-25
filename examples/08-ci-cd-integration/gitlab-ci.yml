@@ -1,0 +1,42 @@
+# Sample GitLab CI/CD configuration for archiving build artifacts to Swarm
+#
+# This pipeline uploads build artifacts to the Swarm network after a
+# successful build, creating an immutable provenance record.
+#
+# Required CI/CD variables:
+#   PROVENANCE_GATEWAY_URL - Gateway URL (optional, uses default if not set)
+#
+# Usage:
+#   Copy relevant sections to your .gitlab-ci.yml file.
+
+stages:
+  - build
+  - archive
+
+build:
+  stage: build
+  image: python:3.11
+  script:
+    - echo "Building project..."
+    # Replace with your actual build commands
+    - mkdir -p dist
+    - echo "{\"version\":\"${CI_COMMIT_SHA}\"}" > dist/build_info.json
+  artifacts:
+    paths:
+      - dist/
+
+archive-to-swarm:
+  stage: archive
+  image: python:3.11
+  needs:
+    - build
+  script:
+    - pip install swarm-provenance-uploader
+    - swarm-prov-upload health
+    - swarm-prov-upload upload
+        --file dist/build_info.json
+        --std "CI-ARTIFACT-V1"
+        --usePool
+  only:
+    - main
+    - tags

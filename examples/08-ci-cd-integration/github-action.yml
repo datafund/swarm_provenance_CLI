@@ -1,0 +1,58 @@
+# Sample GitHub Actions workflow for archiving build artifacts to Swarm
+#
+# This workflow uploads build artifacts to the Swarm network after a
+# successful build, creating an immutable provenance record.
+#
+# Required secrets:
+#   PROVENANCE_GATEWAY_URL - Gateway URL (optional, uses default if not set)
+#
+# Usage:
+#   Copy this file to .github/workflows/swarm-archive.yml in your repository.
+
+name: Archive Build Artifacts to Swarm
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+jobs:
+  build-and-archive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Swarm Provenance CLI
+        run: pip install swarm-provenance-uploader
+
+      - name: Build project
+        run: |
+          echo "Building project..."
+          # Replace with your actual build commands
+          mkdir -p dist
+          echo '{"version": "${{ github.sha }}"}' > dist/build_info.json
+
+      - name: Check gateway health
+        run: swarm-prov-upload health
+
+      - name: Upload build artifacts to Swarm
+        run: |
+          swarm-prov-upload upload \
+            --file dist/build_info.json \
+            --std "CI-ARTIFACT-V1" \
+            --usePool
+        env:
+          PROVENANCE_GATEWAY_URL: ${{ secrets.PROVENANCE_GATEWAY_URL }}
+
+      - name: Save Swarm reference
+        run: |
+          echo "Artifact archived to Swarm network"
+          echo "Reference can be used to retrieve the exact build artifact"

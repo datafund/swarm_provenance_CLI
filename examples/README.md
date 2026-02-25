@@ -26,8 +26,12 @@ Real-world usage examples for the Swarm Provenance CLI toolkit.
 | [01](01-basic-upload-download/) | **Basic Upload/Download** | Upload a file, download it back, verify integrity |
 | [02](02-audit-trail/) | **Audit Trail** | Immutable compliance records with `--std "AUDIT-LOG-V1"` |
 | [03](03-scientific-data/) | **Scientific Data** | Research archival with `--std "PROV-O"` and `--duration 720` |
+| [04](04-batch-processing/) | **Batch Processing** | Stamp reuse across multiple uploads with `--stamp-id` |
 | [05](05-encrypted-data/) | **Encrypted Data** | Pre-encrypt, upload with `--enc "AES-256-GCM"`, decrypt |
 | [06](06-market-memory/) | **Market Memory** | Canonical hashing, prediction→outcome linking |
+| [07](07-stamp-management/) | **Stamp Management** | Full stamp lifecycle: list, info, check, extend, pool-status |
+| [08](08-ci-cd-integration/) | **CI/CD Integration** | Archive build artifacts with GitHub Actions / GitLab CI |
+| [09](09-verification/) | **Verification & Integrity** | Tamper detection, SHA-256 verification, `--verify` flag |
 
 ## Directory Structure
 
@@ -44,10 +48,18 @@ examples/
     README.md, demo.sh, run_demo.py, audit_record_*.json
   03-scientific-data/          # Research data archival
     README.md, demo.sh, run_demo.py, dataset_metadata.json, experiment_results.csv
+  04-batch-processing/         # Stamp reuse across multiple uploads
+    README.md, demo.sh, run_demo.py, batch_upload.py, sample_files/*.json
   05-encrypted-data/           # Pre-encryption workflow
     README.md, demo.sh, run_demo.py, sensitive_data.txt
   06-market-memory/            # Prediction memory units
     README.md, demo.sh, run_demo.py, create_memory_unit.py, prediction_001.json, observation_001.json
+  07-stamp-management/         # Full stamp lifecycle
+    README.md, demo.sh, run_demo.py, stamp_lifecycle.py, sample_data.txt
+  08-ci-cd-integration/        # CI/CD artifact archival
+    README.md, demo.sh, run_demo.py, archive_artifacts.py, github-action.yml, gitlab-ci.yml
+  09-verification/             # Tamper detection and integrity
+    README.md, demo.sh, run_demo.py, integrity_checker.py, tamper_detection.py
 ```
 
 ## Common Utilities
