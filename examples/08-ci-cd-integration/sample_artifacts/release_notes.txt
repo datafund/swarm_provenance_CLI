@@ -1,0 +1,26 @@
+Release Notes - v2.1.0
+======================
+
+Release Date: 2024-01-15
+
+New Features:
+- Added dark mode support across all pages
+- Implemented real-time notification system
+- Added CSV export for analytics dashboard
+
+Bug Fixes:
+- Fixed login timeout on slow connections (#423)
+- Resolved pagination issue in search results (#431)
+- Fixed currency formatting for non-USD locales (#445)
+
+Performance:
+- Reduced initial page load by 35%
+- Optimized database queries for user dashboard
+- Implemented lazy loading for image galleries
+
+Breaking Changes:
+- None
+
+Dependencies Updated:
+- React 18.2 -> 18.3
+- PostgreSQL driver 3.4 -> 3.5

@@ -1,0 +1,26 @@
+{
+  "project": "my-web-app",
+  "version": "2.1.0",
+  "build_number": 347,
+  "git_commit": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+  "git_branch": "main",
+  "build_timestamp": "2024-01-15T14:30:00Z",
+  "builder": "github-actions",
+  "environment": {
+    "os": "ubuntu-22.04",
+    "node_version": "20.10.0",
+    "python_version": "3.11.7"
+  },
+  "tests": {
+    "total": 342,
+    "passed": 342,
+    "failed": 0,
+    "skipped": 3,
+    "duration_seconds": 47.2
+  },
+  "artifacts": [
+    "dist/app.js",
+    "dist/app.css",
+    "dist/index.html"
+  ]
+}

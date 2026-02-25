@@ -1,0 +1,35 @@
+AGREEMENT FOR DATA PROCESSING SERVICES
+========================================
+
+Agreement ID: DPA-2024-0042
+Date: January 15, 2024
+
+PARTIES:
+  Data Controller: Acme Corporation
+  Data Processor: DataFlow Services Ltd.
+
+SCOPE:
+  This agreement covers the processing of personal data as described
+  in Schedule A, for the purposes of customer analytics and service
+  improvement.
+
+DATA CATEGORIES:
+  - Customer contact information (name, email, phone)
+  - Service usage logs (timestamps, features used)
+  - Aggregated behavioral analytics (anonymized)
+
+RETENTION PERIOD:
+  Personal data shall be retained for no longer than 24 months from
+  the date of collection, after which it must be securely deleted.
+
+SECURITY MEASURES:
+  - AES-256 encryption at rest
+  - TLS 1.3 for data in transit
+  - Role-based access control
+  - Annual penetration testing
+
+This document is stored on Swarm for immutable record-keeping.
+Any modification will result in a different content hash, proving
+the document has been tampered with.
+
+Signed: ____________________    Date: ____________________

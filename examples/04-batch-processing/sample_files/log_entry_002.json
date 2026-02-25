@@ -1,0 +1,18 @@
+{
+  "log_id": "LOG-2024-002",
+  "timestamp": "2024-01-15T09:31:15Z",
+  "level": "WARNING",
+  "service": "data-pipeline",
+  "event": "rate_limit_approached",
+  "details": {
+    "endpoint": "/api/v2/ingest",
+    "current_rate": 850,
+    "limit": 1000,
+    "window_seconds": 60
+  },
+  "metadata": {
+    "region": "eu-west-1",
+    "version": "3.1.0",
+    "correlation_id": "corr-def456"
+  }
+}
