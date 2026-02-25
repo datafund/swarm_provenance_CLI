@@ -35,7 +35,11 @@ python run_demo.py
 ### 1. Upload a file
 
 ```bash
+# Uses stamp pool if available, otherwise purchases a new stamp
 swarm-prov-upload upload --file sample.txt --usePool
+
+# Or without pool (regular stamp purchase, slower ~1-2min):
+swarm-prov-upload upload --file sample.txt
 ```
 
 Output:

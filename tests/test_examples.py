@@ -312,7 +312,7 @@ class TestDemoPythonScript:
                 # The demo creates downloads/ under SCRIPT_DIR (= tmp_path)
                 dl_dir = tmp_path / "downloads"
                 dl_dir.mkdir(exist_ok=True)
-                (dl_dir / "sample.txt").write_bytes(sample_content)
+                (dl_dir / f"{FAKE_HASH}.data").write_bytes(sample_content)
                 return _make_completed_process(
                     stdout="Downloaded and verified: sample.txt\n"
                 )
@@ -338,8 +338,52 @@ class TestDemoPythonScript:
         # Verify all 3 CLI calls were made (health, upload, download)
         assert call_count["n"] == 3
 
+    def test_python_demo_pool_fallback(self, tmp_path, monkeypatch):
+        """Demo should fall back to regular stamp purchase when pool fails."""
+        sample_file = tmp_path / "sample.txt"
+        sample_content = b"fallback test data"
+        sample_file.write_bytes(sample_content)
+
+        upload_calls = {"n": 0}
+
+        def mock_subprocess_run(cmd, **kwargs):
+            subcmd = _get_cli_subcommand(cmd)
+            if subcmd == "health":
+                return _make_completed_process(stdout="Healthy\n")
+            elif subcmd == "upload":
+                upload_calls["n"] += 1
+                cmd_str = " ".join(str(c) for c in cmd)
+                if "--usePool" in cmd_str:
+                    # Pool fails
+                    return _make_completed_process(
+                        returncode=1, stderr="ERROR: No stamps in pool"
+                    )
+                else:
+                    # Regular purchase succeeds
+                    return _make_completed_process(stdout=_upload_success_output())
+            elif subcmd == "download":
+                dl_dir = tmp_path / "downloads"
+                dl_dir.mkdir(exist_ok=True)
+                (dl_dir / f"{FAKE_HASH}.data").write_bytes(sample_content)
+                return _make_completed_process(stdout="Downloaded.\n")
+            return _make_completed_process()
+
+        demo_module_path = str(DEMO_DIR / "run_demo.py")
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("run_demo_fallback", demo_module_path)
+        run_demo = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(run_demo)
+
+        monkeypatch.setattr(run_demo.subprocess, "run", mock_subprocess_run)
+        run_demo.SCRIPT_DIR = tmp_path
+        monkeypatch.setattr(sys, "argv", ["run_demo.py", "--file", str(sample_file)])
+
+        run_demo.main()
+        # Both pool attempt and fallback should have been called
+        assert upload_calls["n"] == 2
+
     def test_python_demo_upload_failure(self, tmp_path, monkeypatch):
-        """Demo should exit on upload failure."""
+        """Demo should exit when both pool and regular upload fail."""
         sample_file = tmp_path / "sample.txt"
         sample_file.write_text("test data")
 
@@ -406,7 +450,7 @@ class TestDemoPythonScript:
                 # Write DIFFERENT content to simulate corruption
                 dl_dir = tmp_path / "downloads"
                 dl_dir.mkdir(exist_ok=True)
-                (dl_dir / "sample.txt").write_bytes(b"corrupted data")
+                (dl_dir / f"{FAKE_HASH}.data").write_bytes(b"corrupted data")
                 return _make_completed_process(stdout="Downloaded.\n")
             return _make_completed_process()
 

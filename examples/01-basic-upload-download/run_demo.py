@@ -72,11 +72,14 @@ def main():
     print(f"Size:   {file_size} bytes")
     print(f"SHA256: {original_hash}")
 
-    print("\nUploading with --usePool...")
+    print("\nUploading (trying pool first, then regular stamp purchase)...")
     result = run_cli("upload", "--file", sample_file, "--usePool")
     if result.returncode != 0:
-        print(f"Upload failed: {result.stderr or result.stdout}")
-        sys.exit(1)
+        print("Pool not available, falling back to regular stamp purchase...")
+        result = run_cli("upload", "--file", sample_file)
+        if result.returncode != 0:
+            print(f"Upload failed: {result.stderr or result.stdout}")
+            sys.exit(1)
 
     output = result.stdout
     print(output.strip())
@@ -118,7 +121,12 @@ def main():
         print("ERROR: No files in download directory")
         sys.exit(1)
 
-    downloaded_file = os.path.join(download_dir, downloaded_files[0])
+    # Use the .data file (decoded content), not the .meta.json envelope
+    data_files = [f for f in downloaded_files if f.endswith(".data")]
+    if data_files:
+        downloaded_file = os.path.join(download_dir, data_files[0])
+    else:
+        downloaded_file = os.path.join(download_dir, downloaded_files[0])
     downloaded_hash = sha256_file(downloaded_file)
 
     print(f"Original:   {original_hash}")

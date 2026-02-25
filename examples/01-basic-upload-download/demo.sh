@@ -41,8 +41,11 @@ echo "Size: $(wc -c < "$SAMPLE_FILE") bytes"
 echo "SHA256: $(shasum -a 256 "$SAMPLE_FILE" | cut -d' ' -f1)"
 echo
 
-echo "Uploading with --usePool (faster stamp acquisition)..."
-UPLOAD_OUTPUT=$(swarm-prov-upload upload --file "$SAMPLE_FILE" --usePool 2>&1)
+echo "Uploading (trying pool first, then regular stamp purchase)..."
+UPLOAD_OUTPUT=$(swarm-prov-upload upload --file "$SAMPLE_FILE" --usePool 2>&1) || {
+    echo "Pool not available, falling back to regular stamp purchase..."
+    UPLOAD_OUTPUT=$(swarm-prov-upload upload --file "$SAMPLE_FILE" 2>&1)
+}
 echo "$UPLOAD_OUTPUT"
 
 # Extract Swarm reference from text output
@@ -70,8 +73,13 @@ echo
 # --- Step 4: Verify integrity ---
 echo "--- Step 4: Compare SHA-256 hashes ---"
 ORIGINAL_HASH=$(shasum -a 256 "$SAMPLE_FILE" | cut -d' ' -f1)
-DOWNLOADED_FILE=$(ls "$DOWNLOAD_DIR"/ | head -1)
-DOWNLOADED_HASH=$(shasum -a 256 "$DOWNLOAD_DIR/$DOWNLOADED_FILE" | cut -d' ' -f1)
+# Use the .data file (decoded content), not the .meta.json envelope
+DOWNLOADED_FILE=$(ls "$DOWNLOAD_DIR"/*.data 2>/dev/null | head -1)
+if [ -z "$DOWNLOADED_FILE" ]; then
+    DOWNLOADED_FILE=$(ls "$DOWNLOAD_DIR"/ | head -1)
+    DOWNLOADED_FILE="$DOWNLOAD_DIR/$DOWNLOADED_FILE"
+fi
+DOWNLOADED_HASH=$(shasum -a 256 "$DOWNLOADED_FILE" | cut -d' ' -f1)
 
 echo "Original:   $ORIGINAL_HASH"
 echo "Downloaded: $DOWNLOADED_HASH"
