@@ -1,0 +1,23 @@
+Provenance Record Example
+=========================
+
+This file demonstrates data provenance tracking on the Swarm
+decentralized storage network.
+
+When uploaded via the Swarm Provenance CLI, this file is:
+1. Read and SHA-256 hashed for integrity verification
+2. Base64-encoded and wrapped in a metadata JSON envelope
+3. Uploaded to Swarm via a postage stamp
+4. Assigned an immutable Swarm reference hash
+
+The Swarm reference hash serves as a permanent, tamper-proof
+pointer to this exact content. Anyone with the hash can:
+- Download the original data
+- Verify the SHA-256 hash matches (proving no tampering)
+- Inspect the provenance metadata envelope
+
+Data: sensor-reading-001
+Timestamp: 2025-06-15T10:30:00Z
+Value: 23.7
+Unit: celsius
+Source: environmental-monitor-alpha

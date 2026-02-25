@@ -703,6 +703,16 @@ swarm-prov-upload chequebook
 
 Use `swarm-prov-upload --help` for all options.
 
+## Examples
+
+The [`examples/`](examples/) directory contains real-world usage demos with shell scripts, Python scripts, and sample data:
+
+| Example | Description |
+|---------|-------------|
+| [01 - Basic Upload/Download](examples/01-basic-upload-download/) | Upload a file, download it back, verify integrity |
+
+See [examples/README.md](examples/README.md) for the full guide.
+
 ## Architecture & Features
 
 ```
