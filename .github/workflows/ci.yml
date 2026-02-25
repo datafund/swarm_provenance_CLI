@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        extras: ["testing", "blockchain,testing"]
+    name: Python ${{ matrix.python-version }} (${{ matrix.extras }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: pip install -e ".[${{ matrix.extras }}]"
+
+      - name: Run unit tests
+        run: pytest tests/ --ignore=tests/test_integration.py -v
+
+  integration:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    name: Integration tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e ".[blockchain,testing]"
+
+      - name: Run integration tests
+        env:
+          PROVENANCE_WALLET_KEY: ${{ secrets.TEST_WALLET_KEY }}
+          PROVENANCE_GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
+        run: pytest tests/test_integration.py -v --timeout=300

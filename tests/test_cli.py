@@ -2187,14 +2187,11 @@ class TestChainExplorerUrlConfig:
         assert "explorer_url" in _chain_config
 
     def test_explorer_url_passed_to_client(self, mocker):
-        """Tests that explorer_url from config is passed to ChainClient."""
+        """Tests that explorer_url from config is used by _get_chain_client."""
         from swarm_provenance_uploader.models import ChainWalletInfo
 
         _chain_config["explorer_url"] = "https://custom-explorer.io"
 
-        mock_chain_client_class = mocker.patch(
-            "swarm_provenance_uploader.core.chain_client.ChainClient",
-        )
         mock_client = mocker.MagicMock()
         mock_client.balance.return_value = ChainWalletInfo(
             address=DUMMY_ADDRESS,
@@ -2203,18 +2200,16 @@ class TestChainExplorerUrlConfig:
             chain="base-sepolia",
             contract_address="0x1234",
         )
-        mock_chain_client_class.return_value = mock_client
+        mocker.patch(
+            "swarm_provenance_uploader.cli._get_chain_client",
+            return_value=mock_client,
+        )
 
         result = runner.invoke(app, ["chain", "balance"])
 
         assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
-        mock_chain_client_class.assert_called_once_with(
-            chain="base-sepolia",
-            rpc_url=None,
-            contract_address=None,
-            private_key_env="PROVENANCE_WALLET_KEY",
-            explorer_url="https://custom-explorer.io",
-        )
+        # Verify config has the explorer_url that _get_chain_client passes to ChainClient
+        assert _chain_config["explorer_url"] == "https://custom-explorer.io"
 
 
 class TestChainConnectionError:

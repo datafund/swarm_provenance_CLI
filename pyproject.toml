@@ -8,7 +8,7 @@ version = "0.8.0"
 description = "A CLI toolkit for wrapping data and uploading to Swarm."
 readme = "README.md"
 requires-python = ">=3.8"
-license = {file = "LICENSE.txt"} # Add a LICENSE.txt if you wish
+license = {file = "LICENSE.txt"}
 classifiers = [
     "Programming Language :: Python :: 3",
      "Operating System :: OS Independent",

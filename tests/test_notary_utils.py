@@ -3,8 +3,10 @@
 import pytest
 import json
 import hashlib
-from eth_account import Account
-from eth_account.messages import encode_defunct
+
+eth_account = pytest.importorskip("eth_account", reason="eth_account not installed (install with [blockchain])")
+Account = eth_account.Account
+encode_defunct = pytest.importorskip("eth_account.messages", reason="eth_account not installed").encode_defunct
 
 from swarm_provenance_uploader.core.notary_utils import (
     verify_notary_signature,
