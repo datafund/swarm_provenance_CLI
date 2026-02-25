@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarm-provenance-uploader"
-version = "0.5.0"
+version = "0.7.0"
 description = "A CLI toolkit for wrapping data and uploading to Swarm."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -37,6 +37,11 @@ x402 = [
     "eth-account>=0.8.0",
     "web3>=6.0.0",
 ]
+# Blockchain anchoring (DataProvenance contract on Base)
+blockchain = [
+    "web3>=6.0.0",
+    "eth-account>=0.10.0",
+]
 
 [tool.pytest.ini_options]
 markers = [
@@ -45,4 +50,8 @@ markers = [
     "gateway: marks tests that require gateway service",
     "x402: marks tests that require x402 wallet configuration",
     "slow: marks tests that are slow or use real funds",
+    "blockchain: marks tests that require blockchain deps",
 ]
+
+[tool.setuptools.package-data]
+"swarm_provenance_uploader.chain" = ["abi/*.json"]
