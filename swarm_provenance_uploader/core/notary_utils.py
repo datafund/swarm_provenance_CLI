@@ -9,9 +9,6 @@ import json
 import hashlib
 from typing import Optional, Tuple
 
-from eth_account import Account
-from eth_account.messages import encode_defunct
-
 
 def verify_notary_signature(
     document: dict,
@@ -73,6 +70,12 @@ def verify_notary_signature(
     message = f"{expected_hash}|{timestamp}"
 
     # 5. Verify EIP-191 signature
+    try:
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+    except ImportError:
+        return False, "eth_account not installed (pip install swarm-provenance-uploader[blockchain])"
+
     signable = encode_defunct(text=message)
     signature = notary_sig.get("signature", "")
     if not signature:
