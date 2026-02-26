@@ -6,7 +6,7 @@ These tests require actual running services:
 
 For x402 tests:
 - Base Sepolia wallet with USDC
-- SWARM_X402_PRIVATE_KEY environment variable set
+- X402_PRIVATE_KEY environment variable set
 
 For blockchain tests:
 - Local Hardhat node at http://localhost:8545 with DataProvenance deployed
@@ -91,7 +91,7 @@ skip_if_no_gateway = pytest.mark.skipif(
 
 def is_x402_configured():
     """Check if x402 wallet is configured."""
-    private_key = os.getenv("SWARM_X402_PRIVATE_KEY")
+    private_key = os.getenv("X402_PRIVATE_KEY")
     return private_key is not None and private_key.startswith("0x")
 
 
@@ -107,7 +107,7 @@ def are_x402_deps_installed():
 
 skip_if_no_x402 = pytest.mark.skipif(
     not is_x402_configured() or not are_x402_deps_installed(),
-    reason="x402 not configured (SWARM_X402_PRIVATE_KEY not set or deps missing)"
+    reason="x402 not configured (X402_PRIVATE_KEY not set or deps missing)"
 )
 
 
@@ -220,7 +220,7 @@ class TestX402Integration:
     """Integration tests for x402 payment functionality.
 
     These tests require:
-    - SWARM_X402_PRIVATE_KEY environment variable set
+    - X402_PRIVATE_KEY environment variable set
     - x402 dependencies installed (pip install -e .[x402])
     - Base Sepolia wallet with USDC (from faucet.circle.com)
     """
@@ -420,7 +420,7 @@ class TestX402Integration:
         """Test GatewayClient initializes with x402 enabled."""
         from swarm_provenance_uploader.core.gateway_client import GatewayClient
 
-        private_key = os.getenv("SWARM_X402_PRIVATE_KEY")
+        private_key = os.getenv("X402_PRIVATE_KEY")
 
         client = GatewayClient(
             base_url=gateway_url,
@@ -476,7 +476,7 @@ class TestX402PaymentFlow:
         from swarm_provenance_uploader.core.x402_client import X402Client
         from swarm_provenance_uploader.exceptions import PaymentTransactionFailedError
 
-        private_key = os.getenv("SWARM_X402_PRIVATE_KEY")
+        private_key = os.getenv("X402_PRIVATE_KEY")
 
         # Get balance before payment
         x402_client = X402Client(private_key=private_key, network="base-sepolia")

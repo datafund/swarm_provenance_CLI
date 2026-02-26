@@ -730,7 +730,7 @@ class TestX402InfoCommand:
 
         assert result.exit_code == 0
         assert "x402 Payment Setup Guide" in result.stdout
-        assert "SWARM_X402_PRIVATE_KEY" in result.stdout
+        assert "X402_PRIVATE_KEY" in result.stdout
         assert "faucet" in result.stdout.lower()
 
 

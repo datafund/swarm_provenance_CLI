@@ -44,7 +44,7 @@ SAMPLE_402_RESPONSE = {
 @pytest.fixture
 def mock_eth_deps():
     """Mock eth-account and web3 dependencies."""
-    with patch.dict(os.environ, {"SWARM_X402_PRIVATE_KEY": DUMMY_PRIVATE_KEY}):
+    with patch.dict(os.environ, {"X402_PRIVATE_KEY": DUMMY_PRIVATE_KEY}):
         # Mock eth_account
         mock_account = MagicMock()
         mock_account.address = DUMMY_ADDRESS
@@ -263,7 +263,7 @@ class TestX402ClientBalance:
 
     def test_balance_insufficient(self):
         """Tests balance check when insufficient."""
-        with patch.dict(os.environ, {"SWARM_X402_PRIVATE_KEY": DUMMY_PRIVATE_KEY}):
+        with patch.dict(os.environ, {"X402_PRIVATE_KEY": DUMMY_PRIVATE_KEY}):
             # Mock eth_account
             mock_account = MagicMock()
             mock_account.address = DUMMY_ADDRESS
@@ -367,7 +367,7 @@ class TestX402ClientCreatePaymentHeader:
 
     def test_create_payment_header_insufficient_balance(self):
         """Tests payment header creation fails with insufficient balance."""
-        with patch.dict(os.environ, {"SWARM_X402_PRIVATE_KEY": DUMMY_PRIVATE_KEY}):
+        with patch.dict(os.environ, {"X402_PRIVATE_KEY": DUMMY_PRIVATE_KEY}):
             # Mock eth_account
             mock_account = MagicMock()
             mock_account.address = DUMMY_ADDRESS
@@ -500,7 +500,7 @@ class TestX402ClientPrivateKeyFormat:
         """Tests that private key without 0x prefix is handled."""
         key_without_prefix = "a" * 64  # No 0x prefix
 
-        with patch.dict(os.environ, {"SWARM_X402_PRIVATE_KEY": key_without_prefix}):
+        with patch.dict(os.environ, {"X402_PRIVATE_KEY": key_without_prefix}):
             mock_account = MagicMock()
             mock_account.address = DUMMY_ADDRESS
 
@@ -535,7 +535,7 @@ class TestX402ClientErrorHandling:
 
     def test_rpc_connection_failure(self):
         """Tests handling of RPC connection failures during balance check."""
-        with patch.dict(os.environ, {"SWARM_X402_PRIVATE_KEY": DUMMY_PRIVATE_KEY}):
+        with patch.dict(os.environ, {"X402_PRIVATE_KEY": DUMMY_PRIVATE_KEY}):
             mock_account = MagicMock()
             mock_account.address = DUMMY_ADDRESS
 
