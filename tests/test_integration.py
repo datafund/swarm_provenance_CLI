@@ -1021,6 +1021,7 @@ class TestBlockchainBaseSepolia:
         """
         from swarm_provenance_uploader.core.chain_client import ChainClient
         import secrets
+        import time
 
         try:
             client = ChainClient(chain="base-sepolia")
@@ -1041,6 +1042,11 @@ class TestBlockchainBaseSepolia:
 
             assert result.tx_hash is not None
             assert result.block_number > 0
+
+            # Wait for the anchor to propagate before verifying.
+            # Base Sepolia needs a few seconds for the state to be
+            # readable after the transaction is confirmed.
+            time.sleep(3)
 
             # Verify it's on-chain
             assert client.verify(swarm_hash=test_hash) is True
