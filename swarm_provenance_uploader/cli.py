@@ -1432,7 +1432,7 @@ def x402_info():
     typer.echo("   - Export private key (starts with 0x)")
 
     typer.echo("\n2. Set environment variable:")
-    typer.echo("   export SWARM_X402_PRIVATE_KEY=0x...")
+    typer.echo("   export X402_PRIVATE_KEY=0x...")
 
     typer.echo("\n3. Get testnet funds (for testing):")
     typer.echo("   - ETH (gas): https://www.alchemy.com/faucets/base-sepolia")
@@ -2349,7 +2349,7 @@ def main(
     Use --backend local for direct Bee node communication.
 
     For pay-per-request mode, use --x402 to enable x402 payments.
-    Requires SWARM_X402_PRIVATE_KEY environment variable.
+    Requires X402_PRIVATE_KEY environment variable.
     """
     if backend:
         if backend not in ("gateway", "local"):

@@ -41,7 +41,7 @@ X402_ENABLED = os.getenv("X402_ENABLED", "false").lower() == "true"
 
 # Environment variable name that contains the private key
 # The actual private key should be in this env var, not in config
-X402_PRIVATE_KEY_ENV = os.getenv("X402_PRIVATE_KEY_ENV", "SWARM_X402_PRIVATE_KEY")
+X402_PRIVATE_KEY_ENV = os.getenv("X402_PRIVATE_KEY_ENV", "X402_PRIVATE_KEY")
 
 # Network: "base-sepolia" (testnet, default) or "base" (mainnet)
 X402_NETWORK = os.getenv("X402_NETWORK", "base-sepolia")

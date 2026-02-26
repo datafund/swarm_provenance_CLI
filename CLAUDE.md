@@ -317,7 +317,7 @@ Uses python-dotenv for environment configuration:
 
 **x402 Payment Configuration**:
 - `X402_ENABLED`: Enable x402 payment support (default: false)
-- `SWARM_X402_PRIVATE_KEY`: Wallet private key for signing payments
+- `X402_PRIVATE_KEY`: Wallet private key for signing payments
 - `X402_NETWORK`: `base-sepolia` (testnet) or `base` (mainnet)
 - `X402_AUTO_PAY`: Enable auto-pay without prompts (default: false)
 - `X402_MAX_AUTO_PAY_USD`: Maximum auto-pay amount per request (default: 1.00)

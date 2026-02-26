@@ -110,7 +110,7 @@ x402 enables pay-per-request payments using USDC on Base chain. When the gateway
 pip install -e .[x402]
 
 # Configure wallet (testnet)
-export SWARM_X402_PRIVATE_KEY=0x...  # Your wallet private key
+export X402_PRIVATE_KEY=0x...  # Your wallet private key
 export X402_ENABLED=true
 export X402_NETWORK=base-sepolia     # Testnet (default)
 
@@ -145,7 +145,7 @@ swarm-prov-upload x402 info
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
 | `X402_ENABLED` | Enable x402 payments | `false` |
-| `SWARM_X402_PRIVATE_KEY` | Wallet private key (keep secret!) | - |
+| `X402_PRIVATE_KEY` | Wallet private key (keep secret!) | - |
 | `X402_NETWORK` | `base-sepolia` (testnet) or `base` (mainnet) | `base-sepolia` |
 | `X402_AUTO_PAY` | Auto-pay without prompts | `false` |
 | `X402_MAX_AUTO_PAY_USD` | Maximum auto-pay amount per request | `1.00` |
@@ -164,7 +164,7 @@ swarm-prov-upload x402 info
 
 1. **Get testnet ETH** (for gas): https://www.alchemy.com/faucets/base-sepolia
 2. **Get testnet USDC**: https://faucet.circle.com/
-3. **Configure wallet**: Set `SWARM_X402_PRIVATE_KEY` with your wallet's private key
+3. **Configure wallet**: Set `X402_PRIVATE_KEY` with your wallet's private key
 
 See [docs/x402-setup.md](docs/x402-setup.md) for detailed setup instructions.
 
@@ -794,7 +794,7 @@ See [examples/README.md](examples/README.md) for the full guide.
 │  │ └─────────────────────────────┘ │  │                                     │  │
 │  │                                 │  │ x402 Configuration:                 │  │
 │  │ x402 Payment Models:            │  │ • X402_ENABLED                      │  │
-│  │ • X402PaymentOption             │  │ • SWARM_X402_PRIVATE_KEY            │  │
+│  │ • X402PaymentOption             │  │ • X402_PRIVATE_KEY            │  │
 │  │ • X402PaymentRequirements       │  │ • X402_NETWORK                      │  │
 │  │ • X402PaymentPayload            │  │ • X402_AUTO_PAY                     │  │
 │  │                                 │  │ • X402_MAX_AUTO_PAY_USD             │  │

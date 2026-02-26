@@ -255,7 +255,7 @@ class X402Client:
         self._private_key = private_key or os.getenv("X402_PRIVATE_KEY") or os.getenv("SWARM_X402_PRIVATE_KEY")
         if not self._private_key:
             raise X402ConfigurationError(
-                "x402 private key not configured. Set X402_PRIVATE_KEY or SWARM_X402_PRIVATE_KEY environment variable."
+                "x402 private key not configured. Set X402_PRIVATE_KEY environment variable."
             )
 
         # Validate and derive address

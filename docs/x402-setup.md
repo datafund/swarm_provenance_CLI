@@ -140,7 +140,7 @@ Add to your `.env` file:
 X402_ENABLED=true
 
 # Your wallet private key (KEEP SECRET!)
-SWARM_X402_PRIVATE_KEY=0x...your_private_key_here...
+X402_PRIVATE_KEY=0x...your_private_key_here...
 
 # Network: base-sepolia (testnet) or base (mainnet)
 X402_NETWORK=base-sepolia
@@ -217,9 +217,9 @@ pip install -e .[x402]
 
 ### "No private key configured"
 
-Set the `SWARM_X402_PRIVATE_KEY` environment variable:
+Set the `X402_PRIVATE_KEY` environment variable:
 ```bash
-export SWARM_X402_PRIVATE_KEY=0x...
+export X402_PRIVATE_KEY=0x...
 ```
 
 ### "Insufficient USDC balance"
