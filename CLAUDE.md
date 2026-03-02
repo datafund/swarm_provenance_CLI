@@ -328,6 +328,7 @@ Uses python-dotenv for environment configuration:
 - `CHAIN_RPC_URL`: Custom RPC URL (optional, overrides preset)
 - `CHAIN_CONTRACT`: Custom contract address (optional, overrides preset)
 - `CHAIN_EXPLORER_URL`: Custom block explorer URL (optional, overrides preset)
+- `CHAIN_GAS_LIMIT`: Explicit gas limit (optional, skips RPC estimation when set)
 - `PROVENANCE_WALLET_KEY`: Wallet private key for signing transactions
 
 ## Testing Approach

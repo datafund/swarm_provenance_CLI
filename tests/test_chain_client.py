@@ -914,6 +914,62 @@ class TestChainClientTransaction:
         assert tx["gas"] == 150_000
 
 
+class TestChainClientGasLimit:
+    """Tests for explicit gas limit support."""
+
+    def test_explicit_gas_limit_skips_estimation(self, mock_chain_deps):
+        """Tests that explicit gas limit skips estimate_gas call."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        # Pre-check expects unregistered hash
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+        )
+
+        client = ChainClient(chain="base-sepolia", gas_limit=500_000)
+        client.anchor(swarm_hash=DUMMY_HASH)
+
+        # estimate_gas should NOT have been called
+        mock_chain_deps["web3_instance"].eth.estimate_gas.assert_not_called()
+
+        # tx should use explicit gas value
+        call_args = mock_chain_deps["account"].sign_transaction.call_args
+        tx = call_args[0][0]
+        assert tx["gas"] == 500_000
+
+    def test_explicit_gas_limit_no_multiplier(self, mock_chain_deps):
+        """Tests that explicit gas limit ignores multiplier."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        # Pre-check expects unregistered hash
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+        )
+
+        # Even with 2x multiplier, explicit value should be used as-is
+        client = ChainClient(chain="base-sepolia", gas_limit=500_000, gas_limit_multiplier=2.0)
+        client.anchor(swarm_hash=DUMMY_HASH)
+
+        call_args = mock_chain_deps["account"].sign_transaction.call_args
+        tx = call_args[0][0]
+        assert tx["gas"] == 500_000
+
+    def test_gas_limit_none_uses_estimation(self, mock_chain_deps):
+        """Tests that gas_limit=None falls back to estimation."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        # Pre-check expects unregistered hash
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+        )
+
+        client = ChainClient(chain="base-sepolia", gas_limit=None)
+        client.anchor(swarm_hash=DUMMY_HASH)
+
+        # estimate_gas should have been called
+        mock_chain_deps["web3_instance"].eth.estimate_gas.assert_called_once()
+
+
 class TestChainClientProvenanceChain:
     """Tests for provenance chain traversal."""
 

@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.2] - 2026-03-02
+
+### Added
+- `--gas` option on all chain write commands (`anchor`, `access`, `status`, `transfer`, `delegate`, `transform`, `protect`) to set an explicit gas limit, bypassing RPC estimation (#75)
+- `CHAIN_GAS_LIMIT` environment variable for persistent gas limit configuration
+
 ## [0.8.1] - 2026-03-02
 
 ### Fixed

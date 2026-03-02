@@ -35,6 +35,7 @@ def reset_backend_config():
     _chain_config["contract"] = None
     _chain_config["wallet_key_env"] = "PROVENANCE_WALLET_KEY"
     _chain_config["explorer_url"] = None
+    _chain_config["gas_limit"] = None
     yield
     # Reset again after test
     _backend_config["backend"] = "gateway"
@@ -50,6 +51,7 @@ def reset_backend_config():
     _chain_config["contract"] = None
     _chain_config["wallet_key_env"] = "PROVENANCE_WALLET_KEY"
     _chain_config["explorer_url"] = None
+    _chain_config["gas_limit"] = None
 
 
 # =============================================================================
@@ -3718,3 +3720,51 @@ class TestUploadCollectionCommand:
             call_kwargs = mock_client.upload_manifest.call_args
             assert call_kwargs.kwargs.get("deferred") is True or call_kwargs[1].get("deferred") is True
             assert call_kwargs.kwargs.get("redundancy") is True or call_kwargs[1].get("redundancy") is True
+
+
+class TestChainGasLimitFlag:
+    """Tests for --gas flag on chain write commands."""
+
+    def test_gas_flag_passed_to_anchor(self, mocker):
+        """Tests that --gas flag sets gas_limit in chain config."""
+        from swarm_provenance_uploader.models import AnchorResult
+
+        mock_client = mocker.MagicMock()
+        mock_client.anchor.return_value = AnchorResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12345,
+            gas_used=50000,
+            explorer_url=DUMMY_EXPLORER_URL,
+            swarm_hash=DUMMY_SWARM_REF,
+            data_type="swarm-provenance",
+            owner=DUMMY_ADDRESS,
+        )
+
+        mock_get = mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--gas", "500000"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        # Verify gas_limit was passed through to ChainClient
+        assert _chain_config["gas_limit"] == 500000
+
+    def test_gas_flag_on_access(self, mocker):
+        """Tests that --gas flag works on access command."""
+        from swarm_provenance_uploader.models import AccessResult
+
+        mock_client = mocker.MagicMock()
+        mock_client.access.return_value = AccessResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12345,
+            gas_used=50000,
+            explorer_url=DUMMY_EXPLORER_URL,
+            swarm_hash=DUMMY_SWARM_REF,
+            accessor=DUMMY_ADDRESS,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF, "--gas", "300000"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert _chain_config["gas_limit"] == 300000

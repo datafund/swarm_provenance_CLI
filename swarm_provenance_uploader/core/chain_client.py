@@ -48,6 +48,7 @@ class ChainClient:
         private_key_env: str = "PROVENANCE_WALLET_KEY",
         gas_limit_multiplier: float = 1.2,
         explorer_url: Optional[str] = None,
+        gas_limit: Optional[int] = None,
     ):
         """
         Initialize the chain client.
@@ -60,6 +61,7 @@ class ChainClient:
             private_key_env: Environment variable name for private key.
             gas_limit_multiplier: Safety multiplier for gas estimates (default 1.2).
             explorer_url: Custom block explorer URL. If None, uses preset.
+            gas_limit: Explicit gas limit. If set, skips estimation and multiplier.
 
         Raises:
             ChainConfigurationError: If dependencies missing or config invalid.
@@ -83,6 +85,7 @@ class ChainClient:
             contract_address=self._provider.contract_address,
         )
         self._gas_limit_multiplier = gas_limit_multiplier
+        self._gas_limit = gas_limit
 
     @property
     def address(self) -> str:
@@ -122,12 +125,16 @@ class ChainClient:
             tx["nonce"] = web3.eth.get_transaction_count(self._wallet.address)
             tx["chainId"] = self._provider.chain_id
 
-            # Estimate gas with safety multiplier
-            estimated_gas = web3.eth.estimate_gas(tx)
-            tx["gas"] = int(estimated_gas * self._gas_limit_multiplier)
-
-            if verbose:
-                print(f"DEBUG: Estimated gas: {estimated_gas}, limit: {tx['gas']}")
+            # Set gas limit: explicit value or estimate with multiplier
+            if self._gas_limit is not None:
+                tx["gas"] = self._gas_limit
+                if verbose:
+                    print(f"DEBUG: Using explicit gas limit: {self._gas_limit}")
+            else:
+                estimated_gas = web3.eth.estimate_gas(tx)
+                tx["gas"] = int(estimated_gas * self._gas_limit_multiplier)
+                if verbose:
+                    print(f"DEBUG: Estimated gas: {estimated_gas}, limit: {tx['gas']}")
 
             # Sign and send
             raw_tx = self._wallet.sign_transaction(tx)
