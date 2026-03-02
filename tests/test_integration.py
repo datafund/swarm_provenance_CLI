@@ -942,6 +942,32 @@ class TestBlockchainLocalHardhat:
         record = client.get(swarm_hash=orig_hash)
         assert record.status == DataStatusEnum.RESTRICTED
 
+    @skip_if_no_hardhat
+    @skip_if_no_blockchain_deps
+    def test_chain_client_anchor_insufficient_gas(self):
+        """Test that an explicit gas limit too low for a contract call raises ChainTransactionError."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.exceptions import ChainTransactionError
+
+        contract = os.getenv("CHAIN_CONTRACT")
+        if not contract:
+            pytest.skip("CHAIN_CONTRACT not set for local Hardhat")
+
+        # 21,000 is enough for a plain ETH transfer but way too low for
+        # a registerData contract call — the node should reject or revert.
+        client = ChainClient(
+            chain="base-sepolia",
+            rpc_url="http://localhost:8545",
+            contract_address=contract,
+            gas_limit=21_000,
+        )
+
+        with pytest.raises(ChainTransactionError) as exc_info:
+            client.anchor(swarm_hash=_random_hash(), data_type="gas-test")
+
+        print(f"\n=== Insufficient Gas Handled ===")
+        print(f"  Error: {exc_info.value}")
+
 
 # =============================================================================
 # BLOCKCHAIN INTEGRATION TESTS - BASE SEPOLIA
