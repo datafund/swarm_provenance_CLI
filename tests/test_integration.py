@@ -46,8 +46,13 @@ def local_bee_url():
 
 @pytest.fixture
 def gateway_url():
-    """Gateway URL from environment or default."""
-    return os.getenv("PROVENANCE_GATEWAY_URL", "https://provenance-gateway.datafund.io")
+    """Gateway URL for integration tests.
+
+    Uses INTEGRATION_GATEWAY_URL if set, otherwise defaults to production.
+    This is intentionally separate from PROVENANCE_GATEWAY_URL (used by the
+    app and often overridden in .env.local for local development).
+    """
+    return os.getenv("INTEGRATION_GATEWAY_URL", "https://provenance-gateway.datafund.io")
 
 
 @pytest.fixture
