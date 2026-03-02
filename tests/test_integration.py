@@ -1053,6 +1053,50 @@ class TestBlockchainBaseSepolia:
         except Exception as e:
             pytest.skip(f"Base Sepolia anchor failed: {e}")
 
+    @skip_if_no_chain_wallet
+    @skip_if_no_blockchain_deps
+    def test_chain_client_anchor_already_registered_base_sepolia(self):
+        """Test that anchoring an already-registered hash raises DataAlreadyRegisteredError.
+
+        WARNING: This uses real testnet gas (one anchor tx). Run sparingly.
+        """
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.exceptions import DataAlreadyRegisteredError
+        import secrets
+        import time
+
+        try:
+            client = ChainClient(chain="base-sepolia")
+
+            # Anchor a fresh hash first
+            test_hash = secrets.token_hex(32)
+            result = client.anchor(
+                swarm_hash=test_hash,
+                data_type="integration-test",
+            )
+            assert result.tx_hash is not None
+
+            # Wait for propagation
+            time.sleep(3)
+
+            # Attempt to anchor the same hash again — should raise
+            with pytest.raises(DataAlreadyRegisteredError) as exc_info:
+                client.anchor(swarm_hash=test_hash, data_type="integration-test")
+
+            assert exc_info.value.data_hash == test_hash
+            assert exc_info.value.owner is not None
+            assert exc_info.value.timestamp > 0
+            assert exc_info.value.data_type == "integration-test"
+
+            print(f"\n=== Already-Registered Check ===")
+            print(f"  Hash: {test_hash}")
+            print(f"  Owner: {exc_info.value.owner}")
+            print(f"  Type: {exc_info.value.data_type}")
+        except DataAlreadyRegisteredError:
+            raise  # Re-raise so pytest.raises captures it properly
+        except Exception as e:
+            pytest.skip(f"Base Sepolia test failed: {e}")
+
 
 # =============================================================================
 # MANIFEST / COLLECTION UPLOAD TESTS
