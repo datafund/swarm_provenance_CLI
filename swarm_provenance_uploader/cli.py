@@ -1863,6 +1863,24 @@ def chain_anchor(
             result = client.anchor(swarm_hash, data_type=data_type, verbose=verbose)
     except typer.Exit:
         raise
+    except exceptions.DataAlreadyRegisteredError as e:
+        if output_json:
+            from datetime import datetime, timezone
+            typer.echo(json.dumps({
+                "error": "already_registered",
+                "data_hash": e.data_hash,
+                "owner": e.owner,
+                "timestamp": e.timestamp,
+                "data_type": e.data_type,
+            }, indent=2))
+        else:
+            from datetime import datetime, timezone
+            ts_str = datetime.fromtimestamp(e.timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC") if e.timestamp else "unknown"
+            typer.secho(f"\nAlready registered: {e.data_hash}", fg=typer.colors.YELLOW)
+            typer.echo(f"  Owner:   {e.owner}")
+            typer.echo(f"  Type:    {e.data_type}")
+            typer.echo(f"  Time:    {ts_str}")
+        raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -2250,6 +2268,10 @@ def chain_protect(
             results["anchor"] = anchor_result
             if not output_json:
                 typer.secho(f"New hash anchored.", fg=typer.colors.GREEN)
+        except exceptions.DataAlreadyRegisteredError:
+            # Already anchored is fine for protect — continue with transform
+            if not output_json:
+                typer.secho(f"New hash already anchored, continuing.", fg=typer.colors.YELLOW)
         except exceptions.ChainError as e:
             typer.secho(f"ERROR: Failed to anchor new hash: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)

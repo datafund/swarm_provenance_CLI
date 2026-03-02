@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.1] - 2026-03-02
+
+### Fixed
+- `chain anchor` now checks if a hash is already registered before sending a transaction, preventing wasted gas and unhelpful revert errors (#76)
+- `chain protect --anchor-new` treats already-registered new hash as non-fatal, continuing with transform/restrict steps
+
+### Added
+- `DataAlreadyRegisteredError` exception with `data_hash`, `owner`, `timestamp`, `data_type` attributes
+- Human-readable and JSON error output for already-registered hashes
+
 ## [0.8.0] - 2025-02-25
 
 ### Added

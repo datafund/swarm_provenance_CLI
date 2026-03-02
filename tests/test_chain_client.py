@@ -10,6 +10,7 @@ from swarm_provenance_uploader.exceptions import (
     ChainConnectionError,
     ChainTransactionError,
     ChainValidationError,
+    DataAlreadyRegisteredError,
     DataNotRegisteredError,
 )
 from swarm_provenance_uploader.models import (
@@ -549,6 +550,11 @@ class TestChainClientInit:
         """Tests that explorer_url is passed through to ChainProvider."""
         from swarm_provenance_uploader.core.chain_client import ChainClient
 
+        # Pre-check expects unregistered hash
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+        )
+
         client = ChainClient(
             chain="base-sepolia",
             explorer_url="https://custom-explorer.io",
@@ -578,6 +584,11 @@ class TestChainClientAnchor:
         """Tests successful data anchoring."""
         from swarm_provenance_uploader.core.chain_client import ChainClient
 
+        # Pre-check expects unregistered hash (zero-address owner)
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+        )
+
         client = ChainClient(chain="base-sepolia")
         result = client.anchor(swarm_hash=DUMMY_HASH, data_type="test-data")
 
@@ -593,6 +604,11 @@ class TestChainClientAnchor:
         """Tests anchor uses default data type."""
         from swarm_provenance_uploader.core.chain_client import ChainClient
 
+        # Pre-check expects unregistered hash
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+        )
+
         client = ChainClient(chain="base-sepolia")
         result = client.anchor(swarm_hash=DUMMY_HASH)
 
@@ -601,6 +617,11 @@ class TestChainClientAnchor:
     def test_anchor_for_success(self, mock_chain_deps):
         """Tests anchoring on behalf of another owner."""
         from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        # Pre-check expects unregistered hash
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+        )
 
         other_owner = "0x1111111111111111111111111111111111111111"
         client = ChainClient(chain="base-sepolia")
@@ -633,6 +654,55 @@ class TestChainClientAnchor:
         client = ChainClient(chain="base-sepolia")
         with pytest.raises(ChainValidationError):
             client.anchor(swarm_hash="tooshort")
+
+
+class TestChainClientAlreadyRegistered:
+    """Tests for already-registered hash pre-check in anchor/anchor_for."""
+
+    def test_anchor_raises_already_registered(self, mock_chain_deps):
+        """Tests that anchoring an already-registered hash raises DataAlreadyRegisteredError."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        # Default mock returns a registered record (owner=DUMMY_ADDRESS)
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, DUMMY_ADDRESS, 1700000000, "swarm-provenance", [], [], 0,
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(DataAlreadyRegisteredError) as exc_info:
+            client.anchor(swarm_hash=DUMMY_HASH)
+        assert exc_info.value.data_hash == DUMMY_HASH
+        assert exc_info.value.owner == DUMMY_ADDRESS
+        assert exc_info.value.timestamp == 1700000000
+        assert exc_info.value.data_type == "swarm-provenance"
+
+    def test_anchor_for_raises_already_registered(self, mock_chain_deps):
+        """Tests that anchor_for on already-registered hash raises DataAlreadyRegisteredError."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, DUMMY_ADDRESS, 1700000000, "swarm-provenance", [], [], 0,
+        )
+
+        other_owner = "0x1111111111111111111111111111111111111111"
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(DataAlreadyRegisteredError) as exc_info:
+            client.anchor_for(swarm_hash=DUMMY_HASH, owner=other_owner)
+        assert exc_info.value.data_hash == DUMMY_HASH
+
+    def test_anchor_succeeds_when_not_registered(self, mock_chain_deps):
+        """Tests that anchor succeeds when hash is not yet registered."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        # Return zero-address owner = not registered
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        result = client.anchor(swarm_hash=DUMMY_HASH)
+        assert isinstance(result, AnchorResult)
+        assert result.swarm_hash == DUMMY_HASH
 
 
 class TestChainClientTransform:
@@ -807,6 +877,11 @@ class TestChainClientTransaction:
         """Tests that reverted transaction raises error."""
         from swarm_provenance_uploader.core.chain_client import ChainClient
 
+        # Pre-check expects unregistered hash
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+        )
+
         # Make receipt indicate failure
         mock_chain_deps["web3_instance"].eth.wait_for_transaction_receipt.return_value = {
             "status": 0,
@@ -823,6 +898,11 @@ class TestChainClientTransaction:
     def test_gas_limit_multiplier(self, mock_chain_deps):
         """Tests that gas limit multiplier is applied."""
         from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        # Pre-check expects unregistered hash
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+        )
 
         client = ChainClient(chain="base-sepolia", gas_limit_multiplier=1.5)
         client.anchor(swarm_hash=DUMMY_HASH)

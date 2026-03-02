@@ -17,6 +17,7 @@ from ..exceptions import (
     ChainConnectionError,
     ChainTransactionError,
     ChainValidationError,
+    DataAlreadyRegisteredError,
     DataNotRegisteredError,
 )
 from ..models import (
@@ -192,6 +193,19 @@ class ChainClient:
             print(f"Hash: {swarm_hash}")
             print(f"Type: {data_type}")
 
+        # Pre-check: avoid wasting gas on already-registered hashes
+        try:
+            record = self.get(swarm_hash, verbose=verbose)
+            raise DataAlreadyRegisteredError(
+                f"Data hash {swarm_hash} is already registered on-chain",
+                data_hash=swarm_hash,
+                owner=record.owner,
+                timestamp=record.timestamp,
+                data_type=record.data_type,
+            )
+        except DataNotRegisteredError:
+            pass  # Not registered — proceed with anchoring
+
         tx = self._contract.build_register_data_tx(
             data_hash=swarm_hash,
             data_type=data_type,
@@ -234,6 +248,19 @@ class ChainClient:
             print(f"--- DEBUG: Anchor For ---")
             print(f"Hash: {swarm_hash}")
             print(f"Owner: {owner}")
+
+        # Pre-check: avoid wasting gas on already-registered hashes
+        try:
+            record = self.get(swarm_hash, verbose=verbose)
+            raise DataAlreadyRegisteredError(
+                f"Data hash {swarm_hash} is already registered on-chain",
+                data_hash=swarm_hash,
+                owner=record.owner,
+                timestamp=record.timestamp,
+                data_type=record.data_type,
+            )
+        except DataNotRegisteredError:
+            pass  # Not registered — proceed with anchoring
 
         tx = self._contract.build_register_data_for_tx(
             data_hash=swarm_hash,

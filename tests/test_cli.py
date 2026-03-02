@@ -1792,6 +1792,58 @@ class TestChainAnchorCommand:
         mock_client.anchor.assert_called_once_with(DUMMY_SWARM_REF, data_type="custom-type", verbose=False)
 
 
+class TestChainAnchorAlreadyRegistered:
+    """Tests for chain anchor already-registered error handling."""
+
+    def test_anchor_already_registered(self, mocker):
+        """Tests that already-registered hash shows human-readable output."""
+        from swarm_provenance_uploader.exceptions import DataAlreadyRegisteredError
+
+        mock_client = mocker.MagicMock()
+        mock_client.anchor.side_effect = DataAlreadyRegisteredError(
+            "already registered",
+            data_hash=DUMMY_SWARM_REF,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1
+        assert "Already registered" in result.stdout
+        assert DUMMY_ADDRESS in result.stdout
+        assert "swarm-provenance" in result.stdout
+
+    def test_anchor_already_registered_json(self, mocker):
+        """Tests that already-registered hash shows JSON output with --json."""
+        from swarm_provenance_uploader.exceptions import DataAlreadyRegisteredError
+        import json
+
+        mock_client = mocker.MagicMock()
+        mock_client.anchor.side_effect = DataAlreadyRegisteredError(
+            "already registered",
+            data_hash=DUMMY_SWARM_REF,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
+
+        assert result.exit_code == 1
+        output = json.loads(result.stdout)
+        assert output["error"] == "already_registered"
+        assert output["data_hash"] == DUMMY_SWARM_REF
+        assert output["owner"] == DUMMY_ADDRESS
+        assert output["timestamp"] == 1700000000
+        assert output["data_type"] == "swarm-provenance"
+
+
 class TestChainTransformCommand:
     """Tests for chain transform command."""
 
