@@ -69,6 +69,7 @@ _chain_config = {
     "contract": config.CHAIN_CONTRACT,
     "wallet_key_env": config.CHAIN_WALLET_KEY_ENV,
     "explorer_url": config.CHAIN_EXPLORER_URL,
+    "gas_limit": config.CHAIN_GAS_LIMIT,
 }
 
 
@@ -102,6 +103,7 @@ def _get_chain_client(verbose: bool = False):
             contract_address=_chain_config["contract"],
             private_key_env=_chain_config["wallet_key_env"],
             explorer_url=_chain_config["explorer_url"],
+            gas_limit=_chain_config.get("gas_limit"),
         )
     except exceptions.ChainConfigurationError as e:
         typer.secho(f"ERROR: Chain configuration invalid: {e}", fg=typer.colors.RED, err=True)
@@ -1847,6 +1849,7 @@ def chain_anchor(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to anchor on-chain.")],
     data_type: Annotated[str, typer.Option("--type", "-t", help="Data type/category.")] = "swarm-provenance",
     owner: Annotated[Optional[str], typer.Option("--owner", help="Register on behalf of this owner address (requires delegate authorization).")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -1855,6 +1858,8 @@ def chain_anchor(
 
     Use --owner to register on behalf of another address (caller must be authorized delegate).
     """
+    if gas is not None:
+        _chain_config["gas_limit"] = gas
     try:
         client = _get_chain_client(verbose=verbose)
         if owner:
@@ -1863,6 +1868,24 @@ def chain_anchor(
             result = client.anchor(swarm_hash, data_type=data_type, verbose=verbose)
     except typer.Exit:
         raise
+    except exceptions.DataAlreadyRegisteredError as e:
+        if output_json:
+            from datetime import datetime, timezone
+            typer.echo(json.dumps({
+                "error": "already_registered",
+                "data_hash": e.data_hash,
+                "owner": e.owner,
+                "timestamp": e.timestamp,
+                "data_type": e.data_type,
+            }, indent=2))
+        else:
+            from datetime import datetime, timezone
+            ts_str = datetime.fromtimestamp(e.timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC") if e.timestamp else "unknown"
+            typer.secho(f"\nAlready registered: {e.data_hash}", fg=typer.colors.YELLOW)
+            typer.echo(f"  Owner:   {e.owner}")
+            typer.echo(f"  Type:    {e.data_type}")
+            typer.echo(f"  Time:    {ts_str}")
+        raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -1896,6 +1919,7 @@ def chain_anchor(
 @chain_app.command("access")
 def chain_access(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to record access for.")],
+    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -1905,6 +1929,8 @@ def chain_access(
     This operation is idempotent - recording access multiple times
     for the same hash and accessor is safe.
     """
+    if gas is not None:
+        _chain_config["gas_limit"] = gas
     try:
         client = _get_chain_client(verbose=verbose)
         result = client.access(swarm_hash, verbose=verbose)
@@ -1941,6 +1967,7 @@ def chain_access(
 def chain_status(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to query or update status.")],
     set_status: Annotated[Optional[str], typer.Option("--set", help="Set status: active, restricted, deleted.")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -1950,6 +1977,8 @@ def chain_status(
     Without --set: shows current status.
     With --set: changes status to active, restricted, or deleted.
     """
+    if gas is not None:
+        _chain_config["gas_limit"] = gas
     status_map = {"active": 0, "restricted": 1, "deleted": 2}
 
     if set_status is not None:
@@ -2028,12 +2057,15 @@ def chain_status(
 def chain_transfer(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to transfer.")],
     to: Annotated[str, typer.Option("--to", help="New owner address.")],
+    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
     """
     Transfer ownership of a data hash to a new address.
     """
+    if gas is not None:
+        _chain_config["gas_limit"] = gas
     try:
         client = _get_chain_client(verbose=verbose)
         result = client.transfer_ownership(swarm_hash, new_owner=to, verbose=verbose)
@@ -2073,6 +2105,7 @@ def chain_delegate(
     address: Annotated[str, typer.Argument(help="Delegate address to authorize or revoke.")],
     authorize: Annotated[bool, typer.Option("--authorize", help="Authorize this delegate.")] = False,
     revoke: Annotated[bool, typer.Option("--revoke", help="Revoke this delegate.")] = False,
+    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -2082,6 +2115,8 @@ def chain_delegate(
     A delegate can anchor data on behalf of the caller.
     Must provide exactly one of --authorize or --revoke.
     """
+    if gas is not None:
+        _chain_config["gas_limit"] = gas
     if authorize == revoke:
         typer.secho(
             "ERROR: Specify exactly one of --authorize or --revoke.",
@@ -2129,6 +2164,7 @@ def chain_transform(
     new_hash: Annotated[str, typer.Argument(help="Hash of the transformed data.")],
     description: Annotated[str, typer.Option("--description", "-d", help="Description of the transformation.")] = "",
     restrict_original: Annotated[bool, typer.Option("--restrict-original", help="Set original hash status to RESTRICTED after transform.")] = False,
+    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -2138,6 +2174,8 @@ def chain_transform(
     The original hash must already be anchored on-chain.
     Use --restrict-original to automatically restrict the original after transform.
     """
+    if gas is not None:
+        _chain_config["gas_limit"] = gas
     try:
         client = _get_chain_client(verbose=verbose)
         result = client.transform(original_hash, new_hash, description=description, verbose=verbose)
@@ -2205,6 +2243,7 @@ def chain_protect(
     description: Annotated[str, typer.Option("--description", "-d", help="Description of the transformation.")] = "",
     anchor_new: Annotated[bool, typer.Option("--anchor-new", help="Anchor the new hash if not already registered.")] = False,
     data_type: Annotated[str, typer.Option("--type", "-t", help="Data type for anchoring new hash.")] = "swarm-provenance",
+    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -2217,6 +2256,8 @@ def chain_protect(
     3. Records the transformation (original -> new)
     4. Sets original status to RESTRICTED
     """
+    if gas is not None:
+        _chain_config["gas_limit"] = gas
     try:
         client = _get_chain_client(verbose=verbose)
     except typer.Exit:
@@ -2250,6 +2291,10 @@ def chain_protect(
             results["anchor"] = anchor_result
             if not output_json:
                 typer.secho(f"New hash anchored.", fg=typer.colors.GREEN)
+        except exceptions.DataAlreadyRegisteredError:
+            # Already anchored is fine for protect — continue with transform
+            if not output_json:
+                typer.secho(f"New hash already anchored, continuing.", fg=typer.colors.YELLOW)
         except exceptions.ChainError as e:
             typer.secho(f"ERROR: Failed to anchor new hash: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)

@@ -76,3 +76,10 @@ CHAIN_EXPLORER_URL = os.getenv("CHAIN_EXPLORER_URL")
 
 # Environment variable name that contains the wallet private key
 CHAIN_WALLET_KEY_ENV = os.getenv("CHAIN_WALLET_KEY_ENV", "PROVENANCE_WALLET_KEY")
+
+# Explicit gas limit (optional, overrides estimation when set)
+try:
+    _chain_gas_limit_str = os.getenv("CHAIN_GAS_LIMIT")
+    CHAIN_GAS_LIMIT = int(_chain_gas_limit_str) if _chain_gas_limit_str else None
+except (ValueError, TypeError):
+    CHAIN_GAS_LIMIT = None

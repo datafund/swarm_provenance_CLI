@@ -210,6 +210,7 @@ swarm-prov-upload chain balance --json
 swarm-prov-upload chain anchor <swarm_hash>
 swarm-prov-upload chain anchor <swarm_hash> --type "dataset"
 swarm-prov-upload chain anchor <swarm_hash> --owner <address>  # anchor as delegate
+swarm-prov-upload chain anchor <swarm_hash> --gas 500000      # explicit gas limit
 
 # Record data access
 swarm-prov-upload chain access <swarm_hash>
@@ -268,6 +269,7 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 | `CHAIN_RPC_URL` | Custom RPC URL (optional) | Uses preset |
 | `CHAIN_CONTRACT` | Custom contract address (optional) | Uses preset |
 | `CHAIN_EXPLORER_URL` | Custom block explorer URL (optional) | Uses preset |
+| `CHAIN_GAS_LIMIT` | Explicit gas limit (optional, skips RPC estimation) | Auto-estimated |
 
 ### Testnet Setup
 

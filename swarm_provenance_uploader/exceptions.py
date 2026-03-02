@@ -222,3 +222,21 @@ class DataNotRegisteredError(ChainError):
     def __init__(self, message: str, data_hash: str = None):
         super().__init__(message)
         self.data_hash = data_hash
+
+
+class DataAlreadyRegisteredError(ChainError):
+    """Data hash is already registered on-chain."""
+
+    def __init__(
+        self,
+        message: str,
+        data_hash: str = None,
+        owner: str = None,
+        timestamp: int = None,
+        data_type: str = None,
+    ):
+        super().__init__(message)
+        self.data_hash = data_hash
+        self.owner = owner
+        self.timestamp = timestamp
+        self.data_type = data_type
