@@ -103,6 +103,26 @@ DEFAULT_POSTAGE_DURATION_HOURS=25    # Stamp validity in hours (gateway only, mi
 DEFAULT_POSTAGE_AMOUNT=1000000000    # Legacy: for local backend
 ```
 
+## Free Tier Mode (Optional)
+
+For development and testing, use the gateway free tier — no wallet or payment configuration needed. Rate-limited to 3 requests/minute.
+
+```bash
+# Upload with free tier
+swarm-prov-upload --free upload --file data.txt --std "PROV-STD-V1"
+
+# Health check with free tier
+swarm-prov-upload --free health
+
+# Enable via environment variable
+export FREE_TIER=true
+swarm-prov-upload upload --file data.txt
+```
+
+| Environment Variable | Description | Default |
+|---------------------|-------------|---------|
+| `FREE_TIER` | Use gateway free tier (rate-limited) | `false` |
+
 ## x402 Payment Mode (Optional)
 
 x402 enables pay-per-request payments using USDC on Base chain. When the gateway requires payment (HTTP 402), the CLI automatically handles the payment flow.
@@ -159,6 +179,7 @@ swarm-prov-upload x402 info
 
 | Flag | Description |
 |------|-------------|
+| `--free` / `--no-free` | Enable/disable free tier mode |
 | `--x402` / `--no-x402` | Enable/disable x402 for this command |
 | `--auto-pay` / `--no-auto-pay` | Enable/disable auto-pay |
 | `--max-pay FLOAT` | Maximum auto-pay amount in USD |
@@ -806,6 +827,9 @@ See [examples/README.md](examples/README.md) for the full guide with walkthrough
 │  │ │ • provenance_standard: str? │ │  │ • DEFAULT_POSTAGE_AMOUNT           │  │
 │  │ │ • encryption: str?          │ │  │ • .env file support                │  │
 │  │ └─────────────────────────────┘ │  │                                     │  │
+│  │                                 │  │ Free Tier:                          │  │
+│  │                                 │  │ • FREE_TIER                         │  │
+│  │                                 │  │                                     │  │
 │  │                                 │  │ x402 Configuration:                 │  │
 │  │ x402 Payment Models:            │  │ • X402_ENABLED                      │  │
 │  │ • X402PaymentOption             │  │ • X402_PRIVATE_KEY            │  │

@@ -58,6 +58,10 @@ except (ValueError, TypeError):
 # Custom RPC URL (optional, uses default if not set)
 X402_RPC_URL = os.getenv("X402_RPC_URL")
 
+# --- Free Tier Mode ---
+# Sends X-Payment-Mode: free header (rate-limited to 3 req/min)
+FREE_TIER = os.getenv("FREE_TIER", "false").lower() == "true"
+
 # --- Chain / Blockchain Configuration ---
 # Enable on-chain anchoring (disabled by default)
 CHAIN_ENABLED = os.getenv("CHAIN_ENABLED", "false").lower() == "true"
