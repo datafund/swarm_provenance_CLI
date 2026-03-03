@@ -1226,3 +1226,56 @@ class TestGatewayClientManifest:
         url = mock.last_request.url.lower()
         assert "deferred=true" in url
         assert "redundancy=true" in url
+
+
+class TestGatewayClientFreeTier:
+    """Tests for free tier header functionality."""
+
+    def test_free_tier_constructor(self):
+        """Tests that free_tier parameter is stored correctly."""
+        client = GatewayClient(base_url="https://test.gateway.io", free_tier=True)
+        assert client.free_tier is True
+
+        client2 = GatewayClient(base_url="https://test.gateway.io", free_tier=False)
+        assert client2.free_tier is False
+
+    def test_free_tier_disabled_by_default(self):
+        """Tests that free_tier is disabled by default."""
+        client = GatewayClient(base_url="https://test.gateway.io")
+        assert client.free_tier is False
+
+    def test_free_tier_header_in_get_headers(self):
+        """Tests that free_tier=True adds X-Payment-Mode: free header."""
+        client = GatewayClient(base_url="https://test.gateway.io", free_tier=True)
+        headers = client._get_headers()
+        assert headers.get("X-Payment-Mode") == "free"
+
+    def test_free_tier_header_not_set_by_default(self):
+        """Tests that free_tier=False does not add X-Payment-Mode header."""
+        client = GatewayClient(base_url="https://test.gateway.io", free_tier=False)
+        headers = client._get_headers()
+        assert "X-Payment-Mode" not in headers
+
+    def test_free_tier_header_in_upload_data(self, requests_mock):
+        """Tests that free tier header is sent in upload_data requests."""
+        adapter = requests_mock.post(
+            "https://test.gateway.io/api/v1/data/",
+            json={"reference": DUMMY_SWARM_REF},
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io", free_tier=True)
+        client.upload_data(data=b"test data", stamp_id=DUMMY_STAMP)
+
+        assert adapter.last_request.headers.get("X-Payment-Mode") == "free"
+
+    def test_free_tier_header_not_in_upload_when_disabled(self, requests_mock):
+        """Tests that free tier header is NOT sent when disabled."""
+        adapter = requests_mock.post(
+            "https://test.gateway.io/api/v1/data/",
+            json={"reference": DUMMY_SWARM_REF},
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io", free_tier=False)
+        client.upload_data(data=b"test data", stamp_id=DUMMY_STAMP)
+
+        assert "X-Payment-Mode" not in adapter.last_request.headers

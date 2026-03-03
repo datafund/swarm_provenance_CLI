@@ -66,6 +66,7 @@ class GatewayClient:
         x402_auto_pay: bool = False,
         x402_max_auto_pay_usd: float = 1.00,
         x402_payment_callback: Optional[Callable[[str, str], bool]] = None,
+        free_tier: bool = False,
     ):
         """
         Initialize the gateway client.
@@ -80,9 +81,11 @@ class GatewayClient:
             x402_max_auto_pay_usd: Maximum auto-pay amount in USD
             x402_payment_callback: Optional callback for payment confirmation.
                                    Called with (amount_usd, description) -> bool
+            free_tier: Send X-Payment-Mode: free header (rate-limited)
         """
         self.base_url = (base_url or os.getenv("PROVENANCE_GATEWAY_URL", self.DEFAULT_URL)).rstrip("/")
         self.api_key = api_key or os.getenv("PROVENANCE_GATEWAY_API_KEY")
+        self.free_tier = free_tier
 
         # x402 configuration
         self.x402_enabled = x402_enabled
@@ -108,6 +111,8 @@ class GatewayClient:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.free_tier:
+            headers["X-Payment-Mode"] = "free"
         return headers
 
     def _make_url(self, path: str) -> str:
@@ -145,13 +150,13 @@ class GatewayClient:
                     amounts = [opt.get("maxAmountRequired", "?") for opt in accepts]
                     raise PaymentRequiredError(
                         f"Payment required (amounts: {amounts}). "
-                        "Enable x402 with --x402 flag or X402_ENABLED=true",
+                        "Enable x402 with --x402 flag or use --free for free tier",
                         payment_options=accepts,
                     )
             except (ValueError, KeyError):
                 pass
             raise PaymentRequiredError(
-                "Payment required. Enable x402 with --x402 flag or X402_ENABLED=true"
+                "Payment required. Enable x402 with --x402 flag or use --free for free tier"
             )
 
         x402_client = self._get_x402_client()
@@ -526,6 +531,8 @@ class GatewayClient:
             headers = {}
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
+            if self.free_tier:
+                headers["X-Payment-Mode"] = "free"
 
             # Use _make_paid_request for x402 support
             response = self._make_paid_request(
@@ -987,6 +994,8 @@ class GatewayClient:
             headers = {}
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
+            if self.free_tier:
+                headers["X-Payment-Mode"] = "free"
 
             # Use _make_paid_request for x402 support
             response = self._make_paid_request(
@@ -1108,6 +1117,8 @@ class GatewayClient:
             headers = {}
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
+            if self.free_tier:
+                headers["X-Payment-Mode"] = "free"
 
             response = self._make_paid_request(
                 "POST",

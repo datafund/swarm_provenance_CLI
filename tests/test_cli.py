@@ -25,6 +25,7 @@ def reset_backend_config():
     _backend_config["backend"] = "gateway"
     _backend_config["gateway_url"] = "https://provenance-gateway.datafund.io"
     _backend_config["bee_url"] = "http://localhost:1633"
+    _backend_config["free_tier"] = False
     _x402_config["enabled"] = False
     _x402_config["auto_pay"] = False
     _x402_config["max_auto_pay_usd"] = 1.00
@@ -41,6 +42,7 @@ def reset_backend_config():
     _backend_config["backend"] = "gateway"
     _backend_config["gateway_url"] = "https://provenance-gateway.datafund.io"
     _backend_config["bee_url"] = "http://localhost:1633"
+    _backend_config["free_tier"] = False
     _x402_config["enabled"] = False
     _x402_config["auto_pay"] = False
     _x402_config["max_auto_pay_usd"] = 1.00
@@ -531,7 +533,7 @@ class TestBackendSwitching:
 
         assert result.exit_code == 0
         # Verify custom URL was used
-        mock_constructor.assert_called_with(base_url="https://custom.gateway.io")
+        mock_constructor.assert_called_with(base_url="https://custom.gateway.io", free_tier=False)
 
 
 # =============================================================================
@@ -3768,3 +3770,46 @@ class TestChainGasLimitFlag:
 
         assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
         assert _chain_config["gas_limit"] == 300000
+
+
+# =============================================================================
+# FREE TIER FLAG TESTS
+# =============================================================================
+
+class TestFreeTierFlag:
+    """Tests for --free flag."""
+
+    def test_free_flag_sets_backend_config(self, mocker):
+        """Tests that --free flag sets _backend_config['free_tier']."""
+        mock_client = mocker.MagicMock()
+        mock_client.health_check.return_value = True
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client,
+        )
+
+        result = runner.invoke(app, ["--free", "health"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert _backend_config["free_tier"] is True
+
+    def test_free_flag_default_is_false(self):
+        """Tests that free_tier defaults to False."""
+        assert _backend_config["free_tier"] is False
+
+    def test_free_and_x402_both_set(self, mocker):
+        """Tests that --free and --x402 can both be set (free header sent, x402 also configured)."""
+        mock_client = mocker.MagicMock()
+        mock_client.health_check.return_value = True
+
+        mock_gw_cls = mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client,
+        )
+
+        result = runner.invoke(app, ["--free", "--x402", "health"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert _backend_config["free_tier"] is True
+        assert _x402_config["enabled"] is True

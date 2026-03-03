@@ -51,6 +51,7 @@ _backend_config = {
     "backend": config.BACKEND,
     "gateway_url": config.GATEWAY_URL,
     "bee_url": config.BEE_GATEWAY_URL,
+    "free_tier": config.FREE_TIER,
 }
 
 # Global state for x402 payment configuration
@@ -156,9 +157,10 @@ def _get_gateway_client_with_x402(gateway_url: str, verbose: bool = False) -> Ga
             x402_auto_pay=_x402_config["auto_pay"],
             x402_max_auto_pay_usd=_x402_config["max_auto_pay_usd"],
             x402_payment_callback=_x402_payment_callback,
+            free_tier=_backend_config["free_tier"],
         )
     else:
-        return GatewayClient(base_url=gateway_url)
+        return GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
 
 @app.command()
 def upload(
@@ -584,7 +586,7 @@ def download(
     typer.echo(f"Fetching metadata from Swarm via {backend_url}...")
     try:
         if use_gateway:
-            gw_client = GatewayClient(base_url=gateway_url)
+            gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
             metadata_bytes = gw_client.download_data(swarm_hash, verbose=verbose)
         else:
             metadata_bytes = swarm_client.download_data_from_swarm(local_bee_url, swarm_hash, verbose=verbose)
@@ -642,7 +644,7 @@ def download(
             expected_address = None
             if use_gateway:
                 try:
-                    gw_client = GatewayClient(base_url=gateway_url)
+                    gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
                     notary_info = gw_client.get_notary_info(verbose=verbose)
                     expected_address = notary_info.address
                     if verbose:
@@ -972,7 +974,7 @@ def stamps_list(
         typer.echo(f"Listing stamps from {gateway_url}...")
 
     try:
-        gw_client = GatewayClient(base_url=gateway_url)
+        gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
         result = gw_client.list_stamps(verbose=verbose)
 
         if not result.stamps:
@@ -1019,7 +1021,7 @@ def stamps_info(
 
     try:
         if use_gateway:
-            gw_client = GatewayClient(base_url=gateway_url)
+            gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
             stamp = gw_client.get_stamp(stamp_id, verbose=verbose)
             if not stamp:
                 typer.secho(f"Stamp {stamp_id} not found.", fg=typer.colors.YELLOW)
@@ -1075,7 +1077,7 @@ def stamps_extend(
         typer.echo(f"Extending stamp {stamp_id} with amount {amount}...")
 
     try:
-        gw_client = GatewayClient(base_url=gateway_url)
+        gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
         result_id = gw_client.extend_stamp(stamp_id, amount, verbose=verbose)
         typer.secho(f"SUCCESS: Stamp extended.", fg=typer.colors.GREEN)
         typer.echo(f"Batch ID: {result_id}")
@@ -1100,7 +1102,7 @@ def stamps_pool_status(
         typer.echo(f"Getting pool status from {gateway_url}...")
 
     try:
-        gw_client = GatewayClient(base_url=gateway_url)
+        gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
         status = gw_client.get_pool_status(verbose=verbose)
 
         typer.echo(f"\nStamp Pool Status:")
@@ -1169,7 +1171,7 @@ def stamps_check(
         typer.echo(f"Checking stamp health from {gateway_url}...")
 
     try:
-        gw_client = GatewayClient(base_url=gateway_url)
+        gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
         health = gw_client.check_stamp_health(stamp_id, verbose=verbose)
 
         typer.echo(f"\nStamp Health Check:")
@@ -1235,7 +1237,7 @@ def wallet(
         typer.echo(f"Getting wallet info from {gateway_url}...")
 
     try:
-        gw_client = GatewayClient(base_url=gateway_url)
+        gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
         wallet_info = gw_client.get_wallet(verbose=verbose)
         typer.echo(f"\nWallet Information:")
         typer.echo(f"  Address: {wallet_info.walletAddress}")
@@ -1261,7 +1263,7 @@ def chequebook(
         typer.echo(f"Getting chequebook info from {gateway_url}...")
 
     try:
-        gw_client = GatewayClient(base_url=gateway_url)
+        gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
         cheque_info = gw_client.get_chequebook(verbose=verbose)
         typer.echo(f"\nChequebook Information:")
         typer.echo(f"  Address:           {cheque_info.chequebookAddress}")
@@ -1296,7 +1298,7 @@ def health(
     start_time = time_module.time()
     try:
         if use_gateway:
-            gw_client = GatewayClient(base_url=gateway_url)
+            gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
             is_healthy = gw_client.health_check(verbose=verbose)
         else:
             # For local Bee, try to get stamps endpoint as health check
@@ -1476,7 +1478,7 @@ def notary_info(
         typer.echo(f"Getting notary info from {gateway_url}...")
 
     try:
-        gw_client = GatewayClient(base_url=gateway_url)
+        gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
         info = gw_client.get_notary_info(verbose=verbose)
 
         typer.echo(f"\nNotary Service:")
@@ -1525,7 +1527,7 @@ def notary_status(
         typer.echo(f"Checking notary status from {gateway_url}...")
 
     try:
-        gw_client = GatewayClient(base_url=gateway_url)
+        gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
         status = gw_client.get_notary_status(verbose=verbose)
 
         if status.available:
@@ -1603,7 +1605,7 @@ def notary_verify(
             typer.echo(f"Fetching notary address from {gateway_url}...")
 
         try:
-            gw_client = GatewayClient(base_url=gateway_url)
+            gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
             info = gw_client.get_notary_info(verbose=verbose)
             expected_address = info.address
             if not expected_address:
@@ -2386,6 +2388,10 @@ def main(
         "--chain-rpc",
         help="Custom RPC URL for blockchain connection."
     )] = None,
+    free: Annotated[Optional[bool], typer.Option(
+        "--free",
+        help="Use gateway free tier (X-Payment-Mode: free, rate-limited)."
+    )] = None,
 ):
     """
     Swarm Provenance CLI Toolkit - Wraps and uploads data to Swarm.
@@ -2395,6 +2401,8 @@ def main(
 
     For pay-per-request mode, use --x402 to enable x402 payments.
     Requires X402_PRIVATE_KEY environment variable.
+
+    For testing/development, use --free for rate-limited free tier access.
     """
     if backend:
         if backend not in ("gateway", "local"):
@@ -2417,6 +2425,10 @@ def main(
             typer.secho(f"ERROR: Invalid x402 network '{x402_network}'. Use 'base-sepolia' or 'base'.", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
         _x402_config["network"] = x402_network
+
+    # Free tier configuration
+    if free is not None:
+        _backend_config["free_tier"] = free
 
     # Chain configuration
     if chain:

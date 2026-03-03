@@ -142,6 +142,9 @@ swarm-prov-upload x402 status
 swarm-prov-upload x402 balance
 swarm-prov-upload x402 info
 
+# Upload with free tier (rate-limited, no wallet needed)
+swarm-prov-upload --free upload --file /path/to/data.txt
+
 # Upload with x402 enabled
 swarm-prov-upload --x402 upload --file /path/to/data.txt
 
@@ -314,6 +317,9 @@ Uses python-dotenv for environment configuration:
 - `DEFAULT_POSTAGE_DEPTH`: Stamp depth parameter (default: 17)
 - `DEFAULT_POSTAGE_DURATION_HOURS`: Stamp validity in hours (gateway only, default: 25)
 - `DEFAULT_POSTAGE_AMOUNT`: Legacy PLUR amount for local backend (default: 1000000000)
+
+**Free Tier Mode**:
+- `FREE_TIER`: Use gateway free tier with `X-Payment-Mode: free` header (default: false, rate-limited to 3 req/min)
 
 **x402 Payment Configuration**:
 - `X402_ENABLED`: Enable x402 payment support (default: false)
