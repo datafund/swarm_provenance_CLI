@@ -10,8 +10,8 @@ How the chain subsystem is structured internally:
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          CLI Layer (cli.py)                         │
 │                                                                     │
-│  chain balance | anchor | verify | get | access | transform         │
-│  chain status | transfer | delegate | protect                       │
+│  chain balance | anchor | verify | get | access | transform | merge  │
+│  chain status | transfer | delegate | protect                        │
 │  Global flags: --chain, --chain-rpc                                 │
 └──────────────────────────┬──────────────────────────────────────────┘
                            │
@@ -507,6 +507,77 @@ swarm-prov-upload chain status aaa... --set restricted
 
 # Alternatively, steps 3+4 in one command:
 swarm-prov-upload chain transform aaa... bbb... --restrict-original -d "Removed PII"
+```
+
+## Merge Transformation (N-to-1)
+
+Combine multiple data sources into one. Unlike `transform` (1-to-1), `merge` links 2-50 source hashes to a single new hash.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                       Merge Transformation Flow                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+  On-chain records:
+
+  ┌─────────────────────┐
+  │  Dataset A           │
+  │  hash: aaa...        │──────────┐
+  │  type: survey-data   │          │
+  │  status: ACTIVE      │          │  merge_transform()
+  └─────────────────────┘          │  "Combined survey regions"
+                                    │
+  ┌─────────────────────┐          │       ┌─────────────────────┐
+  │  Dataset B           │          ├──────>│  Merged Dataset      │
+  │  hash: bbb...        │──────────┘       │  hash: mmm...        │
+  │  type: survey-data   │                  │  type: merged-dataset │
+  │  status: ACTIVE      │                  │  owner: 0x742d...    │
+  └─────────────────────┘                  │  status: ACTIVE      │
+                                            └─────────────────────┘
+
+  Key differences from transform:
+  - Multiple sources (2-50) instead of one
+  - New hash is auto-registered by the contract
+  - All source hashes must already be anchored
+```
+
+**CLI commands:**
+```bash
+# 1. Anchor both source datasets
+swarm-prov-upload chain anchor aaa... --type survey-data
+swarm-prov-upload chain anchor bbb... --type survey-data
+
+# 2. Record the merge
+swarm-prov-upload chain merge aaa... bbb... mmm... --description "Combined survey regions"
+
+# 3. Merge with custom type
+swarm-prov-upload chain merge aaa... bbb... mmm... --type "combined-dataset" -d "Merged"
+
+# 4. Verify the merged hash is registered
+swarm-prov-upload chain verify mmm...
+
+# 5. View the merged record
+swarm-prov-upload chain get mmm... --json
+```
+
+**Python API:**
+```python
+from swarm_provenance_uploader.core.chain_client import ChainClient
+
+client = ChainClient()
+
+# Anchor sources
+client.anchor("aaa...", data_type="survey-data")
+client.anchor("bbb...", data_type="survey-data")
+
+# Record merge
+result = client.merge_transform(
+    source_hashes=["aaa...", "bbb..."],
+    new_hash="mmm...",
+    description="Combined survey regions",
+    new_data_type="combined-dataset",
+)
+print(f"TX: {result.tx_hash}, Gas: {result.gas_used}")
 ```
 
 ## Depth-Limited Chain Traversal

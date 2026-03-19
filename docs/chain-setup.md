@@ -208,6 +208,40 @@ swarm-prov-upload chain anchor <original_hash>
 swarm-prov-upload chain transform <original_hash> <new_hash> --description "Anonymized PII fields"
 ```
 
+### Merge multiple datasets
+
+When you combine multiple data sources into one, record it as a merge transformation:
+
+```bash
+# All source hashes must be anchored first
+swarm-prov-upload chain anchor <hash_a>
+swarm-prov-upload chain anchor <hash_b>
+
+# Record the merge (2-50 sources supported)
+swarm-prov-upload chain merge <hash_a> <hash_b> <merged_hash> --description "Combined datasets"
+
+# With a custom data type for the merged result
+swarm-prov-upload chain merge <hash_a> <hash_b> <merged_hash> --type "combined-dataset" -d "Merged A+B"
+```
+
+### Walk the provenance chain
+
+Trace data lineage back through transformations:
+
+```bash
+# Get full provenance record
+swarm-prov-upload chain get <hash>
+
+# Walk the full transformation chain (follows links to root)
+swarm-prov-upload chain get <hash> --follow
+
+# Limit traversal depth
+swarm-prov-upload chain get <hash> --follow --depth 2
+
+# JSON output for scripting
+swarm-prov-upload chain get <hash> --follow --json
+```
+
 ### Record data access
 
 Log that data was accessed (idempotent — safe to record multiple times):

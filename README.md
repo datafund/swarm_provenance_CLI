@@ -1037,6 +1037,8 @@ swarm_provenance_uploader/
 │   │   ├── provider.py          # Web3 connection management
 │   │   ├── wallet.py            # Transaction signing
 │   │   ├── contract.py          # DataProvenance contract wrapper
+│   │   ├── event_cache.py       # Transformation event cache (v1 fallback)
+│   │   ├── exceptions.py        # Chain-specific exception hierarchy
 │   │   └── abi/
 │   │       └── DataProvenance.json  # Contract ABI
 │   └── core/
