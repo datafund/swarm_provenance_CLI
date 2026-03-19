@@ -314,6 +314,7 @@ The codebase implements comprehensive error handling:
 - Postage stamp validation with retry logic
 - File I/O error handling with clear user feedback
 - JSON parsing errors with context
+- Chain pre-flight balance check: `_send_transaction()` estimates gas cost and raises `InsufficientFundsError` with actionable guidance (wallet address, balance, estimated cost, faucet/bridge URL) before broadcasting
 
 ### Configuration Management
 Uses python-dotenv for environment configuration:

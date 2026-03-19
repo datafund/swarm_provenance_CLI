@@ -45,6 +45,8 @@ CHAIN_PRESETS = {
             "https://base-sepolia-rpc.publicnode.com",
             "https://base-sepolia.drpc.org",
         ],
+        "faucet_url": "https://www.alchemy.com/faucets/base-sepolia",
+        "bridge_url": None,
     },
     "base": {
         "chain_id": 8453,
@@ -56,6 +58,8 @@ CHAIN_PRESETS = {
             "https://base-rpc.publicnode.com",
             "https://base.drpc.org",
         ],
+        "faucet_url": None,
+        "bridge_url": "https://bridge.base.org",
     },
     "localhost": {
         "chain_id": 31337,
@@ -64,6 +68,8 @@ CHAIN_PRESETS = {
         "contract_address": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
         "deploy_block": 0,
         "rpc_fallbacks": [],
+        "faucet_url": None,
+        "bridge_url": None,
     },
 }
 

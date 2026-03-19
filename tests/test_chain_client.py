@@ -10,6 +10,7 @@ from swarm_provenance_uploader.exceptions import (
     ChainConnectionError,
     ChainTransactionError,
     ChainValidationError,
+    InsufficientFundsError,
     DataAlreadyRegisteredError,
     DataNotRegisteredError,
     TransformationAlreadyExistsError,
@@ -55,6 +56,7 @@ def mock_chain_deps():
         mock_web3_instance.eth.chain_id = 84532
         mock_web3_instance.eth.block_number = 12345678
         mock_web3_instance.eth.get_balance.return_value = 1_000_000_000_000_000_000  # 1 ETH
+        mock_web3_instance.eth.gas_price = 1_000_000_000  # 1 gwei
         mock_web3_instance.eth.get_transaction_count.return_value = 0
         mock_web3_instance.eth.estimate_gas.return_value = 100_000
         mock_web3_instance.eth.send_raw_transaction.return_value = DUMMY_TX_HASH_BYTES
@@ -2174,3 +2176,154 @@ class TestABIV2Functions:
         event_names = [e["name"] for e in abi if e.get("type") == "event"]
 
         assert "DataMerged" in event_names
+
+
+class TestInsufficientFundsError:
+    """Tests for the InsufficientFundsError exception class."""
+
+    def test_inherits_from_chain_transaction_error(self):
+        """Tests that InsufficientFundsError is a subclass of ChainTransactionError."""
+        err = InsufficientFundsError("low funds")
+        assert isinstance(err, ChainTransactionError)
+        assert isinstance(err, InsufficientFundsError)
+
+    def test_carries_structured_data(self):
+        """Tests that exception carries wallet, balance, cost, and chain info."""
+        err = InsufficientFundsError(
+            "low funds",
+            wallet_address=DUMMY_ADDRESS,
+            balance_wei=500,
+            estimated_cost_wei=1000,
+            chain_name="base-sepolia",
+        )
+        assert err.wallet_address == DUMMY_ADDRESS
+        assert err.balance_wei == 500
+        assert err.estimated_cost_wei == 1000
+        assert err.chain_name == "base-sepolia"
+        assert err.tx_hash is None
+
+    def test_caught_by_chain_transaction_error_handler(self):
+        """Tests backward compatibility — caught by existing ChainTransactionError handlers."""
+        with pytest.raises(ChainTransactionError):
+            raise InsufficientFundsError("low funds")
+
+
+class TestPreflightBalanceCheck:
+    """Tests for the pre-flight balance check in ChainClient."""
+
+    def test_zero_balance_raises(self, mock_chain_deps):
+        """Tests that zero balance raises InsufficientFundsError."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        mock_chain_deps["web3_instance"].eth.get_balance.return_value = 0
+
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(InsufficientFundsError) as exc_info:
+            client._check_balance(estimated_cost_wei=100_000_000_000_000)
+        assert exc_info.value.wallet_address == DUMMY_ADDRESS
+        assert exc_info.value.balance_wei == 0
+        assert exc_info.value.chain_name == "base-sepolia"
+
+    def test_below_cost_raises(self, mock_chain_deps):
+        """Tests that balance below estimated cost raises InsufficientFundsError."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        # Balance is 0.0001 ETH, cost is 0.001 ETH
+        mock_chain_deps["web3_instance"].eth.get_balance.return_value = 100_000_000_000_000
+
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(InsufficientFundsError) as exc_info:
+            client._check_balance(estimated_cost_wei=1_000_000_000_000_000)
+        assert exc_info.value.estimated_cost_wei == 1_000_000_000_000_000
+
+    def test_above_cost_passes(self, mock_chain_deps):
+        """Tests that sufficient balance does not raise."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        # Balance is 1 ETH (default in fixture)
+        client = ChainClient(chain="base-sepolia")
+        # Should not raise
+        client._check_balance(estimated_cost_wei=100_000_000_000_000)
+
+    def test_low_balance_warns(self, mock_chain_deps, capsys):
+        """Tests that balance above cost but below LOW_BALANCE_WEI logs a warning."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient, LOW_BALANCE_WEI
+
+        # Balance is 0.0005 ETH — above MIN but below LOW
+        mock_chain_deps["web3_instance"].eth.get_balance.return_value = 500_000_000_000_000
+
+        client = ChainClient(chain="base-sepolia")
+        # Should not raise, but should warn
+        client._check_balance(estimated_cost_wei=100_000_000_000_000)
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.err or "Low balance" in captured.err
+
+    def test_send_transaction_preflight_raises(self, mock_chain_deps):
+        """Tests that _send_transaction raises InsufficientFundsError on low balance."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        # Set balance to 0
+        mock_chain_deps["web3_instance"].eth.get_balance.return_value = 0
+
+        # Pre-check: hash not registered (so anchor proceeds to _send_transaction)
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(InsufficientFundsError) as exc_info:
+            client.anchor(swarm_hash=DUMMY_HASH)
+        assert exc_info.value.wallet_address == DUMMY_ADDRESS
+
+    def test_send_transaction_detects_insufficient_funds_string(self, mock_chain_deps):
+        """Tests that RPC 'insufficient funds' errors are converted to InsufficientFundsError."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        # Balance is enough for pre-flight check
+        mock_chain_deps["web3_instance"].eth.get_balance.return_value = 1_000_000_000_000_000_000
+
+        # Pre-check: hash not registered
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+        )
+
+        # Make send_raw_transaction raise with "insufficient funds" message
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.side_effect = Exception(
+            "insufficient funds for gas * price + value"
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(InsufficientFundsError) as exc_info:
+            client.anchor(swarm_hash=DUMMY_HASH)
+        assert exc_info.value.wallet_address == DUMMY_ADDRESS
+        assert exc_info.value.chain_name == "base-sepolia"
+
+
+class TestChainPresetFundUrls:
+    """Tests that CHAIN_PRESETS include faucet/bridge URLs."""
+
+    def test_base_sepolia_has_faucet(self):
+        """Tests that base-sepolia preset has a faucet URL."""
+        from swarm_provenance_uploader.chain.provider import CHAIN_PRESETS
+
+        preset = CHAIN_PRESETS["base-sepolia"]
+        assert preset["faucet_url"] is not None
+        assert "faucet" in preset["faucet_url"] or "sepolia" in preset["faucet_url"]
+        assert preset["bridge_url"] is None
+
+    def test_base_has_bridge(self):
+        """Tests that base mainnet preset has a bridge URL."""
+        from swarm_provenance_uploader.chain.provider import CHAIN_PRESETS
+
+        preset = CHAIN_PRESETS["base"]
+        assert preset["bridge_url"] is not None
+        assert "bridge" in preset["bridge_url"]
+        assert preset["faucet_url"] is None
+
+    def test_localhost_has_neither(self):
+        """Tests that localhost preset has no faucet or bridge URL."""
+        from swarm_provenance_uploader.chain.provider import CHAIN_PRESETS
+
+        preset = CHAIN_PRESETS["localhost"]
+        assert preset["faucet_url"] is None
+        assert preset["bridge_url"] is None

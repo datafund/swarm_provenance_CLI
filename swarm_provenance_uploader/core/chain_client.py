@@ -14,6 +14,7 @@ from typing import List, Optional
 from ..chain.contract import DataStatus
 from ..chain.exceptions import (
     ChainTransactionError,
+    InsufficientFundsError,
     DataAlreadyRegisteredError,
     DataNotRegisteredError,
     TransformationAlreadyExistsError,
@@ -30,6 +31,10 @@ from ..models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Balance thresholds for pre-flight checks
+MIN_BALANCE_WEI = 100_000_000_000_000       # 0.0001 ETH — hard floor
+LOW_BALANCE_WEI = 1_000_000_000_000_000     # 0.001 ETH  — warning threshold
 
 
 class ChainClient:
@@ -108,6 +113,44 @@ class ChainClient:
 
     # --- Internal helpers ---
 
+    def _check_balance(self, estimated_cost_wei: int = 0) -> None:
+        """
+        Pre-flight balance check before sending a transaction.
+
+        Args:
+            estimated_cost_wei: Estimated transaction cost in wei.
+
+        Raises:
+            InsufficientFundsError: If balance is below the estimated cost
+                or below the hard minimum (MIN_BALANCE_WEI).
+        """
+        import sys
+
+        balance_wei = self._wallet.get_balance(self._provider.web3)
+        threshold = max(estimated_cost_wei, MIN_BALANCE_WEI)
+
+        if balance_wei < threshold:
+            balance_eth = balance_wei / 1e18
+            cost_eth = estimated_cost_wei / 1e18
+            raise InsufficientFundsError(
+                f"Insufficient funds: balance {balance_eth:.6f} ETH, "
+                f"estimated cost {cost_eth:.6f} ETH",
+                wallet_address=self._wallet.address,
+                balance_wei=balance_wei,
+                estimated_cost_wei=estimated_cost_wei,
+                chain_name=self._provider.chain,
+            )
+
+        if balance_wei < LOW_BALANCE_WEI:
+            import typer
+            balance_eth = balance_wei / 1e18
+            typer.secho(
+                f"WARNING: Low balance ({balance_eth:.6f} ETH). "
+                f"Transaction may fail if gas prices spike.",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
+
     def _send_transaction(self, tx: dict, verbose: bool = False) -> dict:
         """
         Estimate gas, sign, broadcast, and wait for receipt.
@@ -120,6 +163,7 @@ class ChainClient:
             Transaction receipt dict.
 
         Raises:
+            InsufficientFundsError: If wallet balance is too low.
             ChainTransactionError: If transaction fails.
         """
         web3 = self._provider.web3
@@ -140,6 +184,11 @@ class ChainClient:
 
             if verbose:
                 print(f"DEBUG: Gas limit: {tx['gas']}")
+
+            # Pre-flight balance check
+            gas_price = tx.get("gasPrice") or web3.eth.gas_price
+            estimated_cost = tx["gas"] * gas_price
+            self._check_balance(estimated_cost)
 
             # Sign and send
             raw_tx = self._wallet.sign_transaction(tx)
@@ -168,9 +217,24 @@ class ChainClient:
 
             return receipt
 
-        except ChainTransactionError:
+        except (ChainTransactionError, InsufficientFundsError):
             raise
         except Exception as e:
+            # Detect "insufficient funds" in RPC error messages and convert
+            if "insufficient funds" in str(e).lower():
+                try:
+                    balance_wei = self._wallet.get_balance(self._provider.web3)
+                    raise InsufficientFundsError(
+                        f"Insufficient funds for gas: {e}",
+                        wallet_address=self._wallet.address,
+                        balance_wei=balance_wei,
+                        estimated_cost_wei=0,
+                        chain_name=self._provider.chain,
+                    ) from e
+                except InsufficientFundsError:
+                    raise
+                except Exception:
+                    pass  # Fall through to generic handler
             tx_hash_str = None
             if "tx_hash" in dir():
                 tx_hash_str = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
