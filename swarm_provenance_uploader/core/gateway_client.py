@@ -145,6 +145,9 @@ class GatewayClient:
             # Parse 402 response for useful error message
             try:
                 body = response.json()
+                # Unwrap detail wrapper from new gateway format
+                if "detail" in body and isinstance(body["detail"], dict):
+                    body = body["detail"]
                 accepts = body.get("accepts", [])
                 if accepts:
                     amounts = [opt.get("maxAmountRequired", "?") for opt in accepts]
