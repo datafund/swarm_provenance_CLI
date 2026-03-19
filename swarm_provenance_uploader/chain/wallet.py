@@ -10,7 +10,7 @@ Requires optional dependencies: pip install swarm-provenance-uploader[blockchain
 import os
 from typing import Optional
 
-from ..exceptions import ChainConfigurationError
+from .exceptions import ChainConfigurationError
 
 
 # Lazy eth-account import

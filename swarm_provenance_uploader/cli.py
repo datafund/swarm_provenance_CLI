@@ -1,5 +1,5 @@
 import typer
-from typing import Optional
+from typing import List, Optional
 from typing_extensions import Annotated
 from pathlib import Path
 import sys
@@ -2345,6 +2345,89 @@ def chain_protect(
     typer.echo(f"  New:       {new_hash}")
     if description:
         typer.echo(f"  Desc:      {description}")
+
+
+@chain_app.command("merge")
+def chain_merge(
+    hashes: Annotated[List[str], typer.Argument(help="Source hashes followed by the new (merged) hash. Minimum 3 values (2 sources + 1 new).")],
+    description: Annotated[str, typer.Option("--description", "-d", help="Description of the merge.")] = "",
+    data_type: Annotated[str, typer.Option("--type", "-t", help="Data type for the merged result.")] = "merged",
+    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
+    output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
+):
+    """
+    Record an N-to-1 merge transformation on-chain.
+
+    Provide 2+ source hashes followed by the new (merged) hash as positional arguments.
+    All source hashes must already be anchored on-chain.
+
+    Example: swarm-prov-upload chain merge <hash1> <hash2> <new_hash> -d "Merged datasets"
+    """
+    if len(hashes) < 3:
+        typer.secho(
+            "ERROR: Need at least 3 hashes: 2+ source hashes and 1 new hash.",
+            fg=typer.colors.RED, err=True,
+        )
+        typer.echo("Usage: swarm-prov-upload chain merge <source1> <source2> [<source3>...] <new_hash>")
+        raise typer.Exit(code=1)
+
+    source_hashes = hashes[:-1]
+    new_hash = hashes[-1]
+
+    if gas is not None:
+        _chain_config["gas_limit"] = gas
+    try:
+        client = _get_chain_client(verbose=verbose)
+        result = client.merge_transform(
+            source_hashes=source_hashes,
+            new_hash=new_hash,
+            description=description,
+            new_data_type=data_type,
+            verbose=verbose,
+        )
+    except typer.Exit:
+        raise
+    except exceptions.DataNotRegisteredError as e:
+        typer.secho(f"ERROR: Source hash is not registered on-chain.", fg=typer.colors.RED, err=True)
+        if e.data_hash:
+            typer.echo(f"  Hash: {e.data_hash}")
+        typer.echo(f"  Anchor source hashes first: swarm-prov-upload chain anchor <hash>")
+        raise typer.Exit(code=1)
+    except exceptions.ChainValidationError as e:
+        typer.secho(f"ERROR: Validation failed: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except exceptions.ChainTransactionError as e:
+        typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
+        if e.tx_hash:
+            typer.echo(f"  Transaction: {e.tx_hash}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainConnectionError as e:
+        typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+        if e.rpc_url:
+            typer.echo(f"  RPC URL: {e.rpc_url}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainError as e:
+        typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if output_json:
+        typer.echo(json.dumps(result.model_dump(), indent=2))
+        return
+
+    typer.secho(f"\nMerge transformation recorded!", fg=typer.colors.GREEN, bold=True)
+    typer.echo(f"  Sources: {len(source_hashes)}")
+    for i, sh in enumerate(source_hashes, 1):
+        typer.echo(f"    {i}. {sh}")
+    typer.echo(f"  New:     {new_hash}")
+    if description:
+        typer.echo(f"  Desc:    {description}")
+    typer.echo(f"  Type:    {data_type}")
+    typer.echo(f"  Tx:      {result.tx_hash}")
+    typer.echo(f"  Block:   {result.block_number}")
+    typer.echo(f"  Gas:     {result.gas_used}")
+    if result.explorer_url:
+        typer.echo(f"  Explorer: {result.explorer_url}")
 
 
 @app.callback()

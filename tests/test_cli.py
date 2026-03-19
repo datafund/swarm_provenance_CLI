@@ -1702,7 +1702,7 @@ class TestDownloadWithVerify:
 # =============================================================================
 
 DUMMY_TX_HASH = "0x" + "ab" * 32
-DUMMY_EXPLORER_URL = "https://sepolia.basescan.org/tx/" + DUMMY_TX_HASH
+DUMMY_EXPLORER_URL = "https://base-sepolia.blockscout.com/tx/" + DUMMY_TX_HASH
 DUMMY_ADDRESS = "0x" + "cd" * 20
 
 
@@ -2076,7 +2076,7 @@ class TestChainBalanceCommand:
             balance_wei=1000000000000000000,
             balance_eth="1.0",
             chain="base-sepolia",
-            contract_address="0x9a3c6F47B69211F05891CCb7aD33596290b9fE64",
+            contract_address="0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a",
         )
 
         mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
@@ -2098,7 +2098,7 @@ class TestChainBalanceCommand:
             balance_wei=1000000000000000000,
             balance_eth="1.0",
             chain="base-sepolia",
-            contract_address="0x9a3c6F47B69211F05891CCb7aD33596290b9fE64",
+            contract_address="0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a",
         )
 
         mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
@@ -2121,7 +2121,7 @@ class TestChainBalanceCommand:
             balance_wei=0,
             balance_eth="0.0",
             chain="base-sepolia",
-            contract_address="0x9a3c6F47B69211F05891CCb7aD33596290b9fE64",
+            contract_address="0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a",
         )
 
         mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
@@ -3770,6 +3770,179 @@ class TestChainGasLimitFlag:
 
         assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
         assert _chain_config["gas_limit"] == 300000
+
+
+class TestChainMergeCommand:
+    """Tests for chain merge command."""
+
+    def test_merge_success(self, mocker):
+        """Tests chain merge command succeeds with 2 sources + new hash."""
+        from swarm_provenance_uploader.models import MergeTransformResult
+
+        source1 = "a" * 64
+        source2 = "b" * 64
+        new_hash = "c" * 64
+
+        mock_client = mocker.MagicMock()
+        mock_client.merge_transform.return_value = MergeTransformResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12350,
+            gas_used=180000,
+            explorer_url=DUMMY_EXPLORER_URL,
+            source_hashes=[source1, source2],
+            new_hash=new_hash,
+            description="Merged datasets",
+            new_data_type="merged",
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "merge", source1, source2, new_hash, "--description", "Merged datasets"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Merge transformation recorded" in result.stdout
+        assert "Sources: 2" in result.stdout
+        mock_client.merge_transform.assert_called_once_with(
+            source_hashes=[source1, source2],
+            new_hash=new_hash,
+            description="Merged datasets",
+            new_data_type="merged",
+            verbose=False,
+        )
+
+    def test_merge_too_few_args(self, mocker):
+        """Tests chain merge fails with fewer than 3 hashes."""
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client")
+
+        result = runner.invoke(app, ["chain", "merge", "a" * 64, "b" * 64])
+
+        assert result.exit_code == 1
+        assert "at least 3 hashes" in result.stdout.lower() or "2+ source" in result.stdout
+
+    def test_merge_json_output(self, mocker):
+        """Tests chain merge with --json output."""
+        from swarm_provenance_uploader.models import MergeTransformResult
+
+        source1 = "a" * 64
+        source2 = "b" * 64
+        new_hash = "c" * 64
+
+        mock_client = mocker.MagicMock()
+        mock_client.merge_transform.return_value = MergeTransformResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12350,
+            gas_used=180000,
+            source_hashes=[source1, source2],
+            new_hash=new_hash,
+            description="Merged",
+            new_data_type="merged",
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "merge", source1, source2, new_hash, "--json"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        import json
+        output = json.loads(result.stdout)
+        assert output["tx_hash"] == DUMMY_TX_HASH
+        assert len(output["source_hashes"]) == 2
+
+    def test_merge_source_not_registered(self, mocker):
+        """Tests chain merge when a source hash is not registered."""
+        from swarm_provenance_uploader.exceptions import DataNotRegisteredError
+
+        mock_client = mocker.MagicMock()
+        mock_client.merge_transform.side_effect = DataNotRegisteredError(
+            "Not registered", data_hash="a" * 64
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "merge", "a" * 64, "b" * 64, "c" * 64])
+
+        assert result.exit_code == 1
+        assert "not registered" in result.stdout.lower()
+
+    def test_merge_validation_error(self, mocker):
+        """Tests chain merge with validation error (e.g., too many sources)."""
+        from swarm_provenance_uploader.exceptions import ChainValidationError
+
+        mock_client = mocker.MagicMock()
+        mock_client.merge_transform.side_effect = ChainValidationError(
+            "Merge source count 51 exceeds maximum of 50"
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        hashes = ["a" * 64] * 51 + ["b" * 64]
+        result = runner.invoke(app, ["chain", "merge"] + hashes)
+
+        assert result.exit_code == 1
+        assert "Validation failed" in result.stdout
+
+    def test_merge_custom_type(self, mocker):
+        """Tests chain merge with custom data type."""
+        from swarm_provenance_uploader.models import MergeTransformResult
+
+        source1 = "a" * 64
+        source2 = "b" * 64
+        new_hash = "c" * 64
+
+        mock_client = mocker.MagicMock()
+        mock_client.merge_transform.return_value = MergeTransformResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12350,
+            gas_used=180000,
+            source_hashes=[source1, source2],
+            new_hash=new_hash,
+            description="Combined",
+            new_data_type="dataset",
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "merge", source1, source2, new_hash,
+                  "--type", "dataset", "--description", "Combined"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        mock_client.merge_transform.assert_called_once_with(
+            source_hashes=[source1, source2],
+            new_hash=new_hash,
+            description="Combined",
+            new_data_type="dataset",
+            verbose=False,
+        )
+
+    def test_merge_gas_flag(self, mocker):
+        """Tests chain merge with --gas flag."""
+        from swarm_provenance_uploader.models import MergeTransformResult
+
+        mock_client = mocker.MagicMock()
+        mock_client.merge_transform.return_value = MergeTransformResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=12350,
+            gas_used=200000,
+            source_hashes=["a" * 64, "b" * 64],
+            new_hash="c" * 64,
+            description="",
+            new_data_type="merged",
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "merge", "a" * 64, "b" * 64, "c" * 64, "--gas", "400000"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert _chain_config["gas_limit"] == 400000
 
 
 # =============================================================================

@@ -144,7 +144,7 @@ swarm-prov-upload chain balance
 #   Address:  0x742d...fE00
 #   Balance:  0.01 ETH
 #   Chain:    base-sepolia
-#   Contract: 0x9a3c...fE64
+#   Contract: 0xD4a7...f80a
 #
 # Get testnet ETH: https://www.alchemy.com/faucets/base-sepolia
 ```
@@ -164,7 +164,7 @@ swarm-prov-upload chain anchor <swarm_hash>
 #   Tx:      0xbb...
 #   Block:   12345679
 #   Gas:     95000
-#   Explorer: https://sepolia.basescan.org/tx/0xbb...
+#   Explorer: https://base-sepolia.blockscout.com/tx/0xbb...
 ```
 
 ### Verify the anchor
@@ -206,6 +206,40 @@ swarm-prov-upload chain anchor <original_hash>
 
 # Record the transformation
 swarm-prov-upload chain transform <original_hash> <new_hash> --description "Anonymized PII fields"
+```
+
+### Merge multiple datasets
+
+When you combine multiple data sources into one, record it as a merge transformation:
+
+```bash
+# All source hashes must be anchored first
+swarm-prov-upload chain anchor <hash_a>
+swarm-prov-upload chain anchor <hash_b>
+
+# Record the merge (2-50 sources supported)
+swarm-prov-upload chain merge <hash_a> <hash_b> <merged_hash> --description "Combined datasets"
+
+# With a custom data type for the merged result
+swarm-prov-upload chain merge <hash_a> <hash_b> <merged_hash> --type "combined-dataset" -d "Merged A+B"
+```
+
+### Walk the provenance chain
+
+Trace data lineage back through transformations:
+
+```bash
+# Get full provenance record
+swarm-prov-upload chain get <hash>
+
+# Walk the full transformation chain (follows links to root)
+swarm-prov-upload chain get <hash> --follow
+
+# Limit traversal depth
+swarm-prov-upload chain get <hash> --follow --depth 2
+
+# JSON output for scripting
+swarm-prov-upload chain get <hash> --follow --json
 ```
 
 ### Record data access
@@ -294,13 +328,16 @@ Or add it to your `.env` file.
 
 ### "Cannot connect to chain"
 
-Check your RPC endpoint. The default Base Sepolia RPC (`https://sepolia.base.org`) is public and rate-limited. For production, use a dedicated RPC provider:
+Check your RPC endpoint. The default Base Sepolia RPC (`https://sepolia.base.org`) is public and rate-limited. The CLI automatically tries fallback RPCs (`base-sepolia-rpc.publicnode.com`, `base-sepolia.drpc.org`) if the primary fails. For production, use a dedicated RPC provider:
 - [Alchemy](https://www.alchemy.com/)
 - [Infura](https://www.infura.io/)
 - [QuickNode](https://www.quicknode.com/)
 
 ```bash
 export CHAIN_RPC_URL=https://base-sepolia.g.alchemy.com/v2/YOUR_KEY
+
+# Or set multiple fallback URLs (comma-separated)
+export CHAIN_RPC_URLS=https://fallback1.io,https://fallback2.io
 ```
 
 ### "Transaction reverted"
@@ -341,8 +378,10 @@ export CHAIN_CONTRACT=0x...your_contract_address...
 |----------|-------|
 | Chain ID | 84532 |
 | RPC URL | https://sepolia.base.org |
-| Block Explorer | https://sepolia.basescan.org |
-| DataProvenance Contract | `0x9a3c6F47B69211F05891CCb7aD33596290b9fE64` |
+| Fallback RPCs | base-sepolia-rpc.publicnode.com, base-sepolia.drpc.org |
+| Block Explorer | https://base-sepolia.blockscout.com |
+| DataProvenance Contract | `0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a` |
+| Deploy Block | 39,075,766 |
 
 ### Base (Mainnet)
 
@@ -350,11 +389,22 @@ export CHAIN_CONTRACT=0x...your_contract_address...
 |----------|-------|
 | Chain ID | 8453 |
 | RPC URL | https://mainnet.base.org |
+| Fallback RPCs | base-rpc.publicnode.com, base.drpc.org |
 | Block Explorer | https://basescan.org |
 | DataProvenance Contract | Not yet deployed |
+
+### Localhost (Development)
+
+| Property | Value |
+|----------|-------|
+| Chain ID | 31337 |
+| RPC URL | http://127.0.0.1:8545 |
+| DataProvenance Contract | `0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9` |
+
+Use `--chain localhost` for local Hardhat development.
 
 ## Additional Resources
 
 - [Base Documentation](https://docs.base.org)
-- [Etherscan Base Sepolia](https://sepolia.basescan.org)
+- [Base Sepolia Block Explorer](https://base-sepolia.blockscout.com)
 - [Alchemy Base Sepolia Faucet](https://www.alchemy.com/faucets/base-sepolia)

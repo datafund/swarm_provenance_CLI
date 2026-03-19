@@ -240,6 +240,9 @@ swarm-prov-upload chain access <swarm_hash>
 swarm-prov-upload chain transform <original_hash> <new_hash> --description "Anonymized PII"
 swarm-prov-upload chain transform <orig> <new> --restrict-original  # restrict original after transform
 
+# Record an N-to-1 merge transformation (all sources must be anchored, v2 contract)
+swarm-prov-upload chain merge <hash1> <hash2> [<hash3>...] <new_hash> --description "Merged datasets"
+
 # Get full provenance record
 swarm-prov-upload chain get <swarm_hash>
 swarm-prov-upload chain get <swarm_hash> --json
@@ -291,6 +294,7 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 | `CHAIN_CONTRACT` | Custom contract address (optional) | Uses preset |
 | `CHAIN_EXPLORER_URL` | Custom block explorer URL (optional) | Uses preset |
 | `CHAIN_GAS_LIMIT` | Explicit gas limit (optional, skips RPC estimation) | Auto-estimated |
+| `CHAIN_RPC_URLS` | Comma-separated fallback RPC URLs (optional) | Uses preset fallbacks |
 
 ### Testnet Setup
 
@@ -315,6 +319,7 @@ print(f"TX: {result.explorer_url}")
 - `anchor_for(swarm_hash, owner, data_type)` - Register on behalf of another owner
 - `batch_anchor(swarm_hashes, data_types)` - Batch register multiple hashes
 - `transform(original_hash, new_hash, description)` - Record data transformation
+- `merge_transform(source_hashes, new_hash, description)` - Record N-to-1 merge (v2 contract)
 - `access(swarm_hash)` - Record data access
 - `batch_access(swarm_hashes)` - Batch record access
 - `set_status(swarm_hash, status)` - Change data status (ACTIVE/RESTRICTED/DELETED)
@@ -840,8 +845,9 @@ See [examples/README.md](examples/README.md) for the full guide with walkthrough
 │  │ • ChainProvenanceRecord         │  │ Chain Configuration:                │  │
 │  │ • AnchorResult                  │  │ • CHAIN_ENABLED                     │  │
 │  │ • TransformResult               │  │ • CHAIN_NAME                        │  │
-│  │ • AccessResult                  │  │ • PROVENANCE_WALLET_KEY             │  │
-│  │ • ChainWalletInfo               │  │ • CHAIN_RPC_URL                     │  │
+│  │ • MergeTransformResult          │  │ • PROVENANCE_WALLET_KEY             │  │
+│  │ • AccessResult                  │  │ • CHAIN_RPC_URL                     │  │
+│  │ • ChainWalletInfo               │  │ • CHAIN_RPC_URLS (fallbacks)        │  │
 │  │                                 │  │ • CHAIN_EXPLORER_URL                │  │
 │  └─────────────────────────────────┘  └─────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────┘
@@ -1031,6 +1037,8 @@ swarm_provenance_uploader/
 │   │   ├── provider.py          # Web3 connection management
 │   │   ├── wallet.py            # Transaction signing
 │   │   ├── contract.py          # DataProvenance contract wrapper
+│   │   ├── event_cache.py       # Transformation event cache (v1 fallback)
+│   │   ├── exceptions.py        # Chain-specific exception hierarchy
 │   │   └── abi/
 │   │       └── DataProvenance.json  # Contract ABI
 │   └── core/

@@ -10,8 +10,8 @@ How the chain subsystem is structured internally:
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          CLI Layer (cli.py)                         │
 │                                                                     │
-│  chain balance | anchor | verify | get | access | transform         │
-│  chain status | transfer | delegate | protect                       │
+│  chain balance | anchor | verify | get | access | transform | merge  │
+│  chain status | transfer | delegate | protect                        │
 │  Global flags: --chain, --chain-rpc                                 │
 └──────────────────────────┬──────────────────────────────────────────┘
                            │
@@ -25,6 +25,7 @@ How the chain subsystem is structured internally:
 │  Write ops:  anchor(), transform(), access(), set_status(),         │
 │              transfer_ownership(), set_delegate()                   │
 │              batch_anchor(), batch_access(), batch_set_status()     │
+│              merge_transform()  (N-to-1 merge, v2+)                │
 │  Read ops:   get(), verify(), balance(), health_check(),            │
 │              get_provenance_chain()                                  │
 └────────┬──────────────────┬──────────────────┬──────────────────────┘
@@ -37,14 +38,25 @@ How the chain subsystem is structured internally:
 │  Web3 conn mgmt │ │  Private key │ │  ABI wrapper               │
 │  Chain presets  │ │  TX signing  │ │  build_*_tx() methods      │
 │  Explorer URLs  │ │  Balance     │ │  get_data_record()         │
-│  Health checks  │ │              │ │  Hash normalization        │
-│  Chain ID auto- │ │              │ │                            │
+│  Health checks  │ │              │ │  V2 state traversal        │
+│  RPC failover   │ │              │ │  Hash normalization        │
+│  Chain ID auto- │ │              │ │  Chunked event queries     │
 │  detection      │ │              │ │  ABI: abi/DataProvenance   │
 └────────┬────────┘ └──────┬───────┘ └────────────┬───────────────┘
          │                 │                       │
          └─────────────────┴───────────────────────┘
                            │
                            ▼
+              ┌───────────────────────┐
+              │  TransformationEvent  │
+              │  Cache (event_cache)  │
+              │                       │
+              │  Thread-safe singleton│
+              │  Forward/reverse maps │
+              │  Incremental scanning │
+              └───────────┬───────────┘
+                          │
+                          ▼
                    ┌───────────────┐
                    │   Base Chain  │
                    │  (via RPC)    │
@@ -431,6 +443,7 @@ alice_client.set_delegate("0xBob...", authorized=False)
 | `set_status` | Write | ~45,000 | Status change |
 | `transfer_ownership` | Write | ~50,000 | Owner change |
 | `set_delegate` | Write | ~45,000 | Authorize/revoke |
+| `merge_transform` | Write | ~120k + ~30k/source | N-to-1 merge (2-50 sources, v2+) |
 | `batch_anchor` | Write | ~95k + ~60k/item | Up to 50 per batch |
 | `batch_access` | Write | ~65k + ~45k/item | Up to 100 per batch |
 | `verify` | Read | Free | No gas |
@@ -494,6 +507,77 @@ swarm-prov-upload chain status aaa... --set restricted
 
 # Alternatively, steps 3+4 in one command:
 swarm-prov-upload chain transform aaa... bbb... --restrict-original -d "Removed PII"
+```
+
+## Merge Transformation (N-to-1)
+
+Combine multiple data sources into one. Unlike `transform` (1-to-1), `merge` links 2-50 source hashes to a single new hash.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                       Merge Transformation Flow                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+  On-chain records:
+
+  ┌─────────────────────┐
+  │  Dataset A           │
+  │  hash: aaa...        │──────────┐
+  │  type: survey-data   │          │
+  │  status: ACTIVE      │          │  merge_transform()
+  └─────────────────────┘          │  "Combined survey regions"
+                                    │
+  ┌─────────────────────┐          │       ┌─────────────────────┐
+  │  Dataset B           │          ├──────>│  Merged Dataset      │
+  │  hash: bbb...        │──────────┘       │  hash: mmm...        │
+  │  type: survey-data   │                  │  type: merged-dataset │
+  │  status: ACTIVE      │                  │  owner: 0x742d...    │
+  └─────────────────────┘                  │  status: ACTIVE      │
+                                            └─────────────────────┘
+
+  Key differences from transform:
+  - Multiple sources (2-50) instead of one
+  - New hash is auto-registered by the contract
+  - All source hashes must already be anchored
+```
+
+**CLI commands:**
+```bash
+# 1. Anchor both source datasets
+swarm-prov-upload chain anchor aaa... --type survey-data
+swarm-prov-upload chain anchor bbb... --type survey-data
+
+# 2. Record the merge
+swarm-prov-upload chain merge aaa... bbb... mmm... --description "Combined survey regions"
+
+# 3. Merge with custom type
+swarm-prov-upload chain merge aaa... bbb... mmm... --type "combined-dataset" -d "Merged"
+
+# 4. Verify the merged hash is registered
+swarm-prov-upload chain verify mmm...
+
+# 5. View the merged record
+swarm-prov-upload chain get mmm... --json
+```
+
+**Python API:**
+```python
+from swarm_provenance_uploader.core.chain_client import ChainClient
+
+client = ChainClient()
+
+# Anchor sources
+client.anchor("aaa...", data_type="survey-data")
+client.anchor("bbb...", data_type="survey-data")
+
+# Record merge
+result = client.merge_transform(
+    source_hashes=["aaa...", "bbb..."],
+    new_hash="mmm...",
+    description="Combined survey regions",
+    new_data_type="combined-dataset",
+)
+print(f"TX: {result.tx_hash}, Gas: {result.gas_used}")
 ```
 
 ## Depth-Limited Chain Traversal

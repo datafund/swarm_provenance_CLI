@@ -12,6 +12,7 @@ from swarm_provenance_uploader.exceptions import (
     ChainValidationError,
     DataAlreadyRegisteredError,
     DataNotRegisteredError,
+    TransformationAlreadyExistsError,
 )
 from swarm_provenance_uploader.models import (
     AnchorResult,
@@ -19,6 +20,7 @@ from swarm_provenance_uploader.models import (
     ChainProvenanceRecord,
     ChainWalletInfo,
     DataStatusEnum,
+    MergeTransformResult,
     TransformResult,
 )
 
@@ -28,7 +30,7 @@ DUMMY_PRIVATE_KEY = "0x" + "a" * 64
 DUMMY_ADDRESS = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
 DUMMY_HASH = "a" * 64
 DUMMY_HASH_BYTES = bytes.fromhex(DUMMY_HASH)
-DUMMY_CONTRACT = "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+DUMMY_CONTRACT = "0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a"
 DUMMY_TX_HASH_BYTES = bytes.fromhex("bb" * 32)
 ZERO_ADDRESS = "0x" + "0" * 40
 
@@ -359,7 +361,7 @@ class TestChainProvider:
 
         assert provider.chain == "base-sepolia"
         assert provider.chain_id == 84532
-        assert provider.contract_address == "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+        assert provider.contract_address == "0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a"
 
     def test_custom_rpc_url(self, mock_chain_deps):
         """Tests that custom RPC URL is used."""
@@ -397,7 +399,7 @@ class TestChainProvider:
         from swarm_provenance_uploader.chain.provider import ChainProvider
 
         provider = ChainProvider(chain="base-sepolia")
-        assert provider.explorer_url == "https://sepolia.basescan.org"
+        assert provider.explorer_url == "https://base-sepolia.blockscout.com"
 
     def test_custom_explorer_url_in_tx_url(self, mock_chain_deps):
         """Tests that custom explorer URL is used in generated TX URLs."""
@@ -460,7 +462,7 @@ class TestChainProvider:
 
         provider = ChainProvider(chain="base-sepolia")
         url = provider.get_explorer_tx_url("0xabc123")
-        assert url == "https://sepolia.basescan.org/tx/0xabc123"
+        assert url == "https://base-sepolia.blockscout.com/tx/0xabc123"
 
     def test_explorer_tx_url_without_prefix(self, mock_chain_deps):
         """Tests explorer URL auto-adds 0x prefix."""
@@ -468,7 +470,7 @@ class TestChainProvider:
 
         provider = ChainProvider(chain="base-sepolia")
         url = provider.get_explorer_tx_url("abc123")
-        assert url == "https://sepolia.basescan.org/tx/0xabc123"
+        assert url == "https://base-sepolia.blockscout.com/tx/0xabc123"
 
     def test_explorer_address_url(self, mock_chain_deps):
         """Tests generating address explorer URL."""
@@ -476,7 +478,7 @@ class TestChainProvider:
 
         provider = ChainProvider(chain="base-sepolia")
         url = provider.get_explorer_address_url(DUMMY_ADDRESS)
-        assert "sepolia.basescan.org/address/" in url
+        assert "base-sepolia.blockscout.com/address/" in url
 
 
 # --- Wallet tests ---
@@ -598,7 +600,7 @@ class TestChainClientAnchor:
         assert result.owner == DUMMY_ADDRESS
         assert result.block_number == 12345679
         assert result.gas_used == 95_000
-        assert "sepolia.basescan.org" in result.explorer_url
+        assert "base-sepolia.blockscout.com" in result.explorer_url
 
     def test_anchor_default_data_type(self, mock_chain_deps):
         """Tests anchor uses default data type."""
@@ -1313,3 +1315,862 @@ class TestBatchSetDataStatus:
 
         assert isinstance(result, AnchorResult)
         assert result.swarm_hash == DUMMY_HASH
+
+
+# ============================================================
+# V2 Contract Feature Tests
+# ============================================================
+
+
+class TestV2ContractDetection:
+    """Tests for v2 contract auto-detection via supports_transformation_links."""
+
+    def test_detects_v2_contract(self, mock_chain_deps):
+        """Tests that v2 contract is detected when getTransformationLinks succeeds."""
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.return_value = []
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        assert contract.supports_transformation_links() is True
+
+    def test_detects_v1_contract(self, mock_chain_deps):
+        """Tests that v1 contract is detected when getTransformationLinks reverts."""
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = Exception("revert")
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        assert contract.supports_transformation_links() is False
+
+    def test_v2_detection_cached(self, mock_chain_deps):
+        """Tests that v2 detection result is cached after first call."""
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.return_value = []
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        contract.supports_transformation_links()
+        contract.supports_transformation_links()
+
+        # Should only have been called once (cached after first call)
+        assert mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.call_count == 1
+
+
+class TestV2ViewMethods:
+    """Tests for v2 state-based view methods."""
+
+    def test_get_transformation_links(self, mock_chain_deps):
+        """Tests get_transformation_links returns parsed tuples."""
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        new_hash_bytes = bytes.fromhex("bb" * 32)
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.return_value = [
+            (new_hash_bytes, "filtered PII"),
+        ]
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        links = contract.get_transformation_links(DUMMY_HASH)
+
+        assert len(links) == 1
+        assert links[0][0] == new_hash_bytes
+        assert links[0][1] == "filtered PII"
+
+    def test_get_child_hashes(self, mock_chain_deps):
+        """Tests get_child_hashes returns list of bytes."""
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        child1 = bytes.fromhex("bb" * 32)
+        child2 = bytes.fromhex("cc" * 32)
+        mock_chain_deps["contract"].functions.getChildHashes.return_value.call.return_value = [child1, child2]
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        children = contract.get_child_hashes(DUMMY_HASH)
+
+        assert len(children) == 2
+        assert children[0] == child1
+        assert children[1] == child2
+
+    def test_get_transformation_parents(self, mock_chain_deps):
+        """Tests get_transformation_parents returns list of bytes."""
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        parent = bytes.fromhex("cc" * 32)
+        mock_chain_deps["contract"].functions.getTransformationParents.return_value.call.return_value = [parent]
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        parents = contract.get_transformation_parents(DUMMY_HASH)
+
+        assert len(parents) == 1
+        assert parents[0] == parent
+
+
+class TestMergeTransformValidation:
+    """Tests for merge transformation validation."""
+
+    def test_merge_too_few_sources(self, mock_chain_deps):
+        """Tests that fewer than MIN_MERGE_SOURCES raises validation error."""
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+
+        with pytest.raises(ChainValidationError) as exc_info:
+            contract.build_record_merge_transformation_tx(
+                source_hashes=[DUMMY_HASH],  # only 1, need at least 2
+                new_hash="b" * 64,
+                description="merge",
+                new_data_type="merged",
+                sender=DUMMY_ADDRESS,
+            )
+        assert "at least" in str(exc_info.value).lower()
+
+    def test_merge_too_many_sources(self, mock_chain_deps):
+        """Tests that exceeding MAX_MERGE_SOURCES raises validation error."""
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract, MAX_MERGE_SOURCES
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+
+        with pytest.raises(ChainValidationError) as exc_info:
+            contract.build_record_merge_transformation_tx(
+                source_hashes=[DUMMY_HASH] * (MAX_MERGE_SOURCES + 1),
+                new_hash="b" * 64,
+                description="merge",
+                new_data_type="merged",
+                sender=DUMMY_ADDRESS,
+            )
+        assert "maximum" in str(exc_info.value).lower()
+
+    def test_merge_valid_build(self, mock_chain_deps):
+        """Tests successful merge tx build with valid inputs."""
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        mock_chain_deps["contract"].functions.recordMergeTransformation.return_value.build_transaction.return_value = {
+            "from": DUMMY_ADDRESS,
+            "to": DUMMY_CONTRACT,
+            "data": "0x",
+        }
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        tx = contract.build_record_merge_transformation_tx(
+            source_hashes=[DUMMY_HASH, "b" * 64],
+            new_hash="c" * 64,
+            description="merged two datasets",
+            new_data_type="merged",
+            sender=DUMMY_ADDRESS,
+        )
+        assert tx["from"] == DUMMY_ADDRESS
+
+
+class TestMergeTransformClient:
+    """Tests for ChainClient.merge_transform method."""
+
+    def test_merge_transform_success(self, mock_chain_deps):
+        """Tests successful merge transform via ChainClient."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        mock_chain_deps["contract"].functions.recordMergeTransformation.return_value.build_transaction.return_value = {
+            "from": DUMMY_ADDRESS,
+            "to": DUMMY_CONTRACT,
+            "data": "0x",
+        }
+
+        client = ChainClient(chain="base-sepolia")
+        result = client.merge_transform(
+            source_hashes=[DUMMY_HASH, "b" * 64],
+            new_hash="c" * 64,
+            description="merged",
+            new_data_type="combined",
+        )
+
+        assert isinstance(result, MergeTransformResult)
+        assert result.source_hashes == [DUMMY_HASH, "b" * 64]
+        assert result.new_hash == "c" * 64
+        assert result.description == "merged"
+        assert result.new_data_type == "combined"
+        assert result.block_number == 12345679
+        assert result.gas_used == 95_000
+
+
+class TestDuplicateTransformPreCheck:
+    """Tests for duplicate transformation pre-checks in ChainClient.transform."""
+
+    def test_v2_duplicate_raises_error(self, mock_chain_deps):
+        """Tests that v2 state-based duplicate check raises TransformationAlreadyExistsError."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        new_hash = "b" * 64
+        new_hash_bytes = bytes.fromhex(new_hash)
+
+        # V2 detection: getTransformationLinks succeeds
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.return_value = [
+            (new_hash_bytes, "already done"),
+        ]
+
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(TransformationAlreadyExistsError) as exc_info:
+            client.transform(
+                original_hash=DUMMY_HASH,
+                new_hash=new_hash,
+                description="filter again",
+            )
+        assert exc_info.value.original_hash == DUMMY_HASH
+        assert exc_info.value.new_hash == new_hash
+        assert exc_info.value.existing_description == "already done"
+
+    def test_v2_no_duplicate_proceeds(self, mock_chain_deps):
+        """Tests that v2 duplicate check passes when no match."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        # V2 detection: succeeds but returns empty list
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.return_value = []
+
+        client = ChainClient(chain="base-sepolia")
+        result = client.transform(
+            original_hash=DUMMY_HASH,
+            new_hash="b" * 64,
+            description="new transform",
+        )
+        assert isinstance(result, TransformResult)
+
+    def test_v1_event_cache_duplicate_raises_error(self, mock_chain_deps):
+        """Tests that v1 event-cache-based duplicate check raises error."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.chain.event_cache import clear_registry
+
+        # Clear any cached state from prior tests
+        clear_registry()
+
+        new_hash = "b" * 64
+
+        # Mock the event cache
+        mock_cache = MagicMock()
+        forward_map = {DUMMY_HASH: [(new_hash, "existing desc")]}
+        mock_cache.get_maps.return_value = (forward_map, {})
+
+        with patch("swarm_provenance_uploader.chain.event_cache.get_cache", return_value=mock_cache):
+            client = ChainClient(chain="base-sepolia")
+            # Force v1 mode — bypass auto-detection which depends on mock state
+            client._contract._supports_v2 = False
+            with pytest.raises(TransformationAlreadyExistsError) as exc_info:
+                client.transform(
+                    original_hash=DUMMY_HASH,
+                    new_hash=new_hash,
+                    description="try again",
+                )
+            assert exc_info.value.existing_description == "existing desc"
+
+
+class TestAnchorRevertDetection:
+    """Tests for detecting 'already registered' reverts in anchor."""
+
+    def test_anchor_revert_already_registered(self, mock_chain_deps):
+        """Tests that 'already registered' revert is caught and re-raised."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        # Pre-check: not registered (zero-address owner)
+        call_count = [0]
+        def mock_get_data_record(data_hash):
+            call_count[0] += 1
+            mock_call = MagicMock()
+            if call_count[0] == 1:
+                # First call (pre-check): not registered
+                mock_call.call.return_value = (
+                    DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+                )
+            else:
+                # Second call (after revert): now registered
+                mock_call.call.return_value = (
+                    DUMMY_HASH_BYTES, DUMMY_ADDRESS, 1700000000, "swarm-provenance", [], [], 0,
+                )
+            return mock_call
+
+        mock_chain_deps["contract"].functions.getDataRecord = mock_get_data_record
+
+        # Transaction fails with "already registered" revert
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.side_effect = Exception(
+            "execution reverted: Data already registered"
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(DataAlreadyRegisteredError) as exc_info:
+            client.anchor(swarm_hash=DUMMY_HASH)
+        assert exc_info.value.data_hash == DUMMY_HASH
+        assert exc_info.value.owner == DUMMY_ADDRESS
+
+
+class TestV2TransformationParsing:
+    """Tests for parsing v2 TransformationLink tuples in ChainClient.get()."""
+
+    def test_get_with_v2_transformation_links(self, mock_chain_deps):
+        """Tests that v2 TransformationLink tuples are parsed correctly."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        new_hash_bytes = bytes.fromhex("bb" * 32)
+        # Contract returns TransformationLink[] (list of (bytes32, string) tuples)
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES,
+            DUMMY_ADDRESS,
+            1700000000,
+            "swarm-provenance",
+            [(new_hash_bytes, "filtered PII")],  # v2 tuple format
+            [],
+            0,
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        record = client.get(swarm_hash=DUMMY_HASH)
+
+        assert len(record.transformations) == 1
+        assert record.transformations[0].description == "filtered PII"
+        assert record.transformations[0].new_data_hash == "bb" * 32
+
+    def test_get_with_mixed_v1_strings(self, mock_chain_deps):
+        """Tests that v1 string descriptions are parsed correctly."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES,
+            DUMMY_ADDRESS,
+            1700000000,
+            "swarm-provenance",
+            ["plain string description"],  # v1 format
+            [],
+            0,
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        record = client.get(swarm_hash=DUMMY_HASH)
+
+        assert len(record.transformations) == 1
+        assert record.transformations[0].description == "plain string description"
+        assert record.transformations[0].new_data_hash is None
+
+
+class TestV1Fallback:
+    """Tests for v1 fallback when getDataRecord decode fails."""
+
+    def test_get_data_record_v1_fallback(self, mock_chain_deps):
+        """Tests fallback to dataRecords() when v2 ABI decode fails on v1."""
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        # getDataRecord fails (v2 ABI decode error on v1 contract)
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.side_effect = OverflowError("decode")
+        # getTransformationLinks also fails (v1 contract)
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = Exception("revert")
+        # dataRecords returns scalar-only tuple
+        mock_chain_deps["contract"].functions.dataRecords.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, DUMMY_ADDRESS, 1700000000, "swarm-provenance", 0
+        )
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        record = contract.get_data_record(DUMMY_HASH)
+
+        # Should return 7-element tuple with empty arrays for transformations/accessors
+        assert record[0] == DUMMY_HASH_BYTES
+        assert record[1] == DUMMY_ADDRESS
+        assert record[4] == []  # transformations (empty)
+        assert record[5] == []  # accessors (empty)
+
+
+class TestEventCache:
+    """Tests for TransformationEventCache singleton and scanning."""
+
+    def setup_method(self):
+        """Clear event cache registry before each test."""
+        from swarm_provenance_uploader.chain.event_cache import clear_registry
+        clear_registry()
+
+    def test_singleton_pattern(self):
+        """Tests that get_cache returns the same instance for same key."""
+        from swarm_provenance_uploader.chain.event_cache import get_cache
+
+        cache1 = get_cache("base-sepolia", DUMMY_CONTRACT)
+        cache2 = get_cache("base-sepolia", DUMMY_CONTRACT)
+        assert cache1 is cache2
+
+    def test_different_keys_different_instances(self):
+        """Tests that different chain/contract combos get different caches."""
+        from swarm_provenance_uploader.chain.event_cache import get_cache
+
+        cache1 = get_cache("base-sepolia", DUMMY_CONTRACT)
+        cache2 = get_cache("base", "0x" + "11" * 20)
+        assert cache1 is not cache2
+
+    def test_case_insensitive_address(self):
+        """Tests that contract address lookup is case-insensitive."""
+        from swarm_provenance_uploader.chain.event_cache import get_cache
+
+        cache1 = get_cache("base-sepolia", "0xABCDEF")
+        cache2 = get_cache("base-sepolia", "0xabcdef")
+        assert cache1 is cache2
+
+    def test_full_scan_populates_maps(self):
+        """Tests that first get_maps call does full scan."""
+        from swarm_provenance_uploader.chain.event_cache import TransformationEventCache
+
+        cache = TransformationEventCache()
+        mock_contract = MagicMock()
+
+        orig = bytes.fromhex("aa" * 32)
+        new = bytes.fromhex("bb" * 32)
+        mock_contract.get_all_transformations.return_value = [
+            (orig, new, "filtered"),
+        ]
+        mock_contract.get_all_merge_events.return_value = []
+
+        forward, reverse = cache.get_maps(mock_contract, deploy_block=0, current_block=1000)
+
+        assert orig.hex() in forward
+        assert new.hex() in reverse
+        assert forward[orig.hex()] == [(new.hex(), "filtered")]
+        assert reverse[new.hex()] == [(orig.hex(), "filtered")]
+
+    def test_incremental_scan(self):
+        """Tests that subsequent get_maps call scans only new blocks."""
+        from swarm_provenance_uploader.chain.event_cache import TransformationEventCache
+
+        cache = TransformationEventCache()
+        mock_contract = MagicMock()
+        mock_contract.get_all_transformations.return_value = []
+        mock_contract.get_all_merge_events.return_value = []
+
+        # First scan: blocks 0-1000
+        cache.get_maps(mock_contract, deploy_block=0, current_block=1000)
+        mock_contract.get_all_transformations.assert_called_with(from_block=0, to_block=1000)
+
+        # Second scan: should start from 1001
+        mock_contract.get_all_transformations.reset_mock()
+        cache.get_maps(mock_contract, deploy_block=0, current_block=2000)
+        mock_contract.get_all_transformations.assert_called_with(from_block=1001, to_block=2000)
+
+    def test_no_rescan_when_current(self):
+        """Tests that get_maps skips scan when already at current block."""
+        from swarm_provenance_uploader.chain.event_cache import TransformationEventCache
+
+        cache = TransformationEventCache()
+        mock_contract = MagicMock()
+        mock_contract.get_all_transformations.return_value = []
+        mock_contract.get_all_merge_events.return_value = []
+
+        cache.get_maps(mock_contract, deploy_block=0, current_block=1000)
+        mock_contract.get_all_transformations.reset_mock()
+
+        # Same current_block — should not scan again
+        cache.get_maps(mock_contract, deploy_block=0, current_block=1000)
+        mock_contract.get_all_transformations.assert_not_called()
+
+    def test_merge_events_populate_maps(self):
+        """Tests that DataMerged events populate forward and reverse maps."""
+        from swarm_provenance_uploader.chain.event_cache import TransformationEventCache
+
+        cache = TransformationEventCache()
+        mock_contract = MagicMock()
+        mock_contract.get_all_transformations.return_value = []
+
+        src1 = bytes.fromhex("aa" * 32)
+        src2 = bytes.fromhex("bb" * 32)
+        new = bytes.fromhex("cc" * 32)
+
+        merge_event = MagicMock()
+        merge_event.args.newDataHash = new
+        merge_event.args.sourceDataHashes = [src1, src2]
+        merge_event.args.transformation = "merged"
+        mock_contract.get_all_merge_events.return_value = [merge_event]
+
+        forward, reverse = cache.get_maps(mock_contract, deploy_block=0, current_block=1000)
+
+        # Both sources should map forward to new
+        assert (new.hex(), "merged") in forward[src1.hex()]
+        assert (new.hex(), "merged") in forward[src2.hex()]
+        # Reverse: new should map back to both sources
+        reverse_srcs = [src for src, _ in reverse[new.hex()]]
+        assert src1.hex() in reverse_srcs
+        assert src2.hex() in reverse_srcs
+
+    def test_merge_events_skipped_on_v1(self):
+        """Tests that DataMerged scan failure is silently skipped (v1 contracts)."""
+        from swarm_provenance_uploader.chain.event_cache import TransformationEventCache
+
+        cache = TransformationEventCache()
+        mock_contract = MagicMock()
+        mock_contract.get_all_transformations.return_value = []
+        mock_contract.get_all_merge_events.side_effect = Exception("no DataMerged event")
+
+        # Should not raise
+        forward, reverse = cache.get_maps(mock_contract, deploy_block=0, current_block=1000)
+        assert forward == {}
+        assert reverse == {}
+
+
+class TestChunkedEventQueries:
+    """Tests for chunked event log queries."""
+
+    def test_chunked_query_splits_range(self, mock_chain_deps):
+        """Tests that large ranges are split into chunks."""
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+
+        mock_event = MagicMock()
+        mock_event.get_logs.return_value = []
+
+        # Query a range larger than _EVENT_CHUNK_SIZE
+        contract._get_logs_chunked(mock_event, None, 0, 25_000)
+
+        # Should have been called 3 times: 0-9999, 10000-19999, 20000-25000
+        assert mock_event.get_logs.call_count == 3
+
+    def test_chunked_query_retries_on_413(self, mock_chain_deps):
+        """Tests that 413 error triggers chunk halving."""
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+
+        mock_event = MagicMock()
+        # First call fails with 413, halved retries succeed
+        call_count = [0]
+        def side_effect(**kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise Exception("413 Payload Too Large")
+            return []
+
+        mock_event.get_logs.side_effect = side_effect
+
+        # Small range that fits in one chunk normally
+        result = contract._get_logs_chunked(mock_event, None, 0, 100)
+        assert result == []
+        # Should have retried with halved chunks after 413
+        assert call_count[0] == 3  # 1 failed + 2 halved
+
+
+class TestRPCFallback:
+    """Tests for RPC failover in ChainProvider."""
+
+    def test_fallback_on_health_check(self, mock_chain_deps):
+        """Tests that health_check tries fallback on failure."""
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        # First connection fails, reconnect with fallback succeeds
+        call_count = [0]
+        def is_connected_side_effect():
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return False  # Primary fails
+            return True  # Fallback succeeds
+
+        mock_chain_deps["web3_instance"].is_connected.side_effect = is_connected_side_effect
+
+        provider = ChainProvider(chain="base-sepolia")
+        # The fallback logic creates new Web3 instances, so we need to mock that
+        # Since _try_fallback creates new Web3 instances, and the mock_web3_class
+        # returns mock_web3_instance for all calls, the fallback should work
+        result = provider.health_check()
+        assert result is True
+
+    def test_fallback_urls_from_preset(self, mock_chain_deps):
+        """Tests that preset fallback URLs are populated."""
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        provider = ChainProvider(chain="base-sepolia")
+        # Should have primary + 2 fallbacks from preset
+        assert len(provider._rpc_urls) == 3
+        assert provider._rpc_urls[0] == "https://sepolia.base.org"
+
+    def test_custom_rpc_no_fallbacks(self, mock_chain_deps):
+        """Tests that custom RPC with no explicit fallbacks has only primary."""
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        provider = ChainProvider(
+            chain="base-sepolia",
+            rpc_url="https://custom.rpc.io",
+        )
+        assert len(provider._rpc_urls) == 1
+
+    def test_explicit_fallbacks_override_preset(self, mock_chain_deps):
+        """Tests that explicit rpc_fallbacks overrides preset."""
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        provider = ChainProvider(
+            chain="base-sepolia",
+            rpc_fallbacks=["https://fb1.io", "https://fb2.io"],
+        )
+        assert len(provider._rpc_urls) == 3
+        assert provider._rpc_urls[1] == "https://fb1.io"
+
+
+class TestProviderEnhancements:
+    """Tests for new provider features: localhost, deploy_block, Optional explorer."""
+
+    def test_localhost_preset(self, mock_chain_deps):
+        """Tests localhost preset initialization."""
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        # Localhost auto-detects chain ID from node
+        mock_chain_deps["web3_instance"].eth.chain_id = 31337
+        provider = ChainProvider(
+            chain="localhost",
+            rpc_url="http://127.0.0.1:8545",
+        )
+        assert provider.chain == "localhost"
+        assert provider.contract_address == "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9"
+        assert provider.deploy_block == 0
+
+    def test_explorer_url_none_for_localhost(self, mock_chain_deps):
+        """Tests that localhost has no explorer URL."""
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        mock_chain_deps["web3_instance"].eth.chain_id = 31337
+        provider = ChainProvider(
+            chain="localhost",
+            rpc_url="http://127.0.0.1:8545",
+        )
+        assert provider.explorer_url is None
+        assert provider.get_explorer_tx_url("0xabc") is None
+        assert provider.get_explorer_address_url("0xabc") is None
+
+    def test_deploy_block_populated(self, mock_chain_deps):
+        """Tests that deploy_block is set from preset."""
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        provider = ChainProvider(chain="base-sepolia")
+        assert provider.deploy_block == 39_075_766
+
+
+class TestProvenanceChainV2StateReads:
+    """Tests for provenance chain traversal using v2 state reads."""
+
+    def test_v2_state_traversal(self, mock_chain_deps):
+        """Tests provenance chain traversal using v2 getTransformationLinks."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        hash_a = DUMMY_HASH
+        hash_b = "b" * 64
+        hash_a_bytes = bytes.fromhex(hash_a)
+        hash_b_bytes = bytes.fromhex(hash_b)
+
+        # V2 detection: succeeds
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.return_value = []
+
+        # getDataRecord returns different records for hash_a and hash_b
+        def mock_get_data_record(data_hash):
+            mock_call = MagicMock()
+            if data_hash == hash_a_bytes:
+                mock_call.call.return_value = (
+                    hash_a_bytes, DUMMY_ADDRESS, 1700000000, "swarm-provenance",
+                    [], [], 0,
+                )
+            elif data_hash == hash_b_bytes:
+                mock_call.call.return_value = (
+                    hash_b_bytes, DUMMY_ADDRESS, 1700000001, "swarm-provenance",
+                    [], [], 0,
+                )
+            else:
+                mock_call.call.return_value = (data_hash, ZERO_ADDRESS, 0, "", [], [], 0)
+            return mock_call
+
+        mock_chain_deps["contract"].functions.getDataRecord = mock_get_data_record
+
+        # getTransformationLinks for hash_a returns link to hash_b
+        def mock_get_links(data_hash):
+            mock_call = MagicMock()
+            if data_hash == hash_a_bytes:
+                mock_call.call.return_value = [(hash_b_bytes, "filtered")]
+            else:
+                mock_call.call.return_value = []
+            return mock_call
+
+        mock_chain_deps["contract"].functions.getTransformationLinks = mock_get_links
+
+        # getTransformationParents
+        def mock_get_parents(data_hash):
+            mock_call = MagicMock()
+            if data_hash == hash_b_bytes:
+                mock_call.call.return_value = [hash_a_bytes]
+            else:
+                mock_call.call.return_value = []
+            return mock_call
+
+        mock_chain_deps["contract"].functions.getTransformationParents = mock_get_parents
+
+        client = ChainClient(chain="base-sepolia")
+        chain = client.get_provenance_chain(swarm_hash=hash_a)
+
+        assert len(chain) == 2
+        chain_hashes = [r.data_hash for r in chain]
+        assert hash_a in chain_hashes
+        assert hash_b in chain_hashes
+
+    def test_v2_cycle_detection(self, mock_chain_deps):
+        """Tests that provenance chain traversal detects cycles."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        hash_a = DUMMY_HASH
+        hash_b = "b" * 64
+        hash_a_bytes = bytes.fromhex(hash_a)
+        hash_b_bytes = bytes.fromhex(hash_b)
+
+        # V2 detection: succeeds
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.return_value = []
+
+        def mock_get_data_record(data_hash):
+            mock_call = MagicMock()
+            if data_hash == hash_a_bytes:
+                mock_call.call.return_value = (hash_a_bytes, DUMMY_ADDRESS, 1700000000, "type", [], [], 0)
+            elif data_hash == hash_b_bytes:
+                mock_call.call.return_value = (hash_b_bytes, DUMMY_ADDRESS, 1700000001, "type", [], [], 0)
+            else:
+                mock_call.call.return_value = (data_hash, ZERO_ADDRESS, 0, "", [], [], 0)
+            return mock_call
+
+        mock_chain_deps["contract"].functions.getDataRecord = mock_get_data_record
+
+        # Create a cycle: A -> B -> A
+        def mock_get_links(data_hash):
+            mock_call = MagicMock()
+            if data_hash == hash_a_bytes:
+                mock_call.call.return_value = [(hash_b_bytes, "step1")]
+            elif data_hash == hash_b_bytes:
+                mock_call.call.return_value = [(hash_a_bytes, "step2")]
+            else:
+                mock_call.call.return_value = []
+            return mock_call
+
+        mock_chain_deps["contract"].functions.getTransformationLinks = mock_get_links
+        mock_chain_deps["contract"].functions.getTransformationParents.return_value.call.return_value = []
+
+        client = ChainClient(chain="base-sepolia")
+        chain = client.get_provenance_chain(swarm_hash=hash_a)
+
+        # Should visit each node exactly once despite cycle
+        assert len(chain) == 2
+
+
+class TestTransformationAlreadyExistsExceptionFields:
+    """Tests for TransformationAlreadyExistsError exception fields."""
+
+    def test_stores_all_fields(self):
+        """Tests that all fields are stored on the exception."""
+        err = TransformationAlreadyExistsError(
+            "duplicate",
+            original_hash="aa" * 32,
+            new_hash="bb" * 32,
+            existing_description="already done",
+        )
+        assert err.original_hash == "aa" * 32
+        assert err.new_hash == "bb" * 32
+        assert err.existing_description == "already done"
+        assert "duplicate" in str(err)
+
+    def test_inherits_from_chain_error(self):
+        """Tests that TransformationAlreadyExistsError is a ChainError."""
+        from swarm_provenance_uploader.exceptions import ChainError, ProvenanceError
+
+        err = TransformationAlreadyExistsError("test")
+        assert isinstance(err, ChainError)
+        assert isinstance(err, ProvenanceError)
+
+    def test_fields_default_to_none(self):
+        """Tests that optional fields default to None."""
+        err = TransformationAlreadyExistsError("test")
+        assert err.original_hash is None
+        assert err.new_hash is None
+        assert err.existing_description is None
+
+
+class TestMergeTransformResultModel:
+    """Tests for MergeTransformResult Pydantic model."""
+
+    def test_creation_and_serialization(self):
+        """Tests model creation and dump."""
+        result = MergeTransformResult(
+            tx_hash="0x" + "ab" * 32,
+            block_number=100,
+            gas_used=50000,
+            explorer_url="https://example.com/tx/0xab",
+            source_hashes=[DUMMY_HASH, "b" * 64],
+            new_hash="c" * 64,
+            description="merged datasets",
+            new_data_type="combined",
+        )
+        data = result.model_dump()
+        assert data["tx_hash"] == "0x" + "ab" * 32
+        assert data["source_hashes"] == [DUMMY_HASH, "b" * 64]
+        assert data["new_hash"] == "c" * 64
+        assert data["description"] == "merged datasets"
+        assert data["new_data_type"] == "combined"
+
+    def test_explorer_url_optional(self):
+        """Tests that explorer_url can be None."""
+        result = MergeTransformResult(
+            tx_hash="0x" + "ab" * 32,
+            block_number=100,
+            gas_used=50000,
+            explorer_url=None,
+            source_hashes=[DUMMY_HASH, "b" * 64],
+            new_hash="c" * 64,
+            description="merged",
+            new_data_type="merged",
+        )
+        assert result.explorer_url is None
+
+
+class TestABIV2Functions:
+    """Tests that the bundled ABI includes v2 functions."""
+
+    def test_abi_has_v2_functions(self):
+        """Tests that the ABI includes v2-specific functions."""
+        from swarm_provenance_uploader.chain.contract import _load_abi
+
+        abi = _load_abi()
+        func_names = [e["name"] for e in abi if e.get("type") == "function"]
+
+        assert "getTransformationLinks" in func_names
+        assert "getTransformationParents" in func_names
+        assert "getChildHashes" in func_names
+        assert "recordMergeTransformation" in func_names
+
+    def test_abi_has_data_merged_event(self):
+        """Tests that the ABI includes the DataMerged event."""
+        from swarm_provenance_uploader.chain.contract import _load_abi
+
+        abi = _load_abi()
+        event_names = [e["name"] for e in abi if e.get("type") == "event"]
+
+        assert "DataMerged" in event_names
