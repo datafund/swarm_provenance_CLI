@@ -1496,10 +1496,10 @@ class TestUploadWithSign:
 
 
 class TestDownloadWithVerify:
-    """Tests for download command with --verify flag."""
+    """Tests for download command with default signature verification."""
 
     def test_download_with_verify_success(self, mocker, tmp_path):
-        """Tests download with --verify flag and valid signature."""
+        """Tests download verifies signature by default."""
         import json
         import base64
         import hashlib
@@ -1549,7 +1549,7 @@ class TestDownloadWithVerify:
 
         result = runner.invoke(
             app,
-            ["download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--verify"]
+            ["download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path)]
         )
 
         assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
@@ -1557,7 +1557,7 @@ class TestDownloadWithVerify:
         assert "verified" in result.stdout.lower() or "Verified" in result.stdout
 
     def test_download_verify_fails_invalid_signature(self, mocker, tmp_path):
-        """Tests download with --verify fails when signature is invalid."""
+        """Tests download warns on invalid signature but still succeeds."""
         import json
         import base64
         import hashlib
@@ -1606,7 +1606,7 @@ class TestDownloadWithVerify:
 
         result = runner.invoke(
             app,
-            ["download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--verify"]
+            ["download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path)]
         )
 
         # Download should still succeed (files downloaded) but with a warning about failed signature
@@ -1615,7 +1615,7 @@ class TestDownloadWithVerify:
         assert "FAILED" in result.stdout or "failed" in result.stdout.lower()
 
     def test_download_verify_no_signature_found(self, mocker, tmp_path):
-        """Tests download with --verify warns when no signature found."""
+        """Tests download silently skips verification when no signature present."""
         import json
         import base64
         import hashlib
@@ -1645,15 +1645,16 @@ class TestDownloadWithVerify:
 
         result = runner.invoke(
             app,
-            ["download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--verify"]
+            ["download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path)]
         )
 
-        # Should still succeed (download works) but show message about no signatures
+        # Should succeed silently — no error about missing signatures
         assert result.exit_code == 0
-        assert "No notary signatures" in result.stdout or "no notary" in result.stdout.lower()
+        # No signature message should NOT appear (silent skip)
+        assert "No notary signatures" not in result.stdout
 
     def test_download_verify_local_backend_warns(self, mocker, tmp_path):
-        """Tests --verify with local backend still downloads but can't verify."""
+        """Tests default verify with local backend still downloads but can't verify."""
         import json
         import base64
         import hashlib
@@ -1688,12 +1689,314 @@ class TestDownloadWithVerify:
 
         result = runner.invoke(
             app,
-            ["--backend", "local", "download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--verify"]
+            ["--backend", "local", "download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path)]
         )
 
         # Download should still succeed
         assert result.exit_code == 0
         # But should warn about not being able to verify
+        assert "Cannot verify" in result.stdout or "No notary address" in result.stdout
+
+    def test_download_no_verify_skips_verification(self, mocker, tmp_path):
+        """Tests --no-verify skips signature verification entirely."""
+        import json
+        import base64
+        import hashlib
+
+        original_data = b"test provenance data"
+        b64_data = base64.b64encode(original_data).decode()
+        content_hash = hashlib.sha256(original_data).hexdigest()
+
+        metadata = {
+            "data": b64_data,
+            "content_hash": content_hash,
+            "stamp_id": DUMMY_STAMP,
+            "provenance_standard": "TEST-V1",
+            "signatures": [
+                {
+                    "type": "notary",
+                    "signer": "0x1234567890abcdef1234567890abcdef12345678",
+                    "timestamp": "2026-01-21T16:30:00+00:00",
+                    "data_hash": "abc123",
+                    "signature": "0x" + "ab" * 65,
+                }
+            ],
+        }
+
+        mock_client = mocker.MagicMock()
+        mock_client.download_data.return_value = json.dumps(metadata).encode()
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(
+            app,
+            ["download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--no-verify"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        # No verification output should appear
+        assert "Signature" not in result.stdout
+        assert "Verified" not in result.stdout
+
+    def test_download_strict_fails_on_invalid_signature(self, mocker, tmp_path):
+        """Tests --strict exits with code 1 when signature verification fails."""
+        import json
+        import base64
+        import hashlib
+        from swarm_provenance_uploader.models import NotaryInfoResponse
+
+        original_data = b"test provenance data"
+        b64_data = base64.b64encode(original_data).decode()
+        content_hash = hashlib.sha256(original_data).hexdigest()
+
+        metadata = {
+            "data": b64_data,
+            "content_hash": content_hash,
+            "stamp_id": DUMMY_STAMP,
+            "provenance_standard": "TEST-V1",
+            "signatures": [
+                {
+                    "type": "notary",
+                    "signer": "0x1234567890abcdef1234567890abcdef12345678",
+                    "timestamp": "2026-01-21T16:30:00+00:00",
+                    "data_hash": "wrong_hash",
+                    "signature": "0x" + "00" * 65,
+                }
+            ],
+        }
+
+        mock_client = mocker.MagicMock()
+        mock_client.download_data.return_value = json.dumps(metadata).encode()
+        mock_client.get_notary_info.return_value = NotaryInfoResponse(
+            enabled=True,
+            available=True,
+            address="0x1234567890abcdef1234567890abcdef12345678",
+            message=None,
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.core.notary_utils.verify_notary_signature",
+            return_value=(False, "Signature recovery mismatch")
+        )
+
+        result = runner.invoke(
+            app,
+            ["download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--strict"]
+        )
+
+        assert result.exit_code == 1
+        assert "FAILED" in result.stdout
+        assert "strict" in result.stdout.lower() or "Aborting" in result.stdout
+
+    def test_download_strict_succeeds_on_valid_signature(self, mocker, tmp_path):
+        """Tests --strict succeeds when signature is valid."""
+        import json
+        import base64
+        import hashlib
+        from swarm_provenance_uploader.models import NotaryInfoResponse
+
+        original_data = b"test provenance data"
+        b64_data = base64.b64encode(original_data).decode()
+        content_hash = hashlib.sha256(original_data).hexdigest()
+
+        metadata = {
+            "data": b64_data,
+            "content_hash": content_hash,
+            "stamp_id": DUMMY_STAMP,
+            "provenance_standard": "TEST-V1",
+            "signatures": [
+                {
+                    "type": "notary",
+                    "signer": "0x1234567890abcdef1234567890abcdef12345678",
+                    "timestamp": "2026-01-21T16:30:00+00:00",
+                    "data_hash": "abc123",
+                    "signature": "0x" + "ab" * 65,
+                }
+            ],
+        }
+
+        mock_client = mocker.MagicMock()
+        mock_client.download_data.return_value = json.dumps(metadata).encode()
+        mock_client.get_notary_info.return_value = NotaryInfoResponse(
+            enabled=True,
+            available=True,
+            address="0x1234567890abcdef1234567890abcdef12345678",
+            message=None,
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        mocker.patch(
+            "swarm_provenance_uploader.core.notary_utils.verify_notary_signature",
+            return_value=(True, None)
+        )
+
+        result = runner.invoke(
+            app,
+            ["download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--strict"]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Verified" in result.stdout
+
+    def test_download_verify_flag_backward_compatible(self, mocker, tmp_path):
+        """Tests that --verify flag still works (backward compatibility)."""
+        import json
+        import base64
+        import hashlib
+
+        original_data = b"test provenance data"
+        b64_data = base64.b64encode(original_data).decode()
+        content_hash = hashlib.sha256(original_data).hexdigest()
+
+        metadata = {
+            "data": b64_data,
+            "content_hash": content_hash,
+            "stamp_id": DUMMY_STAMP,
+            "provenance_standard": "TEST-V1",
+        }
+
+        mock_client = mocker.MagicMock()
+        mock_client.download_data.return_value = json.dumps(metadata).encode()
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(
+            app,
+            ["download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--verify"]
+        )
+
+        # Should not crash — --verify is accepted silently
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+
+    def test_download_strict_no_signatures_succeeds(self, mocker, tmp_path):
+        """Tests --strict with no signatures present still succeeds."""
+        import json
+        import base64
+        import hashlib
+
+        original_data = b"test provenance data"
+        b64_data = base64.b64encode(original_data).decode()
+        content_hash = hashlib.sha256(original_data).hexdigest()
+
+        metadata = {
+            "data": b64_data,
+            "content_hash": content_hash,
+            "stamp_id": DUMMY_STAMP,
+            "provenance_standard": "TEST-V1",
+        }
+
+        mock_client = mocker.MagicMock()
+        mock_client.download_data.return_value = json.dumps(metadata).encode()
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(
+            app,
+            ["download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--strict"]
+        )
+
+        # No signatures → nothing to fail on → succeeds
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+
+    def test_download_no_verify_overrides_strict(self, mocker, tmp_path):
+        """Tests --no-verify takes precedence over --strict."""
+        import json
+        import base64
+        import hashlib
+
+        original_data = b"test provenance data"
+        b64_data = base64.b64encode(original_data).decode()
+        content_hash = hashlib.sha256(original_data).hexdigest()
+
+        metadata = {
+            "data": b64_data,
+            "content_hash": content_hash,
+            "stamp_id": DUMMY_STAMP,
+            "provenance_standard": "TEST-V1",
+            "signatures": [
+                {
+                    "type": "notary",
+                    "signer": "0x1234567890abcdef1234567890abcdef12345678",
+                    "timestamp": "2026-01-21T16:30:00+00:00",
+                    "data_hash": "wrong_hash",
+                    "signature": "0x" + "00" * 65,
+                }
+            ],
+        }
+
+        mock_client = mocker.MagicMock()
+        mock_client.download_data.return_value = json.dumps(metadata).encode()
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(
+            app,
+            ["download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--no-verify", "--strict"]
+        )
+
+        # --no-verify bypasses all verification, --strict never evaluated
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Signature" not in result.stdout
+
+    def test_download_strict_local_backend_warns_not_fails(self, mocker, tmp_path):
+        """Tests --strict on local backend warns but doesn't fail (can't fetch notary address)."""
+        import json
+        import base64
+        import hashlib
+
+        original_data = b"test provenance data"
+        b64_data = base64.b64encode(original_data).decode()
+        content_hash = hashlib.sha256(original_data).hexdigest()
+
+        metadata = {
+            "data": b64_data,
+            "content_hash": content_hash,
+            "stamp_id": DUMMY_STAMP,
+            "provenance_standard": "TEST-V1",
+            "signatures": [
+                {
+                    "type": "notary",
+                    "signer": "0x1234567890abcdef1234567890abcdef12345678",
+                    "timestamp": "2026-01-21T16:30:00+00:00",
+                    "data_hash": "abc123",
+                    "signature": "0x" + "ab" * 65,
+                }
+            ],
+        }
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.swarm_client.download_data_from_swarm",
+            return_value=json.dumps(metadata).encode()
+        )
+
+        result = runner.invoke(
+            app,
+            ["--backend", "local", "download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--strict"]
+        )
+
+        # Should warn but still succeed — can't verify without notary address
+        assert result.exit_code == 0
         assert "Cannot verify" in result.stdout or "No notary address" in result.stdout
 
 

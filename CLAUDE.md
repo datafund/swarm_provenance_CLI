@@ -156,7 +156,9 @@ swarm-prov-upload notary info                           # Check notary service s
 swarm-prov-upload notary status                         # Quick status check
 swarm-prov-upload notary verify --file signed.json      # Verify local file signature
 swarm-prov-upload upload --file data.txt --sign notary  # Upload with notary signing
-swarm-prov-upload download <hash> --verify              # Download with signature verification
+swarm-prov-upload download <hash>                       # Download with signature verification (default)
+swarm-prov-upload download <hash> --no-verify           # Skip signature verification
+swarm-prov-upload download <hash> --strict              # Fail if signature verification fails
 
 # Chain commands (optional, requires blockchain dependencies)
 swarm-prov-upload chain balance                                              # Wallet balance and chain info
