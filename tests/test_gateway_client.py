@@ -634,6 +634,28 @@ class TestGatewayClientX402:
         )
         assert client._x402_network == "base-sepolia"
 
+    def test_402_disabled_detail_wrapped(self, requests_mock):
+        """Tests that x402-disabled path extracts amounts from detail-wrapped 402."""
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        wrapped_response = {"detail": self.SAMPLE_402_RESPONSE}
+
+        requests_mock.post(
+            "https://test.gateway.io/api/v1/stamps/",
+            status_code=402,
+            json=wrapped_response,
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io", x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError) as exc_info:
+            client.purchase_stamp(duration_hours=24)
+
+        # Should have extracted payment options from inside detail wrapper
+        assert exc_info.value.payment_options is not None
+        assert len(exc_info.value.payment_options) == 1
+        assert "50000" in str(exc_info.value)
+
     def test_402_non_json_response(self, requests_mock):
         """Tests handling of 402 with non-JSON response body."""
         from swarm_provenance_uploader.exceptions import PaymentRequiredError

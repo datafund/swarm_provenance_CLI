@@ -155,6 +155,30 @@ class TestX402ClientParse402:
         with pytest.raises(PaymentRequiredError):
             client.parse_402_response({"invalid": "data"})
 
+    def test_parse_402_response_detail_wrapped(self, mock_eth_deps):
+        """Tests parsing a 402 response wrapped in a detail object."""
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        wrapped_body = {"detail": SAMPLE_402_RESPONSE}
+        client = X402Client(skip_domain_validation=True)
+        requirements = client.parse_402_response(wrapped_body)
+
+        assert isinstance(requirements, X402PaymentRequirements)
+        assert len(requirements.accepts) == 1
+        assert requirements.accepts[0].network == "base-sepolia"
+        assert requirements.accepts[0].maxAmountRequired == "50000"
+
+    def test_parse_402_response_flat_still_works(self, mock_eth_deps):
+        """Tests that flat (non-wrapped) 402 format still works."""
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(skip_domain_validation=True)
+        requirements = client.parse_402_response(SAMPLE_402_RESPONSE)
+
+        assert isinstance(requirements, X402PaymentRequirements)
+        assert len(requirements.accepts) == 1
+        assert requirements.accepts[0].scheme == "exact"
+
 
 class TestX402ClientSelectPaymentOption:
     """Tests for selecting payment options."""

@@ -331,7 +331,11 @@ class X402Client:
             PaymentRequiredError: If response format is invalid.
         """
         try:
-            return X402PaymentRequirements.model_validate(response_body)
+            # New gateway wraps payload in {"detail": {...}}
+            payload = response_body
+            if "detail" in response_body and "accepts" in response_body.get("detail", {}):
+                payload = response_body["detail"]
+            return X402PaymentRequirements.model_validate(payload)
         except Exception as e:
             raise PaymentRequiredError(
                 f"Failed to parse 402 response: {e}",
