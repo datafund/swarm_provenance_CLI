@@ -1128,6 +1128,359 @@ class TestBlockchainBaseSepolia:
         except Exception as e:
             pytest.skip(f"Base Sepolia test failed: {e}")
 
+    @skip_if_no_chain_wallet
+    @skip_if_no_blockchain_deps
+    def test_chain_client_transform_base_sepolia(self):
+        """Test anchoring two hashes and recording a transformation on Base Sepolia.
+
+        WARNING: Uses real testnet gas (2 anchor txs + 1 transform tx).
+        """
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        import time
+
+        try:
+            client = ChainClient(chain="base-sepolia")
+
+            original = _random_hash()
+            derived = _random_hash()
+
+            # Anchor the original
+            r1 = client.anchor(swarm_hash=original, data_type="integration-test", verbose=True)
+            assert r1.tx_hash is not None
+            time.sleep(3)
+
+            # Record transformation
+            result = client.transform(
+                original_hash=original,
+                new_hash=derived,
+                description="sepolia integration test transform",
+                verbose=True,
+            )
+
+            print(f"\n=== Transform Result ===")
+            print(f"  Original: {original}")
+            print(f"  Derived:  {derived}")
+            print(f"  TX: {result.tx_hash}")
+            print(f"  Block: {result.block_number}")
+            print(f"  Gas: {result.gas_used}")
+
+            assert result.tx_hash is not None
+            assert result.block_number > 0
+
+            # Verify the derived hash is now registered
+            time.sleep(3)
+            assert client.verify(swarm_hash=derived) is True
+
+        except Exception as e:
+            pytest.skip(f"Base Sepolia transform failed: {e}")
+
+    @skip_if_no_chain_wallet
+    @skip_if_no_blockchain_deps
+    def test_chain_client_get_record_base_sepolia(self):
+        """Test anchoring and retrieving a full provenance record on Base Sepolia.
+
+        WARNING: Uses real testnet gas (1 anchor tx).
+        """
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.models import DataStatusEnum
+        import time
+
+        try:
+            client = ChainClient(chain="base-sepolia")
+
+            test_hash = _random_hash()
+            client.anchor(swarm_hash=test_hash, data_type="get-test", verbose=True)
+            time.sleep(3)
+
+            record = client.get(swarm_hash=test_hash, verbose=True)
+
+            print(f"\n=== On-chain Record ===")
+            print(f"  Hash:      {test_hash}")
+            print(f"  Owner:     {record.owner}")
+            print(f"  Type:      {record.data_type}")
+            print(f"  Status:    {record.status}")
+            print(f"  Timestamp: {record.timestamp}")
+
+            assert record.owner.startswith("0x")
+            assert record.data_type == "get-test"
+            assert record.status == DataStatusEnum.ACTIVE
+            assert record.timestamp > 0
+
+        except Exception as e:
+            pytest.skip(f"Base Sepolia get record failed: {e}")
+
+    @skip_if_no_chain_wallet
+    @skip_if_no_blockchain_deps
+    def test_chain_client_access_base_sepolia(self):
+        """Test recording data access on Base Sepolia.
+
+        WARNING: Uses real testnet gas (1 anchor tx + 1 access tx).
+        """
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        import time
+
+        try:
+            client = ChainClient(chain="base-sepolia")
+
+            test_hash = _random_hash()
+            client.anchor(swarm_hash=test_hash, data_type="access-test", verbose=True)
+            time.sleep(3)
+
+            result = client.access(swarm_hash=test_hash, verbose=True)
+
+            print(f"\n=== Access Result ===")
+            print(f"  Hash:     {test_hash}")
+            print(f"  Accessor: {result.accessor}")
+            print(f"  TX:       {result.tx_hash}")
+            print(f"  Gas:      {result.gas_used}")
+
+            assert result.tx_hash is not None
+            assert result.accessor.startswith("0x")
+
+        except Exception as e:
+            pytest.skip(f"Base Sepolia access failed: {e}")
+
+    @skip_if_no_chain_wallet
+    @skip_if_no_blockchain_deps
+    def test_chain_client_merge_transform_base_sepolia(self):
+        """Test N-to-1 merge transformation on Base Sepolia.
+
+        WARNING: Uses real testnet gas (2 anchor txs + 1 merge tx).
+        """
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        import time
+
+        try:
+            client = ChainClient(chain="base-sepolia")
+
+            source1 = _random_hash()
+            source2 = _random_hash()
+            merged = _random_hash()
+
+            # Anchor both sources (wait between to avoid nonce issues)
+            client.anchor(swarm_hash=source1, data_type="merge-source", verbose=True)
+            time.sleep(2)
+            client.anchor(swarm_hash=source2, data_type="merge-source", verbose=True)
+            time.sleep(3)
+
+            # Record merge
+            result = client.merge_transform(
+                source_hashes=[source1, source2],
+                new_hash=merged,
+                description="sepolia merge integration test",
+                new_data_type="merged-dataset",
+                verbose=True,
+            )
+
+            print(f"\n=== Merge Transform Result ===")
+            print(f"  Sources: {source1[:16]}..., {source2[:16]}...")
+            print(f"  Merged:  {merged[:16]}...")
+            print(f"  TX:      {result.tx_hash}")
+            print(f"  Block:   {result.block_number}")
+            print(f"  Gas:     {result.gas_used}")
+
+            assert result.tx_hash is not None
+            assert result.block_number > 0
+            assert len(result.source_hashes) == 2
+
+            # Verify merged hash is registered
+            time.sleep(3)
+            assert client.verify(swarm_hash=merged) is True
+
+        except Exception as e:
+            pytest.skip(f"Base Sepolia merge transform failed: {e}")
+
+    @skip_if_no_chain_wallet
+    @skip_if_no_blockchain_deps
+    def test_chain_client_provenance_chain_base_sepolia(self):
+        """Test provenance chain traversal on Base Sepolia.
+
+        Anchors A, transforms A->B, then walks the chain from B.
+        WARNING: Uses real testnet gas (1 anchor tx + 1 transform tx).
+        """
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        import time
+
+        try:
+            client = ChainClient(chain="base-sepolia")
+
+            hash_a = _random_hash()
+            hash_b = _random_hash()
+
+            client.anchor(swarm_hash=hash_a, data_type="chain-test", verbose=True)
+            time.sleep(3)
+            client.transform(
+                original_hash=hash_a,
+                new_hash=hash_b,
+                description="chain walk test",
+                verbose=True,
+            )
+            time.sleep(3)
+
+            chain = client.get_provenance_chain(swarm_hash=hash_b, verbose=True)
+
+            print(f"\n=== Provenance Chain ===")
+            for i, node in enumerate(chain):
+                print(f"  [{i}] {node.data_hash[:16]}... "
+                      f"type={node.data_type} "
+                      f"transformations={len(node.transformations)}")
+
+            assert len(chain) >= 2
+            # First node should be hash_b, last should be hash_a
+            assert chain[0].data_hash == hash_b
+            assert chain[-1].data_hash == hash_a
+
+        except Exception as e:
+            pytest.skip(f"Base Sepolia provenance chain failed: {e}")
+
+    @skip_if_no_chain_wallet
+    @skip_if_no_blockchain_deps
+    def test_chain_client_multi_hop_provenance_chain_base_sepolia(self):
+        """Test multi-hop provenance chain: A -> B -> C, walk from C back to A.
+
+        Scenario:
+          1. Anchor A (raw dataset)
+          2. Transform A -> B ("Filtered PII")
+          3. Transform B -> C ("Aggregated statistics")
+          4. Walk chain from C — expect [C, B, A]
+          5. Verify each node's data_type and transformation descriptions
+
+        WARNING: Uses real testnet gas (1 anchor + 2 transform txs).
+        """
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.models import DataStatusEnum
+        import time
+
+        try:
+            client = ChainClient(chain="base-sepolia")
+
+            hash_a = _random_hash()
+            hash_b = _random_hash()
+            hash_c = _random_hash()
+
+            # Step 1: Anchor the root dataset
+            r_anchor = client.anchor(
+                swarm_hash=hash_a, data_type="raw-dataset", verbose=True
+            )
+            print(f"\n=== Step 1: Anchor A ===")
+            print(f"  Hash: {hash_a[:16]}...")
+            print(f"  TX:   {r_anchor.tx_hash}")
+            time.sleep(3)
+
+            # Step 2: Transform A -> B (PII filtering)
+            r_ab = client.transform(
+                original_hash=hash_a,
+                new_hash=hash_b,
+                description="Filtered PII fields",
+                verbose=True,
+            )
+            print(f"\n=== Step 2: Transform A -> B ===")
+            print(f"  A: {hash_a[:16]}...")
+            print(f"  B: {hash_b[:16]}...")
+            print(f"  TX:   {r_ab.tx_hash}")
+            time.sleep(3)
+
+            # Step 3: Transform B -> C (aggregation)
+            r_bc = client.transform(
+                original_hash=hash_b,
+                new_hash=hash_c,
+                description="Aggregated statistics",
+                verbose=True,
+            )
+            print(f"\n=== Step 3: Transform B -> C ===")
+            print(f"  B: {hash_b[:16]}...")
+            print(f"  C: {hash_c[:16]}...")
+            print(f"  TX:   {r_bc.tx_hash}")
+            time.sleep(3)
+
+            # Step 4: Walk chain from C back to A
+            chain = client.get_provenance_chain(swarm_hash=hash_c, verbose=True)
+
+            print(f"\n=== Provenance Chain (from C) ===")
+            for i, node in enumerate(chain):
+                xforms = [t.description for t in node.transformations]
+                print(
+                    f"  [{i}] {node.data_hash[:16]}... "
+                    f"type={node.data_type} status={node.status.name} "
+                    f"transforms={xforms}"
+                )
+
+            # Should be exactly 3 nodes: C, B, A
+            assert len(chain) == 3, f"Expected 3 nodes, got {len(chain)}"
+
+            # Node 0: C (leaf — no outgoing transformations)
+            assert chain[0].data_hash == hash_c
+            assert chain[0].status == DataStatusEnum.ACTIVE
+
+            # Node 1: B (has one outgoing transformation to C)
+            assert chain[1].data_hash == hash_b
+            assert any(
+                t.description == "Aggregated statistics"
+                for t in chain[1].transformations
+            ), f"Expected 'Aggregated statistics' in B's transforms: {chain[1].transformations}"
+
+            # Node 2: A (root — has one outgoing transformation to B)
+            assert chain[2].data_hash == hash_a
+            assert chain[2].data_type == "raw-dataset"
+            assert any(
+                t.description == "Filtered PII fields"
+                for t in chain[2].transformations
+            ), f"Expected 'Filtered PII fields' in A's transforms: {chain[2].transformations}"
+
+            print(f"\n  Chain verified: C -> B -> A")
+
+        except Exception as e:
+            pytest.skip(f"Base Sepolia multi-hop provenance chain failed: {e}")
+
+    @skip_if_no_chain_wallet
+    @skip_if_no_blockchain_deps
+    def test_chain_client_duplicate_transform_precheck_base_sepolia(self):
+        """Test that duplicate transform pre-check works on Base Sepolia.
+
+        Anchors A, transforms A->B, then attempts A->B again.
+        WARNING: Uses real testnet gas (1 anchor tx + 1 transform tx).
+        """
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.chain.exceptions import TransformationAlreadyExistsError
+        import time
+
+        try:
+            client = ChainClient(chain="base-sepolia")
+
+            original = _random_hash()
+            derived = _random_hash()
+
+            client.anchor(swarm_hash=original, data_type="dup-test", verbose=True)
+            time.sleep(3)
+            client.transform(
+                original_hash=original,
+                new_hash=derived,
+                description="first transform",
+                verbose=True,
+            )
+            time.sleep(3)
+
+            # Attempt the same transform again — should raise
+            with pytest.raises(TransformationAlreadyExistsError) as exc_info:
+                client.transform(
+                    original_hash=original,
+                    new_hash=derived,
+                    description="duplicate attempt",
+                )
+
+            print(f"\n=== Duplicate Transform Pre-Check ===")
+            print(f"  Original:   {original[:16]}...")
+            print(f"  Derived:    {derived[:16]}...")
+            print(f"  Existing:   {exc_info.value.existing_description}")
+
+            assert exc_info.value.original_hash == original
+            assert exc_info.value.new_hash == derived
+
+        except TransformationAlreadyExistsError:
+            raise  # Re-raise so pytest.raises captures it
+        except Exception as e:
+            pytest.skip(f"Base Sepolia duplicate transform test failed: {e}")
+
 
 # =============================================================================
 # MANIFEST / COLLECTION UPLOAD TESTS

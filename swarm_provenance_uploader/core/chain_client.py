@@ -8,17 +8,15 @@ gas estimation, signing, broadcasting, and receipt parsing.
 Requires optional dependencies: pip install swarm-provenance-uploader[blockchain]
 """
 
-import os
+import logging
 from typing import List, Optional
 
 from ..chain.contract import DataStatus
-from ..exceptions import (
-    ChainConfigurationError,
-    ChainConnectionError,
+from ..chain.exceptions import (
     ChainTransactionError,
-    ChainValidationError,
     DataAlreadyRegisteredError,
     DataNotRegisteredError,
+    TransformationAlreadyExistsError,
 )
 from ..models import (
     AccessResult,
@@ -27,8 +25,11 @@ from ..models import (
     ChainTransformation,
     ChainWalletInfo,
     DataStatusEnum,
+    MergeTransformResult,
     TransformResult,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ChainClient:
@@ -49,12 +50,13 @@ class ChainClient:
         gas_limit_multiplier: float = 1.2,
         explorer_url: Optional[str] = None,
         gas_limit: Optional[int] = None,
+        rpc_fallbacks: Optional[List[str]] = None,
     ):
         """
         Initialize the chain client.
 
         Args:
-            chain: Chain name ('base-sepolia' or 'base').
+            chain: Chain name ('base-sepolia', 'base', or 'localhost').
             rpc_url: Custom RPC URL. If None, uses preset.
             contract_address: Custom contract address. If None, uses preset.
             private_key: Wallet private key. If None, reads from env var.
@@ -62,6 +64,7 @@ class ChainClient:
             gas_limit_multiplier: Safety multiplier for gas estimates (default 1.2).
             explorer_url: Custom block explorer URL. If None, uses preset.
             gas_limit: Explicit gas limit. If set, skips estimation and multiplier.
+            rpc_fallbacks: Fallback RPC URLs tried in order on failure.
 
         Raises:
             ChainConfigurationError: If dependencies missing or config invalid.
@@ -75,6 +78,7 @@ class ChainClient:
             rpc_url=rpc_url,
             contract_address=contract_address,
             explorer_url=explorer_url,
+            rpc_fallbacks=rpc_fallbacks,
         )
         self._wallet = ChainWallet(
             private_key=private_key,
@@ -128,18 +132,20 @@ class ChainClient:
             # Set gas limit: explicit value or estimate with multiplier
             if self._gas_limit is not None:
                 tx["gas"] = self._gas_limit
-                if verbose:
-                    print(f"DEBUG: Using explicit gas limit: {self._gas_limit}")
+                logger.debug("Using explicit gas limit: %d", self._gas_limit)
             else:
                 estimated_gas = web3.eth.estimate_gas(tx)
                 tx["gas"] = int(estimated_gas * self._gas_limit_multiplier)
-                if verbose:
-                    print(f"DEBUG: Estimated gas: {estimated_gas}, limit: {tx['gas']}")
+                logger.debug("Estimated gas: %d, limit: %d", estimated_gas, tx["gas"])
+
+            if verbose:
+                print(f"DEBUG: Gas limit: {tx['gas']}")
 
             # Sign and send
             raw_tx = self._wallet.sign_transaction(tx)
             tx_hash = web3.eth.send_raw_transaction(raw_tx)
 
+            logger.debug("Transaction sent: %s", tx_hash.hex())
             if verbose:
                 print(f"DEBUG: Transaction sent: {tx_hash.hex()}")
 
@@ -148,13 +154,17 @@ class ChainClient:
 
             if receipt["status"] != 1:
                 raise ChainTransactionError(
-                    f"Transaction reverted (status=0)",
+                    "Transaction reverted (status=0)",
                     tx_hash=tx_hash.hex(),
                 )
 
+            logger.debug(
+                "Transaction confirmed in block %d, gas used: %d",
+                receipt["blockNumber"],
+                receipt["gasUsed"],
+            )
             if verbose:
-                print(f"DEBUG: Transaction confirmed in block {receipt['blockNumber']}")
-                print(f"DEBUG: Gas used: {receipt['gasUsed']}")
+                print(f"DEBUG: Confirmed in block {receipt['blockNumber']}, gas: {receipt['gasUsed']}")
 
             return receipt
 
@@ -195,10 +205,7 @@ class ChainClient:
         Returns:
             AnchorResult with transaction details.
         """
-        if verbose:
-            print(f"--- DEBUG: Anchor ---")
-            print(f"Hash: {swarm_hash}")
-            print(f"Type: {data_type}")
+        logger.debug("Anchor: hash=%s type=%s", swarm_hash, data_type)
 
         # Pre-check: avoid wasting gas on already-registered hashes
         try:
@@ -218,7 +225,24 @@ class ChainClient:
             data_type=data_type,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx, verbose=verbose)
+        try:
+            receipt = self._send_transaction(tx, verbose=verbose)
+        except ChainTransactionError as e:
+            # Detect "already registered" revert that the pre-check missed
+            # (can happen when public RPC serves stale reads)
+            if "already registered" in str(e).lower():
+                try:
+                    record = self.get(swarm_hash, verbose=verbose)
+                    raise DataAlreadyRegisteredError(
+                        f"Data hash {swarm_hash} is already registered on-chain",
+                        data_hash=swarm_hash,
+                        owner=record.owner,
+                        timestamp=record.timestamp,
+                        data_type=record.data_type,
+                    ) from e
+                except DataNotRegisteredError:
+                    pass  # Still not visible — re-raise original
+            raise
 
         return AnchorResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -251,10 +275,7 @@ class ChainClient:
         Returns:
             AnchorResult with transaction details.
         """
-        if verbose:
-            print(f"--- DEBUG: Anchor For ---")
-            print(f"Hash: {swarm_hash}")
-            print(f"Owner: {owner}")
+        logger.debug("Anchor for: hash=%s owner=%s", swarm_hash, owner)
 
         # Pre-check: avoid wasting gas on already-registered hashes
         try:
@@ -304,9 +325,7 @@ class ChainClient:
         Returns:
             AnchorResult for the batch transaction (swarm_hash is first hash).
         """
-        if verbose:
-            print(f"--- DEBUG: Batch Anchor ---")
-            print(f"Count: {len(swarm_hashes)}")
+        logger.debug("Batch anchor: count=%d", len(swarm_hashes))
 
         tx = self._contract.build_batch_register_data_tx(
             data_hashes=swarm_hashes,
@@ -344,11 +363,60 @@ class ChainClient:
         Returns:
             TransformResult with transaction details.
         """
-        if verbose:
-            print(f"--- DEBUG: Transform ---")
-            print(f"Original: {original_hash}")
-            print(f"New: {new_hash}")
-            print(f"Description: {description}")
+        logger.debug(
+            "Transform: original=%s new=%s desc=%s",
+            original_hash,
+            new_hash,
+            description,
+        )
+
+        # Pre-check: avoid wasting gas on duplicate transformations.
+        # Prefer state read on v2 contracts, fall back to event cache.
+        if self._contract.supports_transformation_links():
+            try:
+                links = self._contract.get_transformation_links(original_hash)
+                for existing_new, existing_desc in links:
+                    existing_hex = (
+                        existing_new.hex()
+                        if isinstance(existing_new, bytes)
+                        else str(existing_new)
+                    )
+                    if existing_hex == new_hash:
+                        raise TransformationAlreadyExistsError(
+                            f"Transformation {original_hash[:16]}... -> {new_hash[:16]}... already exists",
+                            original_hash=original_hash,
+                            new_hash=new_hash,
+                            existing_description=existing_desc,
+                        )
+            except TransformationAlreadyExistsError:
+                raise
+            except Exception as e:
+                logger.warning("State-based duplicate check failed: %s", e)
+        else:
+            deploy_block = self._provider.deploy_block
+            if deploy_block is not None:
+                try:
+                    from ..chain.event_cache import get_cache
+
+                    cache = get_cache(
+                        self._provider.chain, self._provider.contract_address
+                    )
+                    current_block = self._provider.web3.eth.block_number
+                    forward, _ = cache.get_maps(
+                        self._contract, deploy_block, current_block
+                    )
+                    for existing_new, existing_desc in forward.get(original_hash, []):
+                        if existing_new == new_hash:
+                            raise TransformationAlreadyExistsError(
+                                f"Transformation {original_hash[:16]}... -> {new_hash[:16]}... already exists",
+                                original_hash=original_hash,
+                                new_hash=new_hash,
+                                existing_description=existing_desc,
+                            )
+                except TransformationAlreadyExistsError:
+                    raise
+                except Exception as e:
+                    logger.warning("Duplicate check failed, proceeding: %s", e)
 
         tx = self._contract.build_record_transformation_tx(
             original_hash=original_hash,
@@ -383,9 +451,7 @@ class ChainClient:
         Returns:
             AccessResult with transaction details.
         """
-        if verbose:
-            print(f"--- DEBUG: Record Access ---")
-            print(f"Hash: {swarm_hash}")
+        logger.debug("Record access: hash=%s", swarm_hash)
 
         tx = self._contract.build_record_access_tx(
             data_hash=swarm_hash,
@@ -417,9 +483,7 @@ class ChainClient:
         Returns:
             AccessResult for the batch transaction.
         """
-        if verbose:
-            print(f"--- DEBUG: Batch Access ---")
-            print(f"Count: {len(swarm_hashes)}")
+        logger.debug("Batch access: count=%d", len(swarm_hashes))
 
         tx = self._contract.build_batch_record_access_tx(
             data_hashes=swarm_hashes,
@@ -453,10 +517,9 @@ class ChainClient:
         Returns:
             AnchorResult with transaction details.
         """
-        if verbose:
-            print(f"--- DEBUG: Set Status ---")
-            print(f"Hash: {swarm_hash}")
-            print(f"Status: {DataStatus(status).name}")
+        logger.debug(
+            "Set status: hash=%s status=%s", swarm_hash, DataStatus(status).name
+        )
 
         tx = self._contract.build_set_data_status_tx(
             data_hash=swarm_hash,
@@ -492,9 +555,7 @@ class ChainClient:
         Returns:
             AnchorResult with transaction details.
         """
-        if verbose:
-            print(f"--- DEBUG: Batch Set Status ---")
-            print(f"Count: {len(swarm_hashes)}")
+        logger.debug("Batch set status: count=%d", len(swarm_hashes))
 
         tx = self._contract.build_batch_set_data_status_tx(
             data_hashes=swarm_hashes,
@@ -530,10 +591,7 @@ class ChainClient:
         Returns:
             AnchorResult with transaction details.
         """
-        if verbose:
-            print(f"--- DEBUG: Transfer Ownership ---")
-            print(f"Hash: {swarm_hash}")
-            print(f"New owner: {new_owner}")
+        logger.debug("Transfer ownership: hash=%s new_owner=%s", swarm_hash, new_owner)
 
         tx = self._contract.build_transfer_ownership_tx(
             data_hash=swarm_hash,
@@ -569,10 +627,8 @@ class ChainClient:
         Returns:
             AnchorResult with transaction details.
         """
-        if verbose:
-            action = "Authorize" if authorized else "Revoke"
-            print(f"--- DEBUG: {action} Delegate ---")
-            print(f"Delegate: {delegate}")
+        action = "Authorize" if authorized else "Revoke"
+        logger.debug("%s delegate: %s", action, delegate)
 
         tx = self._contract.build_set_delegate_tx(
             delegate=delegate,
@@ -589,6 +645,57 @@ class ChainClient:
             swarm_hash="",
             data_type="",
             owner=self._wallet.address,
+        )
+
+    def merge_transform(
+        self,
+        source_hashes: List[str],
+        new_hash: str,
+        description: str,
+        new_data_type: str = "merged",
+        verbose: bool = False,
+    ) -> MergeTransformResult:
+        """
+        Record an N-to-1 merge transformation on-chain.
+
+        All source hashes must be registered. The new_hash is registered
+        automatically by the contract.
+
+        Args:
+            source_hashes: List of original data hashes (2-50).
+            new_hash: Hash of the merged data.
+            description: Transformation description (max 256 chars).
+            new_data_type: Data type for merged result (max 64 chars).
+            verbose: Enable debug output.
+
+        Returns:
+            MergeTransformResult with transaction details.
+        """
+        logger.debug(
+            "Merge transform: sources=%d new=%s desc=%s",
+            len(source_hashes),
+            new_hash,
+            description,
+        )
+
+        tx = self._contract.build_record_merge_transformation_tx(
+            source_hashes=source_hashes,
+            new_hash=new_hash,
+            description=description,
+            new_data_type=new_data_type,
+            sender=self._wallet.address,
+        )
+        receipt = self._send_transaction(tx, verbose=verbose)
+
+        return MergeTransformResult(
+            tx_hash=receipt["transactionHash"].hex(),
+            block_number=receipt["blockNumber"],
+            gas_used=receipt["gasUsed"],
+            explorer_url=self._receipt_to_explorer_url(receipt),
+            source_hashes=source_hashes,
+            new_hash=new_hash,
+            description=description,
+            new_data_type=new_data_type,
         )
 
     # --- Read operations ---
@@ -611,15 +718,21 @@ class ChainClient:
         Raises:
             DataNotRegisteredError: If hash is not registered on-chain.
         """
-        if verbose:
-            print(f"--- DEBUG: Get Record ---")
-            print(f"Hash: {swarm_hash}")
+        logger.debug("Get record: hash=%s", swarm_hash)
 
         record = self._contract.get_data_record(swarm_hash)
 
         # record is a tuple: (dataHash, owner, timestamp, dataType,
         #                      transformations, accessors, status)
-        data_hash_bytes, owner, timestamp, data_type, transformations, accessors, status = record
+        (
+            data_hash_bytes,
+            owner,
+            timestamp,
+            data_type,
+            transformations,
+            accessors,
+            status,
+        ) = record
 
         # Check if data is registered (owner is zero address if not)
         zero_address = "0x" + "0" * 40
@@ -629,12 +742,27 @@ class ChainClient:
                 data_hash=swarm_hash,
             )
 
-        # Parse transformations — contract returns string[] (description only)
+        # Parse transformations — v2 contracts return TransformationLink[]
+        # (list of (bytes32, string) tuples), v1 returns string[].
         chain_transformations = []
         for t in transformations:
-            chain_transformations.append(ChainTransformation(
-                description=str(t),
-            ))
+            if isinstance(t, (tuple, list)) and len(t) >= 2:
+                # V2 contract: TransformationLink(newDataHash, description)
+                new_hash = t[0].hex() if isinstance(t[0], bytes) else str(t[0])
+                chain_transformations.append(
+                    ChainTransformation(description=str(t[1]), new_data_hash=new_hash)
+                )
+            else:
+                # V1 contract: plain string description
+                chain_transformations.append(ChainTransformation(description=str(t)))
+
+        logger.debug(
+            "Record: owner=%s type=%s status=%s accessors=%d",
+            owner,
+            data_type,
+            DataStatus(status).name,
+            len(accessors),
+        )
 
         if verbose:
             print(f"DEBUG: Owner: {owner}")
@@ -643,7 +771,11 @@ class ChainClient:
             print(f"DEBUG: Accessors: {len(accessors)}")
 
         return ChainProvenanceRecord(
-            data_hash=data_hash_bytes.hex() if isinstance(data_hash_bytes, bytes) else str(data_hash_bytes),
+            data_hash=(
+                data_hash_bytes.hex()
+                if isinstance(data_hash_bytes, bytes)
+                else str(data_hash_bytes)
+            ),
             owner=owner,
             timestamp=timestamp,
             data_type=data_type,
@@ -683,11 +815,12 @@ class ChainClient:
         Returns:
             ChainWalletInfo with balance and chain details.
         """
-        if verbose:
-            print(f"--- DEBUG: Balance ---")
+        logger.debug("Balance check")
 
         balance_wei = self._wallet.get_balance(self._provider.web3)
         balance_eth = self._wallet.get_balance_eth(self._provider.web3)
+
+        logger.debug("Address: %s Balance: %s ETH", self._wallet.address, balance_eth)
 
         if verbose:
             print(f"DEBUG: Address: {self._wallet.address}")
@@ -714,12 +847,15 @@ class ChainClient:
         Raises:
             ChainConnectionError: If health check fails.
         """
-        if verbose:
-            print(f"--- DEBUG: Chain Health Check ---")
-            print(f"Chain: {self._provider.chain}")
-            print(f"RPC: {self._provider.rpc_url}")
+        logger.debug(
+            "Chain health check: chain=%s rpc=%s",
+            self._provider.chain,
+            self._provider.rpc_url,
+        )
 
         result = self._provider.health_check()
+
+        logger.debug("Connected, block: %d", self._provider.get_block_number())
 
         if verbose:
             block = self._provider.get_block_number()
@@ -736,12 +872,10 @@ class ChainClient:
         """
         Get the provenance chain for a data hash.
 
-        Retrieves the record for the given hash. If transformations have
-        new_data_hash links, follows them to build a lineage chain.
-
-        Note: The current contract returns transformation descriptions only
-        (no new_data_hash links), so the chain will typically contain just
-        the queried record. Supply hashes directly to follow known lineages.
+        On v2 contracts, uses state reads (``getTransformationLinks`` /
+        ``getTransformationParents``) for traversal — no event scanning.
+        On v1 contracts, falls back to the cached event scan path.
+        Falls back to per-node event scanning when the deploy block is unknown.
 
         Args:
             swarm_hash: Starting Swarm reference hash.
@@ -752,13 +886,41 @@ class ChainClient:
             List of ChainProvenanceRecord forming the provenance chain,
             starting with the given hash.
         """
-        if verbose:
-            print(f"--- DEBUG: Get Provenance Chain ---")
-            print(f"Starting hash: {swarm_hash}")
-            if max_depth is not None:
-                print(f"Max depth: {max_depth}")
+        logger.debug(
+            "Get provenance chain: hash=%s max_depth=%s", swarm_hash, max_depth
+        )
 
         effective_max = max_depth if max_depth is not None else 50
+
+        # Detect contract version — state reads are much faster than event scans
+        use_state_reads = False
+        try:
+            if self._contract.supports_transformation_links():
+                use_state_reads = True
+        except Exception:
+            pass
+
+        # Fall back to event cache for v1 contracts
+        from ..chain.event_cache import get_cache
+
+        forward = {}  # original_hex -> [(new_hex, desc)]
+        reverse = {}  # new_hex -> [(original_hex, desc)]
+        deploy_block = self._provider.deploy_block
+        use_local_index = False
+
+        if not use_state_reads and deploy_block is not None:
+            try:
+                cache = get_cache(self._provider.chain, self._provider.contract_address)
+                current_block = self._provider.web3.eth.block_number
+                forward, reverse = cache.get_maps(
+                    self._contract, deploy_block, current_block
+                )
+                use_local_index = True
+            except Exception as e:
+                logger.warning(
+                    "Full event scan failed, falling back to per-node queries: %s",
+                    e,
+                )
 
         chain = []
         visited = set()
@@ -769,23 +931,115 @@ class ChainClient:
             if current_hash in visited:
                 continue
             if current_depth > effective_max:
-                if verbose:
-                    print(f"DEBUG: Depth limit reached at {current_depth}")
+                logger.debug("Depth limit reached at %d", current_depth)
                 continue
             visited.add(current_hash)
 
             try:
                 record = self.get(current_hash, verbose=verbose)
-                chain.append(record)
-
-                # Follow transformation links if new_data_hash is available
-                for t in record.transformations:
-                    if t.new_data_hash and t.new_data_hash not in visited:
-                        to_visit.append((t.new_data_hash, current_depth + 1))
             except DataNotRegisteredError:
-                if verbose:
-                    print(f"DEBUG: Hash {current_hash} not registered, skipping")
+                logger.debug("Hash %s not registered, skipping", current_hash)
                 continue
+
+            if use_state_reads:
+                # V2 contract: state-based traversal
+                try:
+                    links = self._contract.get_transformation_links(current_hash)
+                    if links:
+                        record.transformations = [
+                            ChainTransformation(
+                                description=desc,
+                                new_data_hash=(
+                                    nh.hex() if isinstance(nh, bytes) else str(nh)
+                                ),
+                            )
+                            for nh, desc in links
+                        ]
+                        for nh, _ in links:
+                            nh_hex = nh.hex() if isinstance(nh, bytes) else str(nh)
+                            if nh_hex not in visited:
+                                to_visit.append((nh_hex, current_depth + 1))
+                except Exception as e:
+                    logger.warning(
+                        "State-based forward read failed for %s: %s",
+                        current_hash,
+                        e,
+                    )
+                # Reverse: parents via state
+                try:
+                    parents = self._contract.get_transformation_parents(current_hash)
+                    for p in parents:
+                        p_hex = p.hex() if isinstance(p, bytes) else str(p)
+                        if p_hex not in visited:
+                            to_visit.append((p_hex, current_depth + 1))
+                except Exception as e:
+                    logger.warning(
+                        "State-based reverse read failed for %s: %s",
+                        current_hash,
+                        e,
+                    )
+            elif use_local_index:
+                # V1 contract: use pre-built event cache index
+                fwd = forward.get(current_hash, [])
+                if fwd:
+                    record.transformations = [
+                        ChainTransformation(description=desc, new_data_hash=nh)
+                        for nh, desc in fwd
+                    ]
+                    for nh, _ in fwd:
+                        if nh not in visited:
+                            to_visit.append((nh, current_depth + 1))
+                # Reverse links (parents)
+                for orig_hex, _ in reverse.get(current_hash, []):
+                    if orig_hex not in visited:
+                        to_visit.append((orig_hex, current_depth + 1))
+            else:
+                # Per-node event scanning (fallback when deploy_block unknown)
+                try:
+                    events = self._contract.get_transformations_from(current_hash)
+                    enriched = []
+                    for orig_bytes, new_bytes, desc in events:
+                        new_hash_hex = (
+                            new_bytes.hex()
+                            if isinstance(new_bytes, bytes)
+                            else str(new_bytes)
+                        )
+                        enriched.append(
+                            ChainTransformation(
+                                description=desc,
+                                new_data_hash=new_hash_hex,
+                            )
+                        )
+                        if new_hash_hex not in visited:
+                            to_visit.append((new_hash_hex, current_depth + 1))
+                    if enriched:
+                        record.transformations = enriched
+                except Exception as e:
+                    logger.warning("Event query failed for %s: %s", current_hash, e)
+                    for t in record.transformations:
+                        if t.new_data_hash and t.new_data_hash not in visited:
+                            to_visit.append((t.new_data_hash, current_depth + 1))
+
+                try:
+                    reverse_events = self._contract.get_transformations_to(current_hash)
+                    for orig_bytes, new_bytes, desc in reverse_events:
+                        orig_hash = (
+                            orig_bytes.hex()
+                            if isinstance(orig_bytes, bytes)
+                            else str(orig_bytes)
+                        )
+                        if orig_hash not in visited:
+                            to_visit.append((orig_hash, current_depth + 1))
+                except Exception as e:
+                    logger.warning(
+                        "Reverse event query failed for %s: %s",
+                        current_hash,
+                        e,
+                    )
+
+            chain.append(record)
+
+        logger.debug("Chain length: %d", len(chain))
 
         if verbose:
             print(f"DEBUG: Chain length: {len(chain)}")

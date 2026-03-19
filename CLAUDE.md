@@ -177,6 +177,8 @@ swarm-prov-upload chain transform <orig> <new> --description "..."           # R
 swarm-prov-upload chain transform <orig> <new> --restrict-original           # Transform + restrict original
 swarm-prov-upload chain protect <orig> <new> --description "..."             # Composite: transform + restrict
 swarm-prov-upload chain protect <orig> <new> --anchor-new                    # Protect with auto-anchor
+swarm-prov-upload chain merge <h1> <h2> [<h3>...] <new> --description "..."  # N-to-1 merge transformation
+swarm-prov-upload chain merge <h1> <h2> <new> --type "dataset"               # Merge with custom data type
 
 # Collection/manifest upload (directory as Swarm manifest, gateway only)
 swarm-prov-upload upload-collection /path/to/directory                       # Upload directory
@@ -204,10 +206,12 @@ The application follows a modular architecture with clear separation of concerns
    - `file_utils.py`: File I/O and encoding utilities
    - `metadata_builder.py`: Metadata construction
 3. **Chain Subpackage** (`chain/`): Low-level blockchain components
-   - `provider.py`: Web3 connection management with chain presets
+   - `provider.py`: Web3 connection management with chain presets and RPC failover
    - `wallet.py`: Private key handling and transaction signing
-   - `contract.py`: DataProvenance contract wrapper with build_*_tx pattern
-   - `abi/DataProvenance.json`: Embedded contract ABI
+   - `contract.py`: DataProvenance contract wrapper with build_*_tx pattern, v2 auto-detection
+   - `event_cache.py`: Thread-safe singleton cache for transformation event logs (v1 fallback)
+   - `exceptions.py`: Standalone chain exception hierarchy
+   - `abi/DataProvenance.json`: Embedded v2 contract ABI
 4. **Data Models** (`models.py`): Pydantic v2 schemas for metadata and API responses
 5. **Exceptions** (`exceptions.py`): Custom exception hierarchy for unified error handling
 6. **Configuration** (`config.py`): Environment-based configuration management
@@ -235,10 +239,13 @@ The application follows a modular architecture with clear separation of concerns
 **ChainClient** (`core/chain_client.py`):
 - High-level facade for on-chain provenance operations
 - Wraps ChainProvider + ChainWallet + DataProvenanceContract
-- Write methods: `anchor()`, `anchor_for()`, `batch_anchor()`, `transform()`, `access()`, `batch_access()`, `set_status()`, `transfer_ownership()`, `set_delegate()`
+- Write methods: `anchor()`, `anchor_for()`, `batch_anchor()`, `transform()`, `merge_transform()`, `access()`, `batch_access()`, `set_status()`, `transfer_ownership()`, `set_delegate()`
 - Read methods: `get()`, `verify()`, `get_provenance_chain()`, `balance()`, `health_check()`
 - Lazy-loads web3 and eth-account via `blockchain` optional dependency group
-- Targets DataProvenance contract on Base Sepolia (`0x9a3c6F47B69211F05891CCb7aD33596290b9fE64`)
+- Targets DataProvenance v2 contract on Base Sepolia (`0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a`)
+- V2 auto-detection: state-based traversal on v2 contracts, event cache fallback on v1
+- Duplicate transformation pre-checks to avoid wasting gas
+- RPC failover support via `rpc_fallbacks` parameter
 
 ### Key Components
 
@@ -269,6 +276,7 @@ The application follows a modular architecture with clear separation of concerns
 - `ChainProvenanceRecord`: Full on-chain provenance record
 - `AnchorResult`: Transaction result from anchoring a hash
 - `TransformResult`: Transaction result from recording a transformation
+- `MergeTransformResult`: Transaction result from N-to-1 merge transformation
 - `AccessResult`: Transaction result from recording data access
 - `ChainWalletInfo`: Wallet balance and chain configuration info
 - `SignedDocumentResponse`: Response from upload with sign=notary
@@ -332,6 +340,7 @@ Uses python-dotenv for environment configuration:
 - `CHAIN_ENABLED`: Enable on-chain anchoring (default: false)
 - `CHAIN_NAME`: `base-sepolia` (testnet, default) or `base` (mainnet)
 - `CHAIN_RPC_URL`: Custom RPC URL (optional, overrides preset)
+- `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs (optional, overrides preset fallbacks)
 - `CHAIN_CONTRACT`: Custom contract address (optional, overrides preset)
 - `CHAIN_EXPLORER_URL`: Custom block explorer URL (optional, overrides preset)
 - `CHAIN_GAS_LIMIT`: Explicit gas limit (optional, skips RPC estimation when set)

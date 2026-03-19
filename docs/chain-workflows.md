@@ -25,6 +25,7 @@ How the chain subsystem is structured internally:
 │  Write ops:  anchor(), transform(), access(), set_status(),         │
 │              transfer_ownership(), set_delegate()                   │
 │              batch_anchor(), batch_access(), batch_set_status()     │
+│              merge_transform()  (N-to-1 merge, v2+)                │
 │  Read ops:   get(), verify(), balance(), health_check(),            │
 │              get_provenance_chain()                                  │
 └────────┬──────────────────┬──────────────────┬──────────────────────┘
@@ -37,14 +38,25 @@ How the chain subsystem is structured internally:
 │  Web3 conn mgmt │ │  Private key │ │  ABI wrapper               │
 │  Chain presets  │ │  TX signing  │ │  build_*_tx() methods      │
 │  Explorer URLs  │ │  Balance     │ │  get_data_record()         │
-│  Health checks  │ │              │ │  Hash normalization        │
-│  Chain ID auto- │ │              │ │                            │
+│  Health checks  │ │              │ │  V2 state traversal        │
+│  RPC failover   │ │              │ │  Hash normalization        │
+│  Chain ID auto- │ │              │ │  Chunked event queries     │
 │  detection      │ │              │ │  ABI: abi/DataProvenance   │
 └────────┬────────┘ └──────┬───────┘ └────────────┬───────────────┘
          │                 │                       │
          └─────────────────┴───────────────────────┘
                            │
                            ▼
+              ┌───────────────────────┐
+              │  TransformationEvent  │
+              │  Cache (event_cache)  │
+              │                       │
+              │  Thread-safe singleton│
+              │  Forward/reverse maps │
+              │  Incremental scanning │
+              └───────────┬───────────┘
+                          │
+                          ▼
                    ┌───────────────┐
                    │   Base Chain  │
                    │  (via RPC)    │
@@ -431,6 +443,7 @@ alice_client.set_delegate("0xBob...", authorized=False)
 | `set_status` | Write | ~45,000 | Status change |
 | `transfer_ownership` | Write | ~50,000 | Owner change |
 | `set_delegate` | Write | ~45,000 | Authorize/revoke |
+| `merge_transform` | Write | ~120k + ~30k/source | N-to-1 merge (2-50 sources, v2+) |
 | `batch_anchor` | Write | ~95k + ~60k/item | Up to 50 per batch |
 | `batch_access` | Write | ~65k + ~45k/item | Up to 100 per batch |
 | `verify` | Read | Free | No gas |
