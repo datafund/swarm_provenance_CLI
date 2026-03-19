@@ -4289,3 +4289,100 @@ class TestFreeTierFlag:
         assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
         assert _backend_config["free_tier"] is True
         assert _x402_config["enabled"] is True
+
+
+# =============================================================================
+# Chain Insufficient Funds Tests
+# =============================================================================
+
+
+class TestChainInsufficientFunds:
+    """Tests for actionable insufficient funds error handling."""
+
+    def test_anchor_insufficient_funds_shows_actionable_error(self, mocker):
+        """Tests that anchor shows wallet, balance, and faucet link on insufficient funds."""
+        from swarm_provenance_uploader.exceptions import InsufficientFundsError
+
+        mock_client = mocker.MagicMock()
+        mock_client.anchor.side_effect = InsufficientFundsError(
+            "Insufficient funds",
+            wallet_address=DUMMY_ADDRESS,
+            balance_wei=50_000_000_000_000,  # 0.00005 ETH
+            estimated_cost_wei=120_000_000_000_000,  # 0.00012 ETH
+            chain_name="base-sepolia",
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1
+        assert "Insufficient funds" in result.output
+        assert DUMMY_ADDRESS in result.output
+        assert "0.000050" in result.output  # balance
+        assert "faucet" in result.output.lower() or "alchemy" in result.output.lower()
+
+    def test_anchor_insufficient_funds_json_output(self, mocker):
+        """Tests that --json outputs structured JSON error on insufficient funds."""
+        from swarm_provenance_uploader.exceptions import InsufficientFundsError
+        import json
+
+        mock_client = mocker.MagicMock()
+        mock_client.anchor.side_effect = InsufficientFundsError(
+            "Insufficient funds",
+            wallet_address=DUMMY_ADDRESS,
+            balance_wei=50_000_000_000_000,
+            estimated_cost_wei=120_000_000_000_000,
+            chain_name="base-sepolia",
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
+
+        assert result.exit_code == 1
+        output = json.loads(result.output)
+        assert output["error"] == "insufficient_funds"
+        assert output["wallet_address"] == DUMMY_ADDRESS
+        assert output["chain"] == "base-sepolia"
+        assert "faucet_url" in output
+
+    def test_mainnet_shows_bridge_url(self, mocker):
+        """Tests that mainnet chain shows bridge URL instead of faucet."""
+        from swarm_provenance_uploader.exceptions import InsufficientFundsError
+
+        mock_client = mocker.MagicMock()
+        mock_client.anchor.side_effect = InsufficientFundsError(
+            "Insufficient funds",
+            wallet_address=DUMMY_ADDRESS,
+            balance_wei=0,
+            estimated_cost_wei=100_000_000_000_000,
+            chain_name="base",
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1
+        assert "bridge" in result.output.lower()
+
+    def test_balance_command_uses_preset_faucet_url(self, mocker):
+        """Tests that chain balance command uses faucet URL from CHAIN_PRESETS."""
+        from swarm_provenance_uploader.models import ChainWalletInfo
+
+        mock_client = mocker.MagicMock()
+        mock_client.balance.return_value = ChainWalletInfo(
+            address=DUMMY_ADDRESS,
+            balance_wei=1_000_000_000_000_000_000,
+            balance_eth="1.0",
+            chain="base-sepolia",
+            contract_address="0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a",
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "balance"])
+
+        assert result.exit_code == 0
+        assert "alchemy.com/faucets/base-sepolia" in result.output
