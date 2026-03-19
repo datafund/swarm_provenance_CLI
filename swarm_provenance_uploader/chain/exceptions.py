@@ -65,6 +65,29 @@ class DataAlreadyRegisteredError(ChainError):
         self.data_type = data_type
 
 
+class InsufficientFundsError(ChainTransactionError):
+    """Wallet balance too low to cover gas for a chain transaction.
+
+    Carries structured data so CLI can show actionable guidance
+    (wallet address, balance, estimated cost, faucet/bridge link).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        wallet_address: str = None,
+        balance_wei: int = None,
+        estimated_cost_wei: int = None,
+        chain_name: str = None,
+        tx_hash: str = None,
+    ):
+        super().__init__(message, tx_hash=tx_hash)
+        self.wallet_address = wallet_address
+        self.balance_wei = balance_wei
+        self.estimated_cost_wei = estimated_cost_wei
+        self.chain_name = chain_name
+
+
 class TransformationAlreadyExistsError(ChainError):
     """Transformation (original -> new) pair is already recorded on-chain."""
 

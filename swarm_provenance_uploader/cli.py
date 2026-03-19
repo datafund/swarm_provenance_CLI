@@ -1663,6 +1663,48 @@ def notary_verify(
 
 # --- Chain Subcommands ---
 
+
+def _handle_insufficient_funds(
+    e: "exceptions.InsufficientFundsError",
+    output_json: bool = False,
+) -> None:
+    """Show actionable guidance when wallet balance is too low for gas."""
+    from .chain.provider import CHAIN_PRESETS
+
+    balance_eth = (e.balance_wei or 0) / 1e18
+    cost_eth = (e.estimated_cost_wei or 0) / 1e18
+
+    if output_json:
+        data = {
+            "error": "insufficient_funds",
+            "wallet_address": e.wallet_address,
+            "balance_eth": f"{balance_eth:.6f}",
+            "estimated_cost_eth": f"{cost_eth:.6f}",
+            "chain": e.chain_name,
+        }
+        preset = CHAIN_PRESETS.get(e.chain_name or "", {})
+        if preset.get("faucet_url"):
+            data["faucet_url"] = preset["faucet_url"]
+        if preset.get("bridge_url"):
+            data["bridge_url"] = preset["bridge_url"]
+        typer.echo(json.dumps(data, indent=2))
+        return
+
+    typer.secho("ERROR: Insufficient funds for gas.", fg=typer.colors.RED, err=True)
+    typer.echo(f"  Wallet:         {e.wallet_address}", err=True)
+    typer.echo(f"  Balance:        {balance_eth:.6f} ETH", err=True)
+    if e.estimated_cost_wei:
+        typer.echo(f"  Estimated cost: {cost_eth:.6f} ETH", err=True)
+
+    preset = CHAIN_PRESETS.get(e.chain_name or "", {})
+    faucet = preset.get("faucet_url")
+    bridge = preset.get("bridge_url")
+    if faucet:
+        typer.echo(f"\n  Get testnet ETH: {faucet}", err=True)
+    elif bridge:
+        typer.echo(f"\n  Bridge ETH to Base: {bridge}", err=True)
+
+
 @chain_app.command("balance")
 def chain_balance(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
@@ -1696,9 +1738,16 @@ def chain_balance(
     typer.echo(f"  Chain:    {result.chain}")
     typer.echo(f"  Contract: {result.contract_address}")
 
-    if result.chain == "base-sepolia":
+    from .chain.provider import CHAIN_PRESETS
+    preset = CHAIN_PRESETS.get(result.chain, {})
+    faucet = preset.get("faucet_url")
+    bridge = preset.get("bridge_url")
+    if faucet:
         typer.echo("")
-        typer.echo("Get testnet ETH: https://www.alchemy.com/faucets/base-sepolia")
+        typer.echo(f"Get testnet ETH: {faucet}")
+    elif bridge:
+        typer.echo("")
+        typer.echo(f"Bridge ETH: {bridge}")
 
 
 @chain_app.command("verify")
@@ -1896,6 +1945,9 @@ def chain_anchor(
             typer.echo(f"  Type:    {e.data_type}")
             typer.echo(f"  Time:    {ts_str}")
         raise typer.Exit(code=1)
+    except exceptions.InsufficientFundsError as e:
+        _handle_insufficient_funds(e, output_json=output_json)
+        raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -1946,6 +1998,9 @@ def chain_access(
         result = client.access(swarm_hash, verbose=verbose)
     except typer.Exit:
         raise
+    except exceptions.InsufficientFundsError as e:
+        _handle_insufficient_funds(e, output_json=output_json)
+        raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -2008,6 +2063,9 @@ def chain_status(
             raise
         except exceptions.DataNotRegisteredError:
             typer.secho(f"ERROR: {swarm_hash} is not registered on-chain.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        except exceptions.InsufficientFundsError as e:
+            _handle_insufficient_funds(e, output_json=output_json)
             raise typer.Exit(code=1)
         except exceptions.ChainTransactionError as e:
             typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
@@ -2081,6 +2139,9 @@ def chain_transfer(
         result = client.transfer_ownership(swarm_hash, new_owner=to, verbose=verbose)
     except typer.Exit:
         raise
+    except exceptions.InsufficientFundsError as e:
+        _handle_insufficient_funds(e, output_json=output_json)
+        raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -2139,6 +2200,9 @@ def chain_delegate(
         result = client.set_delegate(delegate=address, authorized=authorize, verbose=verbose)
     except typer.Exit:
         raise
+    except exceptions.InsufficientFundsError as e:
+        _handle_insufficient_funds(e, output_json=output_json)
+        raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -2194,6 +2258,9 @@ def chain_transform(
     except exceptions.DataNotRegisteredError as e:
         typer.secho(f"ERROR: Original hash is not registered on-chain.", fg=typer.colors.RED, err=True)
         typer.echo(f"  Anchor it first: swarm-prov-upload chain anchor {e.data_hash or original_hash}")
+        raise typer.Exit(code=1)
+    except exceptions.InsufficientFundsError as e:
+        _handle_insufficient_funds(e, output_json=output_json)
         raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
@@ -2305,6 +2372,9 @@ def chain_protect(
             # Already anchored is fine for protect — continue with transform
             if not output_json:
                 typer.secho(f"New hash already anchored, continuing.", fg=typer.colors.YELLOW)
+        except exceptions.InsufficientFundsError as e:
+            _handle_insufficient_funds(e, output_json=output_json)
+            raise typer.Exit(code=1)
         except exceptions.ChainError as e:
             typer.secho(f"ERROR: Failed to anchor new hash: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -2315,6 +2385,9 @@ def chain_protect(
         results["transform"] = transform_result
         if not output_json:
             typer.secho(f"Transformation recorded.", fg=typer.colors.GREEN)
+    except exceptions.InsufficientFundsError as e:
+        _handle_insufficient_funds(e, output_json=output_json)
+        raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: Failed to record transformation: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -2404,6 +2477,9 @@ def chain_merge(
         raise typer.Exit(code=1)
     except exceptions.ChainValidationError as e:
         typer.secho(f"ERROR: Validation failed: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except exceptions.InsufficientFundsError as e:
+        _handle_insufficient_funds(e, output_json=output_json)
         raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
