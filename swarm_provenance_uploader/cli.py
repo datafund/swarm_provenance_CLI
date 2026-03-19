@@ -550,15 +550,19 @@ def download(
         default_factory=lambda: Path.cwd()  # Default to current working directory
     )],
     bee_url: Annotated[Optional[str], typer.Option("--bee-url", help="Bee Gateway URL (when backend=local).")] = None,
-    verify: Annotated[bool, typer.Option("--verify", help="Verify notary signature if present (gateway only for address lookup).")] = False,
+    no_verify: Annotated[bool, typer.Option("--no-verify", help="Skip notary signature verification.")] = False,
+    verify_flag: Annotated[bool, typer.Option("--verify", help="Verify notary signature (default, kept for backward compatibility).", hidden=True)] = False,
+    strict: Annotated[bool, typer.Option("--strict", help="Fail (exit 1) if signature verification fails.")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False
 ):
     """
     Downloads Provenance Metadata from Swarm, decodes the wrapped data,
     verifies its integrity, and saves both files.
 
-    Use --verify to verify notary signatures if present.
+    Notary signatures are verified by default when present.
+    Use --no-verify to skip verification, --strict to fail on invalid signatures.
     """
+    verify = not no_verify
     # Determine which backend to use
     use_gateway = _backend_config["backend"] == "gateway"
     gateway_url = _backend_config["gateway_url"]
@@ -684,11 +688,15 @@ def download(
                     typer.secho(f"  Signature: ✓ Verified", fg=typer.colors.GREEN)
                 else:
                     typer.secho(f"  Signature: ✗ FAILED - {error_msg}", fg=typer.colors.RED)
+                    if strict:
+                        typer.secho("\nAborting download (--strict mode).", fg=typer.colors.RED, err=True)
+                        raise typer.Exit(code=1)
             else:
                 typer.secho("  Cannot verify: No notary address available", fg=typer.colors.YELLOW)
                 typer.echo("  Use gateway backend or run 'notary verify' manually with --address")
         else:
-            typer.echo("\nNo notary signatures found in document.")
+            if verbose:
+                typer.echo("\nNo notary signatures found in document.")
 
     # 5. Extract Base64 encoded data
     b64_encoded_original_data = provenance_metadata_obj.data

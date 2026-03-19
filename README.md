@@ -44,8 +44,14 @@ swarm-prov-upload download <swarm_hash> --output-dir ./downloads
 # Upload with notary signing (gateway only)
 swarm-prov-upload upload --file /path/to/data.txt --sign notary
 
-# Download with signature verification
-swarm-prov-upload download <swarm_hash> --output-dir ./downloads --verify
+# Download and verify data (signature verification is on by default)
+swarm-prov-upload download <swarm_hash> --output-dir ./downloads
+
+# Download without signature verification
+swarm-prov-upload download <swarm_hash> --output-dir ./downloads --no-verify
+
+# Download with strict verification (fail on invalid signature)
+swarm-prov-upload download <swarm_hash> --output-dir ./downloads --strict
 ```
 
 ## Setup
@@ -659,11 +665,17 @@ swarm-prov-upload notary verify --file signed_document.json
 
 #### Verification on Download
 
-```bash
-# Download and automatically verify signature
-swarm-prov-upload download <swarm_hash> --output-dir ./downloads --verify
+Signature verification is enabled by default when downloading signed documents:
 
-# If verification fails, you'll see an error with details
+```bash
+# Download with automatic verification (default)
+swarm-prov-upload download <swarm_hash> --output-dir ./downloads
+
+# Skip verification
+swarm-prov-upload download <swarm_hash> --output-dir ./downloads --no-verify
+
+# Strict mode: fail (exit 1) if verification fails
+swarm-prov-upload download <swarm_hash> --output-dir ./downloads --strict
 ```
 
 #### Signature Structure
