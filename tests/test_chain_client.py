@@ -31,7 +31,7 @@ DUMMY_PRIVATE_KEY = "0x" + "a" * 64
 DUMMY_ADDRESS = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
 DUMMY_HASH = "a" * 64
 DUMMY_HASH_BYTES = bytes.fromhex(DUMMY_HASH)
-DUMMY_CONTRACT = "0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a"
+DUMMY_CONTRACT = "0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322"
 DUMMY_TX_HASH_BYTES = bytes.fromhex("bb" * 32)
 ZERO_ADDRESS = "0x" + "0" * 40
 
@@ -124,16 +124,24 @@ def mock_chain_deps():
             "data": "0x",
         }
 
+        mock_contract.functions.setStorageRef.return_value.build_transaction.return_value = {
+            "from": DUMMY_ADDRESS,
+            "to": DUMMY_CONTRACT,
+            "data": "0x",
+        }
+
         # Mock read functions
         mock_contract.functions.getDataRecord.return_value.call.return_value = (
             DUMMY_HASH_BYTES,  # dataHash
             DUMMY_ADDRESS,     # owner
             1700000000,        # timestamp
             "swarm-provenance",  # dataType
-            [],                # transformations
+            b"\x00" * 32,     # storageRef (not set)
+            [],                # transformationLinks
             [],                # accessors
             0,                 # status (ACTIVE)
         )
+        mock_contract.functions.getDataHashByStorageRef.return_value.call.return_value = b"\x00" * 32
         mock_contract.functions.getUserDataRecords.return_value.call.return_value = [
             DUMMY_HASH_BYTES,
         ]
@@ -363,7 +371,7 @@ class TestChainProvider:
 
         assert provider.chain == "base-sepolia"
         assert provider.chain_id == 84532
-        assert provider.contract_address == "0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a"
+        assert provider.contract_address == "0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322"
 
     def test_custom_rpc_url(self, mock_chain_deps):
         """Tests that custom RPC URL is used."""
@@ -556,7 +564,7 @@ class TestChainClientInit:
 
         # Pre-check expects unregistered hash
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
-            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
         )
 
         client = ChainClient(
@@ -590,7 +598,7 @@ class TestChainClientAnchor:
 
         # Pre-check expects unregistered hash (zero-address owner)
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
-            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
         )
 
         client = ChainClient(chain="base-sepolia")
@@ -610,7 +618,7 @@ class TestChainClientAnchor:
 
         # Pre-check expects unregistered hash
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
-            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
         )
 
         client = ChainClient(chain="base-sepolia")
@@ -624,7 +632,7 @@ class TestChainClientAnchor:
 
         # Pre-check expects unregistered hash
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
-            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
         )
 
         other_owner = "0x1111111111111111111111111111111111111111"
@@ -651,6 +659,37 @@ class TestChainClientAnchor:
         assert isinstance(result, AnchorResult)
         assert result.swarm_hash == DUMMY_HASH
 
+    def test_anchor_with_storage_ref(self, mock_chain_deps):
+        """Tests anchoring with a storage reference."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        # Pre-check expects unregistered hash
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
+        )
+
+        storage_ref = "cc" * 32
+        client = ChainClient(chain="base-sepolia")
+        result = client.anchor(swarm_hash=DUMMY_HASH, storage_ref=storage_ref)
+
+        assert isinstance(result, AnchorResult)
+        assert result.storage_ref == storage_ref
+        assert result.swarm_hash == DUMMY_HASH
+
+    def test_anchor_without_storage_ref(self, mock_chain_deps):
+        """Tests that anchor without storage_ref returns None for that field."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        # Pre-check expects unregistered hash
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        result = client.anchor(swarm_hash=DUMMY_HASH)
+
+        assert result.storage_ref is None
+
     def test_anchor_invalid_hash(self, mock_chain_deps):
         """Tests that invalid hash raises validation error."""
         from swarm_provenance_uploader.core.chain_client import ChainClient
@@ -658,6 +697,54 @@ class TestChainClientAnchor:
         client = ChainClient(chain="base-sepolia")
         with pytest.raises(ChainValidationError):
             client.anchor(swarm_hash="tooshort")
+
+
+class TestChainClientStorageRef:
+    """Tests for storage reference operations."""
+
+    def test_set_storage_ref_success(self, mock_chain_deps):
+        """Tests setting a storage reference on an existing record."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        storage_ref = "dd" * 32
+        client = ChainClient(chain="base-sepolia")
+        result = client.set_storage_ref(data_hash=DUMMY_HASH, storage_ref=storage_ref)
+
+        assert isinstance(result, AnchorResult)
+        assert result.storage_ref == storage_ref
+        assert result.swarm_hash == DUMMY_HASH
+
+    def test_get_by_storage_ref_success(self, mock_chain_deps):
+        """Tests looking up a record by storage reference."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        storage_ref = "ee" * 32
+        # Reverse lookup returns data hash
+        mock_chain_deps["contract"].functions.getDataHashByStorageRef.return_value.call.return_value = DUMMY_HASH_BYTES
+
+        # getDataRecord returns record with the storage ref
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, DUMMY_ADDRESS, 1700000000, "swarm-provenance",
+            bytes.fromhex(storage_ref), [], [], 0,
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        record = client.get_by_storage_ref(storage_ref)
+
+        assert isinstance(record, ChainProvenanceRecord)
+        assert record.data_hash == DUMMY_HASH
+        assert record.storage_ref == storage_ref
+
+    def test_get_by_storage_ref_not_found(self, mock_chain_deps):
+        """Tests that unknown storage ref raises DataNotRegisteredError."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        # Reverse lookup returns zero hash (not found)
+        mock_chain_deps["contract"].functions.getDataHashByStorageRef.return_value.call.return_value = b"\x00" * 32
+
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(DataNotRegisteredError):
+            client.get_by_storage_ref("ff" * 32)
 
 
 class TestChainClientAlreadyRegistered:
@@ -669,7 +756,7 @@ class TestChainClientAlreadyRegistered:
 
         # Default mock returns a registered record (owner=DUMMY_ADDRESS)
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
-            DUMMY_HASH_BYTES, DUMMY_ADDRESS, 1700000000, "swarm-provenance", [], [], 0,
+            DUMMY_HASH_BYTES, DUMMY_ADDRESS, 1700000000, "swarm-provenance", b"\x00" * 32, [], [], 0,
         )
 
         client = ChainClient(chain="base-sepolia")
@@ -685,7 +772,7 @@ class TestChainClientAlreadyRegistered:
         from swarm_provenance_uploader.core.chain_client import ChainClient
 
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
-            DUMMY_HASH_BYTES, DUMMY_ADDRESS, 1700000000, "swarm-provenance", [], [], 0,
+            DUMMY_HASH_BYTES, DUMMY_ADDRESS, 1700000000, "swarm-provenance", b"\x00" * 32, [], [], 0,
         )
 
         other_owner = "0x1111111111111111111111111111111111111111"
@@ -700,7 +787,7 @@ class TestChainClientAlreadyRegistered:
 
         # Return zero-address owner = not registered
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
-            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
         )
 
         client = ChainClient(chain="base-sepolia")
@@ -819,6 +906,7 @@ class TestChainClientRead:
             ZERO_ADDRESS,
             0,
             "",
+            b"\x00" * 32,
             [],
             [],
             0,
@@ -845,6 +933,7 @@ class TestChainClientRead:
             ZERO_ADDRESS,
             0,
             "",
+            b"\x00" * 32,
             [],
             [],
             0,
@@ -852,6 +941,36 @@ class TestChainClientRead:
 
         client = ChainClient(chain="base-sepolia")
         assert client.verify(swarm_hash=DUMMY_HASH) is False
+
+    def test_get_record_with_storage_ref(self, mock_chain_deps):
+        """Tests that storage_ref is parsed from on-chain record."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        storage_ref = bytes.fromhex("bb" * 32)
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES,
+            DUMMY_ADDRESS,
+            1700000000,
+            "swarm-provenance",
+            storage_ref,
+            [],
+            [],
+            0,
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        record = client.get(swarm_hash=DUMMY_HASH)
+
+        assert record.storage_ref == "bb" * 32
+
+    def test_get_record_without_storage_ref(self, mock_chain_deps):
+        """Tests that zero storage_ref is returned as None."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        client = ChainClient(chain="base-sepolia")
+        record = client.get(swarm_hash=DUMMY_HASH)
+
+        assert record.storage_ref is None
 
     def test_balance_info(self, mock_chain_deps):
         """Tests getting wallet balance info."""
@@ -883,7 +1002,7 @@ class TestChainClientTransaction:
 
         # Pre-check expects unregistered hash
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
-            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
         )
 
         # Make receipt indicate failure
@@ -905,7 +1024,7 @@ class TestChainClientTransaction:
 
         # Pre-check expects unregistered hash
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
-            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
         )
 
         client = ChainClient(chain="base-sepolia", gas_limit_multiplier=1.5)
@@ -927,7 +1046,7 @@ class TestChainClientGasLimit:
 
         # Pre-check expects unregistered hash
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
-            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
         )
 
         client = ChainClient(chain="base-sepolia", gas_limit=500_000)
@@ -947,7 +1066,7 @@ class TestChainClientGasLimit:
 
         # Pre-check expects unregistered hash
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
-            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
         )
 
         # Even with 2x multiplier, explicit value should be used as-is
@@ -964,7 +1083,7 @@ class TestChainClientGasLimit:
 
         # Pre-check expects unregistered hash
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
-            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
         )
 
         client = ChainClient(chain="base-sepolia", gas_limit=None)
@@ -996,6 +1115,7 @@ class TestChainClientProvenanceChain:
             ZERO_ADDRESS,
             0,
             "",
+            b"\x00" * 32,
             [],
             [],
             0,
@@ -1016,7 +1136,7 @@ class TestChainClientProvenanceChain:
         # Contract returns transformations as string[] (descriptions only)
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
             hash_a_bytes, DUMMY_ADDRESS, 1700000000, "swarm-provenance",
-            ["filtered PII", "anonymized"],
+            b"\x00" * 32, ["filtered PII", "anonymized"],
             [], 0,
         )
 
@@ -1051,7 +1171,7 @@ class TestChainClientProvenanceChain:
 
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
             hash_a_bytes, DUMMY_ADDRESS, 1700000000, "swarm-provenance",
-            ["filtered"],
+            b"\x00" * 32, ["filtered"],
             [], 0,
         )
 
@@ -1075,11 +1195,11 @@ class TestChainClientProvenanceChain:
             if data_hash == hash_a_bytes:
                 mock_call.call.return_value = (
                     hash_a_bytes, DUMMY_ADDRESS, 1700000000, "swarm-provenance",
-                    [], [], 0,
+                    b"\x00" * 32, [], [], 0,
                 )
             else:
                 mock_call.call.return_value = (
-                    data_hash, ZERO_ADDRESS, 0, "", [], [], 0,
+                    data_hash, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
                 )
             return mock_call
 
@@ -1102,7 +1222,7 @@ class TestChainClientProvenanceChain:
             mock_call = MagicMock()
             mock_call.call.return_value = (
                 hash_a_bytes, DUMMY_ADDRESS, 1700000000, "swarm-provenance",
-                [], [], 0,
+                b"\x00" * 32, [], [], 0,
             )
             return mock_call
 
@@ -1210,6 +1330,7 @@ class TestTransformationParsing:
             DUMMY_ADDRESS,
             1700000000,
             "swarm-provenance",
+            b"\x00" * 32,
             ["encrypted: AES-256-GCM"],
             [DUMMY_ADDRESS],
             0,
@@ -1231,6 +1352,7 @@ class TestTransformationParsing:
             DUMMY_ADDRESS,
             1700000000,
             "swarm-provenance",
+            b"\x00" * 32,
             ["filtered PII", "anonymized"],
             [],
             0,
@@ -1253,6 +1375,7 @@ class TestTransformationParsing:
             DUMMY_ADDRESS,
             1700000000,
             "swarm-provenance",
+            b"\x00" * 32,
             [],
             [DUMMY_ADDRESS, accessor_addr],
             0,
@@ -1604,12 +1727,12 @@ class TestAnchorRevertDetection:
             if call_count[0] == 1:
                 # First call (pre-check): not registered
                 mock_call.call.return_value = (
-                    DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+                    DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
                 )
             else:
                 # Second call (after revert): now registered
                 mock_call.call.return_value = (
-                    DUMMY_HASH_BYTES, DUMMY_ADDRESS, 1700000000, "swarm-provenance", [], [], 0,
+                    DUMMY_HASH_BYTES, DUMMY_ADDRESS, 1700000000, "swarm-provenance", b"\x00" * 32, [], [], 0,
                 )
             return mock_call
 
@@ -1641,6 +1764,7 @@ class TestV2TransformationParsing:
             DUMMY_ADDRESS,
             1700000000,
             "swarm-provenance",
+            b"\x00" * 32,
             [(new_hash_bytes, "filtered PII")],  # v2 tuple format
             [],
             0,
@@ -1662,6 +1786,7 @@ class TestV2TransformationParsing:
             DUMMY_ADDRESS,
             1700000000,
             "swarm-provenance",
+            b"\x00" * 32,
             ["plain string description"],  # v1 format
             [],
             0,
@@ -1679,14 +1804,14 @@ class TestV1Fallback:
     """Tests for v1 fallback when getDataRecord decode fails."""
 
     def test_get_data_record_v1_fallback(self, mock_chain_deps):
-        """Tests fallback to dataRecords() when v2 ABI decode fails on v1."""
+        """Tests fallback to dataRecords() when v4 ABI decode fails on v1."""
         from swarm_provenance_uploader.chain.contract import DataProvenanceContract
 
-        # getDataRecord fails (v2 ABI decode error on v1 contract)
+        # getDataRecord fails (v4 ABI decode error on v1 contract)
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.side_effect = OverflowError("decode")
         # getTransformationLinks also fails (v1 contract)
         mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = Exception("revert")
-        # dataRecords returns scalar-only tuple
+        # dataRecords returns scalar-only tuple (v1: 5 fields, no storageRef)
         mock_chain_deps["contract"].functions.dataRecords.return_value.call.return_value = (
             DUMMY_HASH_BYTES, DUMMY_ADDRESS, 1700000000, "swarm-provenance", 0
         )
@@ -1697,11 +1822,34 @@ class TestV1Fallback:
         )
         record = contract.get_data_record(DUMMY_HASH)
 
-        # Should return 7-element tuple with empty arrays for transformations/accessors
+        # Should return 8-element tuple with zero storageRef and empty arrays
         assert record[0] == DUMMY_HASH_BYTES
         assert record[1] == DUMMY_ADDRESS
-        assert record[4] == []  # transformations (empty)
-        assert record[5] == []  # accessors (empty)
+        assert record[4] == b"\x00" * 32  # storageRef (zero)
+        assert record[5] == []  # transformations (empty)
+        assert record[6] == []  # accessors (empty)
+
+    def test_get_data_record_v4_fallback_with_storage_ref(self, mock_chain_deps):
+        """Tests fallback to dataRecords() on v4 contract (6-field tuple with storageRef)."""
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        storage_ref = bytes.fromhex("bb" * 32)
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.side_effect = OverflowError("decode")
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = Exception("revert")
+        # dataRecords on v4 returns 6 fields including storageRef
+        mock_chain_deps["contract"].functions.dataRecords.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, DUMMY_ADDRESS, 1700000000, "swarm-provenance", storage_ref, 0
+        )
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        record = contract.get_data_record(DUMMY_HASH)
+
+        assert record[4] == storage_ref  # storageRef preserved
+        assert record[5] == []  # transformations (empty)
+        assert record[6] == []  # accessors (empty)
 
 
 class TestEventCache:
@@ -1972,7 +2120,7 @@ class TestProviderEnhancements:
         from swarm_provenance_uploader.chain.provider import ChainProvider
 
         provider = ChainProvider(chain="base-sepolia")
-        assert provider.deploy_block == 39_075_766
+        assert provider.deploy_block == 39_905_249
 
 
 class TestProvenanceChainV2StateReads:
@@ -1996,15 +2144,15 @@ class TestProvenanceChainV2StateReads:
             if data_hash == hash_a_bytes:
                 mock_call.call.return_value = (
                     hash_a_bytes, DUMMY_ADDRESS, 1700000000, "swarm-provenance",
-                    [], [], 0,
+                    b"\x00" * 32, [], [], 0,
                 )
             elif data_hash == hash_b_bytes:
                 mock_call.call.return_value = (
                     hash_b_bytes, DUMMY_ADDRESS, 1700000001, "swarm-provenance",
-                    [], [], 0,
+                    b"\x00" * 32, [], [], 0,
                 )
             else:
-                mock_call.call.return_value = (data_hash, ZERO_ADDRESS, 0, "", [], [], 0)
+                mock_call.call.return_value = (data_hash, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0)
             return mock_call
 
         mock_chain_deps["contract"].functions.getDataRecord = mock_get_data_record
@@ -2054,11 +2202,11 @@ class TestProvenanceChainV2StateReads:
         def mock_get_data_record(data_hash):
             mock_call = MagicMock()
             if data_hash == hash_a_bytes:
-                mock_call.call.return_value = (hash_a_bytes, DUMMY_ADDRESS, 1700000000, "type", [], [], 0)
+                mock_call.call.return_value = (hash_a_bytes, DUMMY_ADDRESS, 1700000000, "type", b"\x00" * 32, [], [], 0)
             elif data_hash == hash_b_bytes:
-                mock_call.call.return_value = (hash_b_bytes, DUMMY_ADDRESS, 1700000001, "type", [], [], 0)
+                mock_call.call.return_value = (hash_b_bytes, DUMMY_ADDRESS, 1700000001, "type", b"\x00" * 32, [], [], 0)
             else:
-                mock_call.call.return_value = (data_hash, ZERO_ADDRESS, 0, "", [], [], 0)
+                mock_call.call.return_value = (data_hash, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0)
             return mock_call
 
         mock_chain_deps["contract"].functions.getDataRecord = mock_get_data_record
@@ -2267,7 +2415,7 @@ class TestPreflightBalanceCheck:
 
         # Pre-check: hash not registered (so anchor proceeds to _send_transaction)
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
-            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
         )
 
         client = ChainClient(chain="base-sepolia")
@@ -2284,7 +2432,7 @@ class TestPreflightBalanceCheck:
 
         # Pre-check: hash not registered
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
-            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0,
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
         )
 
         # Make send_raw_transaction raise with "insufficient funds" message

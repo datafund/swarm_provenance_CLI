@@ -237,6 +237,7 @@ swarm-prov-upload chain balance --json
 swarm-prov-upload chain anchor <swarm_hash>
 swarm-prov-upload chain anchor <swarm_hash> --type "dataset"
 swarm-prov-upload chain anchor <swarm_hash> --owner <address>  # anchor as delegate
+swarm-prov-upload chain anchor <swarm_hash> --storage-ref <ref>  # anchor with Swarm storage reference
 swarm-prov-upload chain anchor <swarm_hash> --gas 500000      # explicit gas limit
 
 # Record data access
@@ -273,6 +274,12 @@ swarm-prov-upload chain delegate <address> --revoke
 # Equivalent to: verify ACTIVE → optionally anchor → transform → restrict
 swarm-prov-upload chain protect <original_hash> <new_hash> --description "Removed PII"
 swarm-prov-upload chain protect <orig> <new> --anchor-new --description "Redacted"  # anchor new hash first
+
+# Set or update storage reference for an anchored hash
+swarm-prov-upload chain set-storage-ref <data_hash> <storage_ref>
+
+# Look up data hash by storage reference
+swarm-prov-upload chain lookup <storage_ref>
 
 # Walk transformation chain (follow lineage)
 swarm-prov-upload chain get <hash> --follow               # full chain
@@ -321,7 +328,7 @@ print(f"TX: {result.explorer_url}")
 ```
 
 **Write operations** (require wallet + gas):
-- `anchor(swarm_hash, data_type)` - Register a hash on-chain
+- `anchor(swarm_hash, data_type, storage_ref)` - Register a hash on-chain (optional storage reference)
 - `anchor_for(swarm_hash, owner, data_type)` - Register on behalf of another owner
 - `batch_anchor(swarm_hashes, data_types)` - Batch register multiple hashes
 - `transform(original_hash, new_hash, description)` - Record data transformation
@@ -331,11 +338,13 @@ print(f"TX: {result.explorer_url}")
 - `set_status(swarm_hash, status)` - Change data status (ACTIVE/RESTRICTED/DELETED)
 - `transfer_ownership(swarm_hash, new_owner)` - Transfer data ownership
 - `set_delegate(delegate, authorized)` - Authorize/revoke a delegate
+- `set_storage_ref(swarm_hash, storage_ref)` - Set/update storage reference for anchored hash
 
 **Read operations** (no gas required):
 - `get(swarm_hash)` - Get full provenance record
 - `verify(swarm_hash)` - Check if hash is registered
 - `get_provenance_chain(swarm_hash)` - Follow transformation lineage
+- `get_by_storage_ref(storage_ref)` - Look up data hash by storage reference
 - `balance()` - Get wallet balance and chain info
 - `health_check()` - Check RPC connectivity
 
@@ -804,6 +813,8 @@ See [examples/README.md](examples/README.md) for the full guide with walkthrough
 │  │                 │  │ chain transfer   │  │                                 │ │
 │  │                 │  │ chain delegate   │  │                                 │ │
 │  │                 │  │ chain protect    │  │                                 │ │
+│  │ chain set-stor.. │  │                                 │ │
+│  │ chain lookup     │  │                                 │ │
 │  └─────────────────┘  └──────────────────┘  └─────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                         │
@@ -990,6 +1001,7 @@ See [examples/README.md](examples/README.md) for the full guide with walkthrough
 │  • DataProvenance smart contract  • On-chain data registration                │
 │  • Transformation lineage         • Access tracking                           │
 │  • Ownership transfer             • Delegate authorization                    │
+│  • Storage reference mapping      • Reverse lookup by storageRef             │
 │  • Base Sepolia / Base mainnet    • Lazy dependency loading                   │
 └─────────────────────────────────────────────────────────────────────────────────┘
 

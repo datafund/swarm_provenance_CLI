@@ -181,6 +181,7 @@ class DataProvenanceContract:
         data_hash: str,
         data_type: str,
         sender: str,
+        storage_ref: Optional[str] = None,
     ) -> dict:
         """
         Build transaction to register a data hash on-chain.
@@ -189,17 +190,22 @@ class DataProvenanceContract:
             data_hash: 64-char hex hash of the data (Swarm reference).
             data_type: Category/type string (max 64 chars).
             sender: Address of the transaction sender.
+            storage_ref: Optional 64-char hex storage reference (e.g. Swarm hash).
 
         Returns:
             Unsigned transaction dict.
         """
         hash_bytes = _normalize_hash(data_hash)
         _validate_data_type(data_type)
+        tx_params = {"from": self._web3.to_checksum_address(sender)}
+        if storage_ref is not None:
+            ref_bytes = _normalize_hash(storage_ref)
+            return self._contract.functions.registerData(
+                hash_bytes, data_type, ref_bytes
+            ).build_transaction(tx_params)
         return self._contract.functions.registerData(
             hash_bytes, data_type
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(tx_params)
 
     def build_register_data_for_tx(
         self,
@@ -207,6 +213,7 @@ class DataProvenanceContract:
         data_type: str,
         actual_owner: str,
         sender: str,
+        storage_ref: Optional[str] = None,
     ) -> dict:
         """
         Build transaction to register data on behalf of another owner.
@@ -218,25 +225,30 @@ class DataProvenanceContract:
             data_type: Category/type string (max 64 chars).
             actual_owner: Address of the actual data owner.
             sender: Address of the delegate sending the transaction.
+            storage_ref: Optional 64-char hex storage reference (e.g. Swarm hash).
 
         Returns:
             Unsigned transaction dict.
         """
         hash_bytes = _normalize_hash(data_hash)
         _validate_data_type(data_type)
+        owner_addr = self._web3.to_checksum_address(actual_owner)
+        tx_params = {"from": self._web3.to_checksum_address(sender)}
+        if storage_ref is not None:
+            ref_bytes = _normalize_hash(storage_ref)
+            return self._contract.functions.registerDataFor(
+                hash_bytes, data_type, owner_addr, ref_bytes
+            ).build_transaction(tx_params)
         return self._contract.functions.registerDataFor(
-            hash_bytes,
-            data_type,
-            self._web3.to_checksum_address(actual_owner),
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+            hash_bytes, data_type, owner_addr,
+        ).build_transaction(tx_params)
 
     def build_batch_register_data_tx(
         self,
         data_hashes: List[str],
         data_types: List[str],
         sender: str,
+        storage_refs: Optional[List[str]] = None,
     ) -> dict:
         """
         Build transaction to register multiple data hashes in one call.
@@ -245,6 +257,8 @@ class DataProvenanceContract:
             data_hashes: List of 64-char hex hashes.
             data_types: List of data type strings (same length as hashes).
             sender: Address of the transaction sender.
+            storage_refs: Optional list of 64-char hex storage references
+                (same length as hashes). Pass None to omit storage refs.
 
         Returns:
             Unsigned transaction dict.
@@ -266,11 +280,20 @@ class DataProvenanceContract:
         for dt in data_types:
             _validate_data_type(dt)
 
+        tx_params = {"from": self._web3.to_checksum_address(sender)}
+        if storage_refs is not None:
+            if len(storage_refs) != len(data_hashes):
+                raise ChainValidationError(
+                    f"storage_refs ({len(storage_refs)}) must match "
+                    f"data_hashes ({len(data_hashes)}) length"
+                )
+            ref_bytes_list = [_normalize_hash(r) for r in storage_refs]
+            return self._contract.functions.batchRegisterData(
+                hash_bytes_list, data_types, ref_bytes_list
+            ).build_transaction(tx_params)
         return self._contract.functions.batchRegisterData(
             hash_bytes_list, data_types
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(tx_params)
 
     def build_record_transformation_tx(
         self,
@@ -460,55 +483,103 @@ class DataProvenanceContract:
             "from": self._web3.to_checksum_address(sender),
         })
 
+    def build_set_storage_ref_tx(
+        self,
+        data_hash: str,
+        storage_ref: str,
+        sender: str,
+    ) -> dict:
+        """
+        Build transaction to set the storage reference for an existing record.
+
+        This is a set-once operation — the storage ref cannot be changed after being set.
+
+        Args:
+            data_hash: 64-char hex hash of the registered data.
+            storage_ref: 64-char hex storage reference (e.g. Swarm hash).
+            sender: Address of the data owner.
+
+        Returns:
+            Unsigned transaction dict.
+        """
+        hash_bytes = _normalize_hash(data_hash)
+        ref_bytes = _normalize_hash(storage_ref)
+        return self._contract.functions.setStorageRef(
+            hash_bytes, ref_bytes
+        ).build_transaction({
+            "from": self._web3.to_checksum_address(sender),
+        })
+
     # --- Read methods (direct contract calls) ---
+
+    def get_data_hash_by_storage_ref(self, storage_ref: str) -> Optional[bytes]:
+        """
+        Reverse lookup: get the data hash associated with a storage reference.
+
+        Args:
+            storage_ref: 64-char hex storage reference.
+
+        Returns:
+            Data hash as bytes32, or None if no mapping exists.
+        """
+        ref_bytes = _normalize_hash(storage_ref)
+        result = self._contract.functions.getDataHashByStorageRef(ref_bytes).call()
+        # bytes32(0) means no mapping
+        if result == b"\x00" * 32:
+            return None
+        return result
 
     def get_data_record(self, data_hash: str) -> Tuple:
         """
         Get the full on-chain record for a data hash.
 
-        The bundled ABI uses the v2 schema (``TransformationLink[]`` /
-        ``tuple[]``).  On v1 contracts where ``getDataRecord`` returns
-        ``string[]`` for transformations, the ABI decoder will fail; we
-        fall back to ``dataRecords()`` (scalar fields, no arrays).
+        The bundled ABI uses the v4 schema which includes ``storageRef``
+        and ``TransformationLink[]``.  On older contracts the ABI decoder
+        may fail; we fall back to ``dataRecords()`` (scalar fields only).
 
         Args:
             data_hash: 64-char hex hash.
 
         Returns:
-            Tuple of (dataHash, owner, timestamp, dataType,
-                       transformations, accessors, status).
+            Tuple of (dataHash, owner, timestamp, dataType, storageRef,
+                       transformationLinks, accessors, status).
 
-            On v1 contracts, field 4 (transformations) is ``string[]``.
-            On v2 contracts, field 4 is ``TransformationLink[]``
+            On v4 contracts, storageRef is ``bytes32`` and
+            transformationLinks is ``TransformationLink[]``
             (list of tuples ``(bytes32, string)``).
+            On older contracts the fallback returns bytes32(0) for
+            storageRef and empty lists for arrays.
         """
         hash_bytes = _normalize_hash(data_hash)
         try:
             return self._contract.functions.getDataRecord(hash_bytes).call()
         except (OverflowError, Exception) as e:
-            # V1 contracts return string[] for transformations but the ABI
-            # declares tuple[] (v2), causing a decode error.  Reconstruct
-            # the record from the scalar mapping.
+            # Older contracts may not match the v4 ABI layout.
+            # Reconstruct the record from the scalar mapping.
             if self.supports_transformation_links():
-                raise  # genuine error on v2 — re-raise
-            logger.debug("getDataRecord decode failed on v1, using fallback: %s", e)
+                raise  # genuine error on v2+ — re-raise
+            logger.debug("getDataRecord decode failed on older contract, using fallback: %s", e)
             return self._get_data_record_v1_fallback(hash_bytes)
 
     def _get_data_record_v1_fallback(self, hash_bytes: bytes) -> Tuple:
-        """Reconstruct getDataRecord result for v1 contracts.
+        """Reconstruct getDataRecord result for older contracts.
 
-        The v2 ABI expects ``TransformationLink[]`` tuples but v1
-        contracts return ``string[]``, causing a decode error.  Falls
-        back to ``dataRecords()`` (scalar fields only — no arrays).
-        Accessors and transformations are returned as empty lists; callers
-        can still get transformations from ``DataTransformed`` events.
+        The v4 ABI expects 8 fields but older contracts return fewer.
+        Falls back to ``dataRecords()`` (scalar fields only — no arrays).
+        Accessors and transformations are returned as empty lists; storageRef
+        as zero bytes.
         """
-        # dataRecords returns: (dataHash, owner, timestamp, dataType, status)
+        # dataRecords on v4 returns: (dataHash, owner, timestamp, dataType, storageRef, status)
+        # On older contracts it returns: (dataHash, owner, timestamp, dataType, status)
         basic = self._contract.functions.dataRecords(hash_bytes).call()
-        data_hash, owner, timestamp, data_type, status = basic
+        if len(basic) == 6:
+            data_hash, owner, timestamp, data_type, storage_ref, status = basic
+        else:
+            data_hash, owner, timestamp, data_type, status = basic
+            storage_ref = b"\x00" * 32
 
-        # Return the same 7-element tuple shape as getDataRecord
-        return (data_hash, owner, timestamp, data_type, [], [], status)
+        # Return the same 8-element tuple shape as v4 getDataRecord
+        return (data_hash, owner, timestamp, data_type, storage_ref, [], [], status)
 
     def get_user_data_records(self, user: str) -> List[bytes]:
         """

@@ -2096,7 +2096,7 @@ class TestChainAnchorCommand:
         result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--type", "custom-type"])
 
         assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
-        mock_client.anchor.assert_called_once_with(DUMMY_SWARM_REF, data_type="custom-type", verbose=False)
+        mock_client.anchor.assert_called_once_with(DUMMY_SWARM_REF, data_type="custom-type", storage_ref=None, verbose=False)
 
 
 class TestChainAnchorAlreadyRegistered:
@@ -2876,7 +2876,7 @@ class TestChainAnchorOwner:
         assert "Anchored successfully" in result.stdout
         assert owner_addr in result.stdout
         mock_client.anchor_for.assert_called_once_with(
-            DUMMY_SWARM_REF, owner=owner_addr, data_type="swarm-provenance", verbose=False
+            DUMMY_SWARM_REF, owner=owner_addr, data_type="swarm-provenance", storage_ref=None, verbose=False
         )
         mock_client.anchor.assert_not_called()
 

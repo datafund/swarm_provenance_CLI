@@ -165,6 +165,7 @@ swarm-prov-upload chain balance                                              # W
 swarm-prov-upload chain anchor <hash>                                        # Anchor a Swarm hash on-chain
 swarm-prov-upload chain anchor <hash> --type "dataset"                       # Anchor with custom data type
 swarm-prov-upload chain anchor <hash> --owner <address>                      # Anchor as delegate for owner
+swarm-prov-upload chain anchor <hash> --storage-ref <ref>                    # Anchor with Swarm storage reference
 swarm-prov-upload chain get <hash>                                           # Get on-chain provenance record
 swarm-prov-upload chain get <hash> --follow                                  # Walk transformation chain
 swarm-prov-upload chain get <hash> --follow --depth 3                        # Limit chain walk depth
@@ -181,6 +182,8 @@ swarm-prov-upload chain protect <orig> <new> --description "..."             # C
 swarm-prov-upload chain protect <orig> <new> --anchor-new                    # Protect with auto-anchor
 swarm-prov-upload chain merge <h1> <h2> [<h3>...] <new> --description "..."  # N-to-1 merge transformation
 swarm-prov-upload chain merge <h1> <h2> <new> --type "dataset"               # Merge with custom data type
+swarm-prov-upload chain set-storage-ref <data_hash> <storage_ref>            # Set/update storage reference for anchored hash
+swarm-prov-upload chain lookup <storage_ref>                                 # Look up data hash by storage reference
 
 # Collection/manifest upload (directory as Swarm manifest, gateway only)
 swarm-prov-upload upload-collection /path/to/directory                       # Upload directory
@@ -241,10 +244,10 @@ The application follows a modular architecture with clear separation of concerns
 **ChainClient** (`core/chain_client.py`):
 - High-level facade for on-chain provenance operations
 - Wraps ChainProvider + ChainWallet + DataProvenanceContract
-- Write methods: `anchor()`, `anchor_for()`, `batch_anchor()`, `transform()`, `merge_transform()`, `access()`, `batch_access()`, `set_status()`, `transfer_ownership()`, `set_delegate()`
-- Read methods: `get()`, `verify()`, `get_provenance_chain()`, `balance()`, `health_check()`
+- Write methods: `anchor()`, `anchor_for()`, `batch_anchor()`, `transform()`, `merge_transform()`, `access()`, `batch_access()`, `set_status()`, `transfer_ownership()`, `set_delegate()`, `set_storage_ref()`
+- Read methods: `get()`, `verify()`, `get_provenance_chain()`, `get_by_storage_ref()`, `balance()`, `health_check()`
 - Lazy-loads web3 and eth-account via `blockchain` optional dependency group
-- Targets DataProvenance v2 contract on Base Sepolia (`0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a`)
+- Targets DataProvenance v4 contract on Base Sepolia (`0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322`)
 - V2 auto-detection: state-based traversal on v2 contracts, event cache fallback on v1
 - Duplicate transformation pre-checks to avoid wasting gas
 - RPC failover support via `rpc_fallbacks` parameter
@@ -275,8 +278,8 @@ The application follows a modular architecture with clear separation of concerns
 
 **Chain Models**: Schemas for on-chain provenance:
 - `DataStatusEnum`: On-chain data status (ACTIVE, RESTRICTED, DELETED)
-- `ChainProvenanceRecord`: Full on-chain provenance record
-- `AnchorResult`: Transaction result from anchoring a hash
+- `ChainProvenanceRecord`: Full on-chain provenance record (includes `storage_ref` field for Swarm storage reference)
+- `AnchorResult`: Transaction result from anchoring a hash (includes optional `storage_ref`)
 - `TransformResult`: Transaction result from recording a transformation
 - `MergeTransformResult`: Transaction result from N-to-1 merge transformation
 - `AccessResult`: Transaction result from recording data access
