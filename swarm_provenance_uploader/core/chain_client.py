@@ -256,6 +256,7 @@ class ChainClient:
         self,
         swarm_hash: str,
         data_type: str = "swarm-provenance",
+        storage_ref: Optional[str] = None,
         verbose: bool = False,
     ) -> AnchorResult:
         """
@@ -264,12 +265,14 @@ class ChainClient:
         Args:
             swarm_hash: Swarm reference hash (64 hex chars).
             data_type: Data type/category (max 64 chars, default 'swarm-provenance').
+            storage_ref: Optional storage reference (e.g. Swarm hash) to link
+                bidirectionally with the data hash.
             verbose: Enable debug output.
 
         Returns:
             AnchorResult with transaction details.
         """
-        logger.debug("Anchor: hash=%s type=%s", swarm_hash, data_type)
+        logger.debug("Anchor: hash=%s type=%s storage_ref=%s", swarm_hash, data_type, storage_ref)
 
         # Pre-check: avoid wasting gas on already-registered hashes
         try:
@@ -288,6 +291,7 @@ class ChainClient:
             data_hash=swarm_hash,
             data_type=data_type,
             sender=self._wallet.address,
+            storage_ref=storage_ref,
         )
         try:
             receipt = self._send_transaction(tx, verbose=verbose)
@@ -316,6 +320,7 @@ class ChainClient:
             swarm_hash=swarm_hash,
             data_type=data_type,
             owner=self._wallet.address,
+            storage_ref=storage_ref,
         )
 
     def anchor_for(
@@ -323,6 +328,7 @@ class ChainClient:
         swarm_hash: str,
         owner: str,
         data_type: str = "swarm-provenance",
+        storage_ref: Optional[str] = None,
         verbose: bool = False,
     ) -> AnchorResult:
         """
@@ -334,6 +340,7 @@ class ChainClient:
             swarm_hash: Swarm reference hash.
             owner: Address of the actual data owner.
             data_type: Data type/category.
+            storage_ref: Optional storage reference to link with the data hash.
             verbose: Enable debug output.
 
         Returns:
@@ -359,6 +366,7 @@ class ChainClient:
             data_type=data_type,
             actual_owner=owner,
             sender=self._wallet.address,
+            storage_ref=storage_ref,
         )
         receipt = self._send_transaction(tx, verbose=verbose)
 
@@ -370,12 +378,14 @@ class ChainClient:
             swarm_hash=swarm_hash,
             data_type=data_type,
             owner=owner,
+            storage_ref=storage_ref,
         )
 
     def batch_anchor(
         self,
         swarm_hashes: List[str],
         data_types: List[str],
+        storage_refs: Optional[List[str]] = None,
         verbose: bool = False,
     ) -> AnchorResult:
         """
@@ -384,6 +394,7 @@ class ChainClient:
         Args:
             swarm_hashes: List of Swarm reference hashes.
             data_types: List of data type strings (same length).
+            storage_refs: Optional list of storage references (same length).
             verbose: Enable debug output.
 
         Returns:
@@ -395,6 +406,7 @@ class ChainClient:
             data_hashes=swarm_hashes,
             data_types=data_types,
             sender=self._wallet.address,
+            storage_refs=storage_refs,
         )
         receipt = self._send_transaction(tx, verbose=verbose)
 
@@ -407,6 +419,73 @@ class ChainClient:
             data_type=data_types[0] if data_types else "",
             owner=self._wallet.address,
         )
+
+    def set_storage_ref(
+        self,
+        data_hash: str,
+        storage_ref: str,
+        verbose: bool = False,
+    ) -> AnchorResult:
+        """
+        Set the storage reference for an existing on-chain record.
+
+        This is a set-once operation — once set, the storage ref is immutable.
+
+        Args:
+            data_hash: Registered data hash (64 hex chars).
+            storage_ref: Storage reference to link (e.g. Swarm hash, 64 hex chars).
+            verbose: Enable debug output.
+
+        Returns:
+            AnchorResult with transaction details.
+        """
+        logger.debug("Set storage ref: hash=%s ref=%s", data_hash, storage_ref)
+
+        tx = self._contract.build_set_storage_ref_tx(
+            data_hash=data_hash,
+            storage_ref=storage_ref,
+            sender=self._wallet.address,
+        )
+        receipt = self._send_transaction(tx, verbose=verbose)
+
+        return AnchorResult(
+            tx_hash=receipt["transactionHash"].hex(),
+            block_number=receipt["blockNumber"],
+            gas_used=receipt["gasUsed"],
+            explorer_url=self._receipt_to_explorer_url(receipt),
+            swarm_hash=data_hash,
+            data_type="",
+            owner=self._wallet.address,
+            storage_ref=storage_ref,
+        )
+
+    def get_by_storage_ref(
+        self,
+        storage_ref: str,
+        verbose: bool = False,
+    ) -> ChainProvenanceRecord:
+        """
+        Look up a provenance record by its storage reference.
+
+        Args:
+            storage_ref: Storage reference hash (64 hex chars).
+            verbose: Enable debug output.
+
+        Returns:
+            ChainProvenanceRecord for the linked data hash.
+
+        Raises:
+            DataNotRegisteredError: If no record is linked to this storage ref.
+        """
+        logger.debug("Lookup by storage ref: %s", storage_ref)
+        data_hash_bytes = self._contract.get_data_hash_by_storage_ref(storage_ref)
+        if data_hash_bytes is None:
+            raise DataNotRegisteredError(
+                f"No data record linked to storage ref {storage_ref}",
+                data_hash=storage_ref,
+            )
+        data_hash = data_hash_bytes.hex()
+        return self.get(data_hash, verbose=verbose)
 
     def transform(
         self,
@@ -787,12 +866,13 @@ class ChainClient:
         record = self._contract.get_data_record(swarm_hash)
 
         # record is a tuple: (dataHash, owner, timestamp, dataType,
-        #                      transformations, accessors, status)
+        #                      storageRef, transformationLinks, accessors, status)
         (
             data_hash_bytes,
             owner,
             timestamp,
             data_type,
+            storage_ref_bytes,
             transformations,
             accessors,
             status,
@@ -806,12 +886,17 @@ class ChainClient:
                 data_hash=swarm_hash,
             )
 
-        # Parse transformations — v2 contracts return TransformationLink[]
+        # Parse storage ref — bytes32(0) means not set
+        storage_ref = None
+        if isinstance(storage_ref_bytes, bytes) and storage_ref_bytes != b"\x00" * 32:
+            storage_ref = storage_ref_bytes.hex()
+
+        # Parse transformations — v2+ contracts return TransformationLink[]
         # (list of (bytes32, string) tuples), v1 returns string[].
         chain_transformations = []
         for t in transformations:
             if isinstance(t, (tuple, list)) and len(t) >= 2:
-                # V2 contract: TransformationLink(newDataHash, description)
+                # V2+ contract: TransformationLink(newDataHash, description)
                 new_hash = t[0].hex() if isinstance(t[0], bytes) else str(t[0])
                 chain_transformations.append(
                     ChainTransformation(description=str(t[1]), new_data_hash=new_hash)
@@ -821,11 +906,12 @@ class ChainClient:
                 chain_transformations.append(ChainTransformation(description=str(t)))
 
         logger.debug(
-            "Record: owner=%s type=%s status=%s accessors=%d",
+            "Record: owner=%s type=%s status=%s accessors=%d storage_ref=%s",
             owner,
             data_type,
             DataStatus(status).name,
             len(accessors),
+            storage_ref,
         )
 
         if verbose:
@@ -833,6 +919,8 @@ class ChainClient:
             print(f"DEBUG: Type: {data_type}")
             print(f"DEBUG: Status: {DataStatus(status).name}")
             print(f"DEBUG: Accessors: {len(accessors)}")
+            if storage_ref:
+                print(f"DEBUG: Storage Ref: {storage_ref}")
 
         return ChainProvenanceRecord(
             data_hash=(
@@ -843,6 +931,7 @@ class ChainClient:
             owner=owner,
             timestamp=timestamp,
             data_type=data_type,
+            storage_ref=storage_ref,
             status=DataStatusEnum(status),
             accessors=list(accessors),
             transformations=chain_transformations,

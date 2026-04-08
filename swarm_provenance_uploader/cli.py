@@ -1838,6 +1838,9 @@ def chain_get(
             typer.echo(f"\n\u250c\u2500\u2500\u2500 [{i}] {label} \u2500\u2500\u2500")
             typer.echo(f"\u2502  Hash:   {hash_short}")
             typer.echo(f"\u2502  Type:   {record.data_type}")
+            if record.storage_ref:
+                ref_short = f"{record.storage_ref[:12]}...{record.storage_ref[-8:]}" if len(record.storage_ref) > 20 else record.storage_ref
+                typer.echo(f"\u2502  Storage: {ref_short}")
             typer.echo(f"\u2502  Owner:  {owner_short}")
             typer.echo(f"\u2502  Status: {record.status.name}")
 
@@ -1884,6 +1887,9 @@ def chain_get(
     typer.echo(f"  Hash:    {hash_short}")
     typer.echo(f"  Owner:   {owner_short}")
     typer.echo(f"  Type:    {record.data_type}")
+    if record.storage_ref:
+        ref_short = f"{record.storage_ref[:12]}...{record.storage_ref[-8:]}" if len(record.storage_ref) > 20 else record.storage_ref
+        typer.echo(f"  Storage: {ref_short}")
     typer.echo(f"  Status:  {record.status.name}")
     typer.echo(f"  Time:    {ts_str}")
 
@@ -1907,6 +1913,7 @@ def chain_get(
 def chain_anchor(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to anchor on-chain.")],
     data_type: Annotated[str, typer.Option("--type", "-t", help="Data type/category.")] = "swarm-provenance",
+    storage_ref: Annotated[Optional[str], typer.Option("--storage-ref", "-s", help="Storage reference (e.g. Swarm hash) to link bidirectionally.")] = None,
     owner: Annotated[Optional[str], typer.Option("--owner", help="Register on behalf of this owner address (requires delegate authorization).")] = None,
     gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
@@ -1915,6 +1922,7 @@ def chain_anchor(
     """
     Anchor a Swarm hash on-chain by registering it in the DataProvenance contract.
 
+    Use --storage-ref to link a Swarm storage reference for bidirectional lookup.
     Use --owner to register on behalf of another address (caller must be authorized delegate).
     """
     if gas is not None:
@@ -1922,9 +1930,9 @@ def chain_anchor(
     try:
         client = _get_chain_client(verbose=verbose)
         if owner:
-            result = client.anchor_for(swarm_hash, owner=owner, data_type=data_type, verbose=verbose)
+            result = client.anchor_for(swarm_hash, owner=owner, data_type=data_type, storage_ref=storage_ref, verbose=verbose)
         else:
-            result = client.anchor(swarm_hash, data_type=data_type, verbose=verbose)
+            result = client.anchor(swarm_hash, data_type=data_type, storage_ref=storage_ref, verbose=verbose)
     except typer.Exit:
         raise
     except exceptions.DataAlreadyRegisteredError as e:
@@ -1969,6 +1977,8 @@ def chain_anchor(
     typer.secho(f"\nAnchored successfully!", fg=typer.colors.GREEN, bold=True)
     typer.echo(f"  Hash:    {swarm_hash}")
     typer.echo(f"  Type:    {data_type}")
+    if storage_ref:
+        typer.echo(f"  Storage: {storage_ref}")
     if owner:
         typer.echo(f"  Owner:   {owner}")
     typer.echo(f"  Tx:      {result.tx_hash}")
@@ -1976,6 +1986,104 @@ def chain_anchor(
     typer.echo(f"  Gas:     {result.gas_used}")
     if result.explorer_url:
         typer.echo(f"  Explorer: {result.explorer_url}")
+
+
+@chain_app.command("set-storage-ref")
+def chain_set_storage_ref(
+    data_hash: Annotated[str, typer.Argument(help="Registered data hash.")],
+    storage_ref: Annotated[str, typer.Argument(help="Storage reference (e.g. Swarm hash) to link.")],
+    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit.")] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
+    output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
+):
+    """
+    Set the storage reference for an existing on-chain record (set-once, immutable).
+
+    Links a Swarm storage hash to a registered data hash for bidirectional lookup.
+    """
+    if gas is not None:
+        _chain_config["gas_limit"] = gas
+    try:
+        client = _get_chain_client(verbose=verbose)
+        result = client.set_storage_ref(data_hash, storage_ref, verbose=verbose)
+    except typer.Exit:
+        raise
+    except exceptions.InsufficientFundsError as e:
+        _handle_insufficient_funds(e, output_json=output_json)
+        raise typer.Exit(code=1)
+    except exceptions.ChainTransactionError as e:
+        typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
+        if e.tx_hash:
+            typer.echo(f"  Transaction: {e.tx_hash}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainConnectionError as e:
+        typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+        if e.rpc_url:
+            typer.echo(f"  RPC URL: {e.rpc_url}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainError as e:
+        typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if output_json:
+        typer.echo(json.dumps(result.model_dump(), indent=2))
+        return
+
+    typer.secho(f"\nStorage reference linked!", fg=typer.colors.GREEN, bold=True)
+    typer.echo(f"  Data:    {data_hash}")
+    typer.echo(f"  Storage: {storage_ref}")
+    typer.echo(f"  Tx:      {result.tx_hash}")
+    typer.echo(f"  Block:   {result.block_number}")
+    typer.echo(f"  Gas:     {result.gas_used}")
+    if result.explorer_url:
+        typer.echo(f"  Explorer: {result.explorer_url}")
+
+
+@chain_app.command("lookup")
+def chain_lookup(
+    storage_ref: Annotated[str, typer.Argument(help="Storage reference (e.g. Swarm hash) to look up.")],
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
+    output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
+):
+    """
+    Look up a provenance record by its storage reference (reverse lookup).
+    """
+    try:
+        client = _get_chain_client(verbose=verbose)
+        record = client.get_by_storage_ref(storage_ref, verbose=verbose)
+    except typer.Exit:
+        raise
+    except exceptions.DataNotRegisteredError:
+        typer.secho(f"Not found: no record linked to storage ref {storage_ref}.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+    except exceptions.ChainConnectionError as e:
+        typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+        if e.rpc_url:
+            typer.echo(f"  RPC URL: {e.rpc_url}")
+        raise typer.Exit(code=1)
+    except exceptions.ChainError as e:
+        typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if output_json:
+        typer.echo(json.dumps(record.model_dump(), indent=2))
+        return
+
+    from datetime import datetime, timezone
+    ts_str = datetime.fromtimestamp(record.timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    hash_short = f"{record.data_hash[:12]}...{record.data_hash[-8:]}" if len(record.data_hash) > 20 else record.data_hash
+    owner_short = f"{record.owner[:10]}...{record.owner[-4:]}" if len(record.owner) > 14 else record.owner
+
+    typer.echo(f"\nProvenance Record (via storage ref):")
+    typer.echo("-" * 50)
+    typer.echo(f"  Hash:    {hash_short}")
+    typer.echo(f"  Owner:   {owner_short}")
+    typer.echo(f"  Type:    {record.data_type}")
+    if record.storage_ref:
+        ref_short = f"{record.storage_ref[:12]}...{record.storage_ref[-8:]}" if len(record.storage_ref) > 20 else record.storage_ref
+        typer.echo(f"  Storage: {ref_short}")
+    typer.echo(f"  Status:  {record.status.name}")
+    typer.echo(f"  Time:    {ts_str}")
 
 
 @chain_app.command("access")

@@ -264,6 +264,7 @@ class ChainProvenanceRecord(BaseModel):
     owner: str = Field(description="Ethereum address of data owner")
     timestamp: int = Field(description="Unix timestamp when registered")
     data_type: str = Field(description="Type/category of the data")
+    storage_ref: Optional[str] = Field(default=None, description="Storage reference (e.g. Swarm hash)")
     status: DataStatusEnum = Field(description="Current data status")
     accessors: List[str] = Field(default_factory=list, description="Addresses that accessed this data")
     transformations: List[ChainTransformation] = Field(
@@ -280,6 +281,7 @@ class AnchorResult(BaseModel):
     swarm_hash: str = Field(description="The anchored Swarm reference hash")
     data_type: str = Field(description="Data type registered on-chain")
     owner: str = Field(description="Owner address of the registered data")
+    storage_ref: Optional[str] = Field(default=None, description="Storage reference linked during anchoring")
 
 
 class TransformResult(BaseModel):

@@ -1,3 +1,4 @@
+import json
 import pytest
 import typer
 from typer.testing import CliRunner
@@ -2096,7 +2097,7 @@ class TestChainAnchorCommand:
         result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--type", "custom-type"])
 
         assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
-        mock_client.anchor.assert_called_once_with(DUMMY_SWARM_REF, data_type="custom-type", verbose=False)
+        mock_client.anchor.assert_called_once_with(DUMMY_SWARM_REF, data_type="custom-type", storage_ref=None, verbose=False)
 
 
 class TestChainAnchorAlreadyRegistered:
@@ -2876,9 +2877,265 @@ class TestChainAnchorOwner:
         assert "Anchored successfully" in result.stdout
         assert owner_addr in result.stdout
         mock_client.anchor_for.assert_called_once_with(
-            DUMMY_SWARM_REF, owner=owner_addr, data_type="swarm-provenance", verbose=False
+            DUMMY_SWARM_REF, owner=owner_addr, data_type="swarm-provenance", storage_ref=None, verbose=False
         )
         mock_client.anchor.assert_not_called()
+
+
+# =============================================================================
+# CHAIN STORAGE REF TESTS (Issue #116)
+# =============================================================================
+
+class TestChainAnchorStorageRef:
+    """Tests for chain anchor --storage-ref option."""
+
+    def test_anchor_with_storage_ref(self, mocker):
+        """Tests chain anchor with --storage-ref passes through correctly."""
+        from swarm_provenance_uploader.models import AnchorResult
+
+        storage_ref = "ee" * 32
+        mock_client = mocker.MagicMock()
+        mock_client.anchor.return_value = AnchorResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=100,
+            gas_used=30000,
+            explorer_url=None,
+            swarm_hash=DUMMY_SWARM_REF,
+            data_type="swarm-provenance",
+            owner=DUMMY_ADDRESS,
+            storage_ref=storage_ref,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, [
+            "chain", "anchor", DUMMY_SWARM_REF, "--storage-ref", storage_ref
+        ])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Anchored successfully" in result.stdout
+        assert storage_ref in result.stdout
+        mock_client.anchor.assert_called_once_with(
+            DUMMY_SWARM_REF, data_type="swarm-provenance", storage_ref=storage_ref, verbose=False
+        )
+
+    def test_anchor_with_storage_ref_json(self, mocker):
+        """Tests chain anchor --storage-ref with --json output."""
+        from swarm_provenance_uploader.models import AnchorResult
+
+        storage_ref = "ff" * 32
+        mock_client = mocker.MagicMock()
+        mock_client.anchor.return_value = AnchorResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=100,
+            gas_used=30000,
+            explorer_url=None,
+            swarm_hash=DUMMY_SWARM_REF,
+            data_type="swarm-provenance",
+            owner=DUMMY_ADDRESS,
+            storage_ref=storage_ref,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, [
+            "chain", "anchor", DUMMY_SWARM_REF, "--storage-ref", storage_ref, "--json"
+        ])
+
+        assert result.exit_code == 0
+        output = json.loads(result.stdout)
+        assert output["storage_ref"] == storage_ref
+
+
+class TestChainSetStorageRef:
+    """Tests for chain set-storage-ref command."""
+
+    def test_set_storage_ref_success(self, mocker):
+        """Tests chain set-storage-ref command."""
+        from swarm_provenance_uploader.models import AnchorResult
+
+        data_hash = "aa" * 32
+        storage_ref = "bb" * 32
+        mock_client = mocker.MagicMock()
+        mock_client.set_storage_ref.return_value = AnchorResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=200,
+            gas_used=45000,
+            explorer_url=None,
+            swarm_hash=data_hash,
+            data_type="",
+            owner=DUMMY_ADDRESS,
+            storage_ref=storage_ref,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "set-storage-ref", data_hash, storage_ref])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Storage reference linked" in result.stdout
+        assert data_hash in result.stdout
+        assert storage_ref in result.stdout
+        mock_client.set_storage_ref.assert_called_once_with(data_hash, storage_ref, verbose=False)
+
+    def test_set_storage_ref_json(self, mocker):
+        """Tests chain set-storage-ref with --json output."""
+        from swarm_provenance_uploader.models import AnchorResult
+
+        data_hash = "aa" * 32
+        storage_ref = "bb" * 32
+        mock_client = mocker.MagicMock()
+        mock_client.set_storage_ref.return_value = AnchorResult(
+            tx_hash=DUMMY_TX_HASH,
+            block_number=200,
+            gas_used=45000,
+            explorer_url=None,
+            swarm_hash=data_hash,
+            data_type="",
+            owner=DUMMY_ADDRESS,
+            storage_ref=storage_ref,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "set-storage-ref", data_hash, storage_ref, "--json"])
+
+        assert result.exit_code == 0
+        output = json.loads(result.stdout)
+        assert output["storage_ref"] == storage_ref
+
+    def test_set_storage_ref_transaction_error(self, mocker):
+        """Tests chain set-storage-ref handles transaction errors."""
+        from swarm_provenance_uploader.exceptions import ChainTransactionError
+
+        mock_client = mocker.MagicMock()
+        mock_client.set_storage_ref.side_effect = ChainTransactionError(
+            "Storage ref already set", tx_hash=DUMMY_TX_HASH
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "set-storage-ref", "aa" * 32, "bb" * 32])
+
+        assert result.exit_code == 1
+        assert "Transaction failed" in result.stdout
+
+
+class TestChainLookup:
+    """Tests for chain lookup command."""
+
+    def test_lookup_success(self, mocker):
+        """Tests chain lookup finds a record by storage ref."""
+        from swarm_provenance_uploader.models import ChainProvenanceRecord, DataStatusEnum
+
+        storage_ref = "cc" * 32
+        data_hash = "dd" * 32
+        mock_client = mocker.MagicMock()
+        mock_client.get_by_storage_ref.return_value = ChainProvenanceRecord(
+            data_hash=data_hash,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            storage_ref=storage_ref,
+            status=DataStatusEnum.ACTIVE,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "lookup", storage_ref])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert "Provenance Record (via storage ref)" in result.stdout
+        mock_client.get_by_storage_ref.assert_called_once_with(storage_ref, verbose=False)
+
+    def test_lookup_not_found(self, mocker):
+        """Tests chain lookup when storage ref is not linked."""
+        from swarm_provenance_uploader.exceptions import DataNotRegisteredError
+
+        storage_ref = "ee" * 32
+        mock_client = mocker.MagicMock()
+        mock_client.get_by_storage_ref.side_effect = DataNotRegisteredError(
+            "Not found", data_hash=storage_ref
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "lookup", storage_ref])
+
+        assert result.exit_code == 1
+        assert "Not found" in result.stdout
+
+    def test_lookup_json(self, mocker):
+        """Tests chain lookup with --json output."""
+        from swarm_provenance_uploader.models import ChainProvenanceRecord, DataStatusEnum
+
+        storage_ref = "cc" * 32
+        data_hash = "dd" * 32
+        mock_client = mocker.MagicMock()
+        mock_client.get_by_storage_ref.return_value = ChainProvenanceRecord(
+            data_hash=data_hash,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            storage_ref=storage_ref,
+            status=DataStatusEnum.ACTIVE,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "lookup", storage_ref, "--json"])
+
+        assert result.exit_code == 0
+        output = json.loads(result.stdout)
+        assert output["data_hash"] == data_hash
+        assert output["storage_ref"] == storage_ref
+
+
+class TestChainGetStorageRef:
+    """Tests for storage_ref display in chain get."""
+
+    def test_get_shows_storage_ref(self, mocker):
+        """Tests that chain get displays storage_ref when present."""
+        from swarm_provenance_uploader.models import ChainProvenanceRecord, DataStatusEnum
+
+        storage_ref = "ff" * 32
+        mock_client = mocker.MagicMock()
+        mock_client.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            storage_ref=storage_ref,
+            status=DataStatusEnum.ACTIVE,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "get", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 0
+        assert "Storage:" in result.stdout
+
+    def test_get_hides_storage_ref_when_none(self, mocker):
+        """Tests that chain get hides storage_ref when not set."""
+        from swarm_provenance_uploader.models import ChainProvenanceRecord, DataStatusEnum
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            storage_ref=None,
+            status=DataStatusEnum.ACTIVE,
+        )
+
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "get", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 0
+        assert "Storage:" not in result.stdout
 
 
 # =============================================================================
