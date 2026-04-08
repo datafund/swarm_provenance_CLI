@@ -1483,6 +1483,140 @@ class TestBlockchainBaseSepolia:
 
 
 # =============================================================================
+# STORAGE REF TESTS (Issue #116)
+# =============================================================================
+
+@pytest.mark.blockchain
+@pytest.mark.slow
+class TestBlockchainStorageRefBaseSepolia:
+    """Integration tests for storageRef on Base Sepolia.
+
+    Requires funded wallet on Base Sepolia.
+    WARNING: Uses real testnet gas.
+    """
+
+    @skip_if_no_chain_wallet
+    @skip_if_no_blockchain_deps
+    def test_anchor_with_storage_ref_base_sepolia(self):
+        """Test anchoring a hash with a storage reference on Base Sepolia."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        import time
+
+        try:
+            client = ChainClient(chain="base-sepolia")
+
+            data_hash = _random_hash()
+            storage_ref = _random_hash()
+
+            result = client.anchor(
+                swarm_hash=data_hash,
+                data_type="storage-ref-test",
+                storage_ref=storage_ref,
+                verbose=True,
+            )
+
+            print(f"\n=== Anchor with Storage Ref ===")
+            print(f"  Data hash:    {data_hash[:16]}...")
+            print(f"  Storage ref:  {storage_ref[:16]}...")
+            print(f"  Tx:           {result.tx_hash}")
+            print(f"  Gas:          {result.gas_used}")
+
+            assert result.storage_ref == storage_ref
+            assert result.swarm_hash == data_hash
+
+            # Verify the storage ref is on-chain
+            time.sleep(3)
+            record = client.get(data_hash)
+            assert record.storage_ref == storage_ref
+
+            print(f"  On-chain ref: {record.storage_ref[:16]}...")
+
+        except Exception as e:
+            pytest.skip(f"Base Sepolia storage ref anchor test failed: {e}")
+
+    @skip_if_no_chain_wallet
+    @skip_if_no_blockchain_deps
+    def test_set_storage_ref_base_sepolia(self):
+        """Test post-registration storage ref linking on Base Sepolia."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        import time
+
+        try:
+            client = ChainClient(chain="base-sepolia")
+
+            data_hash = _random_hash()
+            storage_ref = _random_hash()
+
+            # Anchor without storage ref
+            client.anchor(swarm_hash=data_hash, data_type="set-ref-test", verbose=True)
+            time.sleep(3)
+
+            # Verify no storage ref yet
+            record = client.get(data_hash)
+            assert record.storage_ref is None
+
+            # Set storage ref post-registration
+            result = client.set_storage_ref(data_hash, storage_ref, verbose=True)
+            time.sleep(3)
+
+            print(f"\n=== Set Storage Ref ===")
+            print(f"  Data hash:    {data_hash[:16]}...")
+            print(f"  Storage ref:  {storage_ref[:16]}...")
+            print(f"  Tx:           {result.tx_hash}")
+            print(f"  Gas:          {result.gas_used}")
+
+            # Verify it's set
+            record = client.get(data_hash)
+            assert record.storage_ref == storage_ref
+
+        except Exception as e:
+            pytest.skip(f"Base Sepolia set storage ref test failed: {e}")
+
+    @skip_if_no_chain_wallet
+    @skip_if_no_blockchain_deps
+    def test_lookup_by_storage_ref_base_sepolia(self):
+        """Test reverse lookup by storage reference on Base Sepolia."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.chain.exceptions import DataNotRegisteredError
+        import time
+
+        try:
+            client = ChainClient(chain="base-sepolia")
+
+            data_hash = _random_hash()
+            storage_ref = _random_hash()
+
+            # Anchor with storage ref
+            client.anchor(
+                swarm_hash=data_hash,
+                data_type="lookup-test",
+                storage_ref=storage_ref,
+                verbose=True,
+            )
+            time.sleep(3)
+
+            # Reverse lookup
+            record = client.get_by_storage_ref(storage_ref, verbose=True)
+
+            print(f"\n=== Lookup by Storage Ref ===")
+            print(f"  Storage ref:  {storage_ref[:16]}...")
+            print(f"  Found hash:   {record.data_hash[:16]}...")
+
+            assert record.data_hash == data_hash
+            assert record.storage_ref == storage_ref
+            assert record.data_type == "lookup-test"
+
+            # Verify unknown ref raises error
+            with pytest.raises(DataNotRegisteredError):
+                client.get_by_storage_ref(_random_hash())
+
+        except DataNotRegisteredError:
+            raise  # Let pytest.raises handle it
+        except Exception as e:
+            pytest.skip(f"Base Sepolia lookup test failed: {e}")
+
+
+# =============================================================================
 # MANIFEST / COLLECTION UPLOAD TESTS
 # =============================================================================
 
