@@ -74,7 +74,8 @@ def verify_notary_signature(
         from eth_account import Account
         from eth_account.messages import encode_defunct
     except ImportError:
-        return False, 'eth_account not installed (pip install "eth-account>=0.10.0")'
+        from .._requirements import INSTALL_ETH_ACCOUNT
+        return False, f"eth_account not installed ({INSTALL_ETH_ACCOUNT})"
 
     signable = encode_defunct(text=message)
     signature = notary_sig.get("signature", "")

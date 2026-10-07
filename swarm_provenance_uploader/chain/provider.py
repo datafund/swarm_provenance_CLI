@@ -11,6 +11,7 @@ import logging
 from typing import List, Optional
 
 from .exceptions import ChainConfigurationError, ChainConnectionError
+from .._requirements import INSTALL_SIGNING_DEPS
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ def _import_web3():
         except ImportError as e:
             raise ChainConfigurationError(
                 "Blockchain dependencies not installed. "
-                'Run: pip install "web3>=6.0.0" "eth-account>=0.10.0"'
+                f"Run: {INSTALL_SIGNING_DEPS}"
             ) from e
     return _Web3
 

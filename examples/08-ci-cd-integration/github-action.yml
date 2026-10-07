@@ -9,10 +9,13 @@
 # Usage:
 #   Copy this file to .github/workflows/swarm-archive.yml in your repository.
 #
-# The CLI is installed from this GitHub repository at a pinned release tag.
+# The CLI is installed from this GitHub repository at a pinned reference.
 # It is not published on PyPI: a `pip install swarm-provenance-uploader`
 # would fetch whatever package someone registers under that name, inside a
-# job that holds your secrets. Update the tag when a new release is out.
+# job that holds your secrets.
+#
+# Set SWARM_PROV_CLI_REF to a release tag (v0.11.0 or later; older tags do
+# not build) or, better for a job that holds secrets, a full commit SHA.
 
 name: Archive Build Artifacts to Swarm
 
@@ -21,6 +24,9 @@ on:
     branches: [main]
   release:
     types: [published]
+
+env:
+  SWARM_PROV_CLI_REF: "<release tag or commit SHA>"  # see the note above
 
 jobs:
   build-and-archive:
@@ -36,7 +42,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Swarm Provenance CLI
-        run: pip install "swarm-provenance-uploader @ git+https://github.com/datafund/swarm_provenance_CLI@v0.8.0"
+        run: pip install "swarm-provenance-uploader @ git+https://github.com/datafund/swarm_provenance_CLI@${SWARM_PROV_CLI_REF}"
 
       - name: Build project
         run: |

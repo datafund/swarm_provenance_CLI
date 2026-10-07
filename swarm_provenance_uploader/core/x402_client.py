@@ -16,6 +16,7 @@ import secrets
 import time
 from typing import Optional, Tuple
 
+from .._requirements import INSTALL_SIGNING_DEPS
 from ..exceptions import (
     InsufficientBalanceError,
     PaymentRejectedError,
@@ -46,7 +47,7 @@ def _import_x402_deps():
             _web3 = _web3_module
         except ImportError as e:
             raise X402ConfigurationError(
-                'x402 dependencies not installed. Run: pip install "web3>=6.0.0" "eth-account>=0.8.0"'
+                f"x402 dependencies not installed. Run: {INSTALL_SIGNING_DEPS}"
             ) from e
     return _eth_account, _web3
 

@@ -52,7 +52,7 @@ All sub-branches merge into `feature/x402-support`, which only merges to `main` 
 ### Version Format
 Uses semantic versioning with optional git hash: `MAJOR.MINOR.PATCH[+git.SHORT_HASH]`
 
-- **Release versions**: `0.1.0`, `1.0.0` (clean semver for PyPI releases)
+- **Release versions**: `0.1.0`, `1.0.0` (clean semver, tagged `vX.Y.Z`; the package is installed from git tags, not PyPI)
 - **Development versions**: `0.1.1+git.abc1234` (includes git hash for traceability)
 
 ### When to Increment
