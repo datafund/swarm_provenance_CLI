@@ -1502,6 +1502,18 @@ class TestUploadWithSign:
         assert "not enabled" in result.stdout.lower()
 
 
+
+def _has_eth_account():
+    try:
+        import eth_account  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+# Verifying a signature needs eth-account; without it download exits early
+# with an install hint (tested in TestDownloadWithoutEthAccount).
+@pytest.mark.skipif(not _has_eth_account(), reason="eth-account not installed")
 class TestDownloadWithVerify:
     """Tests for download command with default signature verification."""
 
@@ -1564,7 +1576,7 @@ class TestDownloadWithVerify:
         assert "verified" in result.stdout.lower() or "Verified" in result.stdout
 
     def test_download_verify_fails_invalid_signature(self, mocker, tmp_path):
-        """Tests download warns on invalid signature but still succeeds."""
+        """A signature that does not verify fails the download by default (#135)."""
         import json
         import base64
         import hashlib
@@ -1618,8 +1630,8 @@ class TestDownloadWithVerify:
 
         # Download should still succeed (files downloaded) but with a warning about failed signature
         # The exit code is 0 because the download itself succeeded
-        assert result.exit_code == 0
-        assert "FAILED" in result.stdout or "failed" in result.stdout.lower()
+        assert result.exit_code == 1
+        assert "FAILED" in result.stdout and not list(tmp_path.glob("*.data"))
 
     def test_download_verify_no_signature_found(self, mocker, tmp_path):
         """Tests download silently skips verification when no signature present."""
@@ -1660,8 +1672,8 @@ class TestDownloadWithVerify:
         # No signature message should NOT appear (silent skip)
         assert "No notary signatures" not in result.stdout
 
-    def test_download_verify_local_backend_warns(self, mocker, tmp_path):
-        """Tests default verify with local backend still downloads but can't verify."""
+    def test_download_verify_local_backend_cannot_verify(self, mocker, tmp_path):
+        """A signed document with no expected notary address cannot be verified: exit 1 (#135)."""
         import json
         import base64
         import hashlib
@@ -1700,9 +1712,9 @@ class TestDownloadWithVerify:
         )
 
         # Download should still succeed
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         # But should warn about not being able to verify
-        assert "Cannot verify" in result.stdout or "No notary address" in result.stdout
+        assert "Cannot verify" in result.stdout and "--notary-address" in result.stdout
 
     def test_download_no_verify_skips_verification(self, mocker, tmp_path):
         """Tests --no-verify skips signature verification entirely."""
@@ -1801,7 +1813,7 @@ class TestDownloadWithVerify:
 
         assert result.exit_code == 1
         assert "FAILED" in result.stdout
-        assert "strict" in result.stdout.lower() or "Aborting" in result.stdout
+        assert "verification failed" in result.stdout
 
     def test_download_strict_succeeds_on_valid_signature(self, mocker, tmp_path):
         """Tests --strict succeeds when signature is valid."""
@@ -1890,8 +1902,8 @@ class TestDownloadWithVerify:
         # Should not crash — --verify is accepted silently
         assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
 
-    def test_download_strict_no_signatures_succeeds(self, mocker, tmp_path):
-        """Tests --strict with no signatures present still succeeds."""
+    def test_download_strict_requires_a_signature(self, mocker, tmp_path):
+        """--strict now means --require-signature: a stripped signature fails (#135)."""
         import json
         import base64
         import hashlib
@@ -1921,7 +1933,7 @@ class TestDownloadWithVerify:
         )
 
         # No signatures → nothing to fail on → succeeds
-        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+        assert result.exit_code == 1 and "no notary signature" in result.stdout
 
     def test_download_no_verify_overrides_strict(self, mocker, tmp_path):
         """Tests --no-verify takes precedence over --strict."""
@@ -1966,8 +1978,8 @@ class TestDownloadWithVerify:
         assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
         assert "Signature" not in result.stdout
 
-    def test_download_strict_local_backend_warns_not_fails(self, mocker, tmp_path):
-        """Tests --strict on local backend warns but doesn't fail (can't fetch notary address)."""
+    def test_download_strict_local_backend_cannot_verify(self, mocker, tmp_path):
+        """--strict on local backend without a pinned address cannot verify: exit 1 (#135)."""
         import json
         import base64
         import hashlib
@@ -2003,8 +2015,8 @@ class TestDownloadWithVerify:
         )
 
         # Should warn but still succeed — can't verify without notary address
-        assert result.exit_code == 0
-        assert "Cannot verify" in result.stdout or "No notary address" in result.stdout
+        assert result.exit_code == 1
+        assert "Cannot verify" in result.stdout
 
 
 # =============================================================================
@@ -5319,3 +5331,30 @@ class TestRerunLine:
 
         mocker.patch("swarm_provenance_uploader.cli.sys.argv", ["python", "-m", "x"])
         assert "--idempotency-key 'k $(id)'" in _rerun_with_key("k $(id)")
+
+
+
+class TestDownloadWithoutEthAccount:
+    def test_signed_document_without_eth_account_fails_with_install_hint(self, mocker, tmp_path):
+        import base64
+        import builtins
+        import hashlib
+
+        real_import = builtins.__import__
+
+        def no_eth_account(name, *args, **kwargs):
+            if name == "eth_account" or name.startswith("eth_account."):
+                raise ImportError("No module named 'eth_account'")
+            return real_import(name, *args, **kwargs)
+
+        data = b"x"
+        document = {"data": base64.b64encode(data).decode(), "content_hash": hashlib.sha256(data).hexdigest(),
+                    "stamp_id": DUMMY_STAMP, "signatures": [{"type": "notary", "signer": "0x" + "1" * 40}]}
+        client = mocker.MagicMock()
+        client.download_data.return_value = json.dumps(document).encode()
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=client)
+        mocker.patch("builtins.__import__", side_effect=no_eth_account)
+        result = runner.invoke(app, ["download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path)])
+        assert result.exit_code == 1
+        assert "eth-account is not installed" in result.output
+        assert "FAILED" not in result.output

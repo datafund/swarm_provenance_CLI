@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 Payment safety (epic #145).
 
 ### Fixed
+- `download` enforces notary signatures: a signature that does not verify, or cannot be checked (no expected address, eth-account missing), exits 1 and saves nothing; it ended in "Download and verification successful" with exit 0. `--strict` with a stripped signature passed; `--strict` now also requires a signature. The saved `.meta.json` keeps `signatures`, so it can be re-verified (#135)
 - `download` refuses a reference that is not 64 or 128 hex characters before using it as a file name or URL path; `download ../x` wrote outside `--output-dir`. A `0x` prefix is accepted and dropped. `--stamp-id` is checked the same way (64 hex) (#132)
 - `ChainProvider.health_check` and `get_block_number` try each RPC URL at most once per call; two endpoints that connect but fail the check (e.g. wrong chain) were switched between until the recursion limit, and a dead fallback was probed repeatedly (#132)
 - Base mainnet USDC payments can now be signed: the EIP-712 domain name for `base` is `"USD Coin"` (the contract's `name()`), not `"USDC"`, which is correct only on Base Sepolia. Tests pin both networks' `DOMAIN_SEPARATOR` to the on-chain values (#126). Must ship together with the gateway fix datafund/swarm_connect#467.
@@ -23,6 +24,7 @@ Payment safety (epic #145).
 - The full stamp ID is printed after a purchase or pool acquisition (it was cut to the last 12 characters without `-v`), and if the command then fails (stamp never usable, upload error, unknown payment outcome), the ID is repeated with a `--stamp-id` hint so a retry does not buy another stamp. With `-v`, `upload-collection` no longer prints a separate `Stamp ID:` line (#130)
 
 ### Added
+- `download --require-signature` fails when the document has no notary signature; `--notary-address` / `NOTARY_ADDRESS` pins the expected notary instead of trusting the serving gateway's `/notary/info` (#135)
 - `Idempotency-Key` on paid requests (#124): one key per command (`GatewayClient(idempotency_key=...)`; a fresh key per paid operation otherwise), the same on every attempt. The CLI waits and retries on `IDEMPOTENCY_KEY_IN_PROGRESS` (honouring `Retry-After`, at least 5 s) and `IDEMPOTENCY_UNAVAILABLE`, resending the same authorization (the gateway releases it) and signing a new one only after an attempt that got no answer, at most 3 per request; and stops on `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` (prints the original nonce), `IDEMPOTENCY_KEY_SETTLED_PENDING` (prints the transaction) and `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` (reported as a success, exit 0 when it is the last step). `IDEMPOTENCY_KEY_REUSED` / `INVALID` say the key handling is at fault, not the input. New `--idempotency-key` repeats a failed run with its key. Needs a gateway with datafund/swarm_connect#422 (on `dev`; harmless but without effect elsewhere)
 - `stamps list --full` shows complete stamp IDs and labels; `stamps list --wallet <address>` lists the stamps that wallet bought (needs x402 enabled on the gateway). The default output now ends with a note that IDs are shortened, and its columns line up (#130)
 - A note when `--usePool`, `--size`, `--duration`, `--depth` or `--amount` is ignored because `--stamp-id` was given (#130)
@@ -43,6 +45,7 @@ Payment safety (epic #145).
 - Install instructions no longer name a PyPI package: the package is not published there, so `pip install swarm-provenance-uploader` would install whatever someone registers under that name. The CI templates in `examples/08-ci-cd-integration/` install from this repository at a pinned tag, and the "dependencies not installed" messages name the dependencies to install (#133)
 - One version source: `pyproject.toml` reads the version from `__version_base__` in `swarm_provenance_uploader/__init__.py` (#133)
 - `typer>=0.12,<0.23` instead of `typer[all]`: the `all` extra no longer exists; 0.12+ includes what it added (#133)
+- `download` fails (exit 1) on a notary signature that does not verify. Use `--no-verify` to download without checking (#135)
 - Library users: `GatewayClient.download_data` and `swarm_client.download_data_from_swarm` raise `ValueError` for a reference that is not 64/128 hex characters (including a `0x` prefix), and `get_stamp` / `extend_stamp` / `check_stamp_health` for a stamp ID that is not 64 hex (#132)
 - Library users: after a payment was sent, timeouts, 5xx answers and a second 402 now raise `X402Error` subclasses (`PaymentOutcomeUnknownError`, `PaymentSettledNotDeliveredError`, `PaymentRejectedError`), no longer the builtin `ConnectionError`. Code catching `ConnectionError` around paid `GatewayClient` calls should also catch `X402Error` (#127)
 
