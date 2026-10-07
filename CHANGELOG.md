@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 Payment safety (epic #145).
 
 ### Fixed
+- `download` no longer reports "Download and verification successful": its check compares the document's data with the document's own `content_hash`, both from the same response, and never against the requested Swarm reference. The output now says what was checked, and which notary (pinned or the serving gateway's) signed the data (#134)
 - `download` enforces notary signatures: a signature that does not verify, or cannot be checked (no expected address, eth-account missing), exits 1 and saves nothing; it ended in "Download and verification successful" with exit 0. `--strict` with a stripped signature passed; `--strict` now also requires a signature. The saved `.meta.json` keeps `signatures`, so it can be re-verified (#135)
 - `download` refuses a reference that is not 64 or 128 hex characters before using it as a file name or URL path; `download ../x` wrote outside `--output-dir`. A `0x` prefix is accepted and dropped. `--stamp-id` is checked the same way (64 hex) (#132)
 - `ChainProvider.health_check` and `get_block_number` try each RPC URL at most once per call; two endpoints that connect but fail the check (e.g. wrong chain) were switched between until the recursion limit, and a dead fallback was probed repeatedly (#132)

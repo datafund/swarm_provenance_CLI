@@ -829,9 +829,14 @@ _ETH_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
 
 def _verify_download_signature(raw_document: dict, gateway_url: Optional[str],
                                notary_address: Optional[str], require_signature: bool,
-                               verbose: bool = False):
+                               verbose: bool = False) -> Optional[str]:
     """
     Check a downloaded document's notary signature; exit 1 unless it verifies.
+
+    Returns:
+        Where the trusted signer came from when a signature verified:
+        "pinned", or the URL of the gateway whose notary address was used.
+        None for an unsigned document.
 
     A document without a signature passes unless require_signature is set.
     The expected signer is notary_address if given (pinned), otherwise the
@@ -869,7 +874,7 @@ def _verify_download_signature(raw_document: dict, gateway_url: Optional[str],
             fail("The document has no notary signature (--require-signature).")
         if verbose:
             typer.echo("\nNo notary signatures found in document.")
-        return
+        return None
 
     typer.echo("\nSignature Verification:")
     typer.echo("-" * 50)
@@ -914,6 +919,7 @@ def _verify_download_signature(raw_document: dict, gateway_url: Optional[str],
         fail("Notary signature verification failed; nothing was saved.",
              "Use --no-verify to download without checking the signature.")
     typer.secho("  Signature: ✓ Verified", fg=typer.colors.GREEN)
+    return "pinned" if source == "pinned" else gateway_url
 
 
 @app.command()
@@ -941,7 +947,9 @@ def download(
 ):
     """
     Downloads Provenance Metadata from Swarm, decodes the wrapped data,
-    verifies its integrity, and saves both files.
+    checks it against the document's own content hash (and notary
+    signature), and saves both files. The content is not checked against
+    the Swarm reference itself: the gateway that serves it is trusted for that.
 
     Notary signatures are verified by default when present, and a signature
     that does not verify fails the download (exit 1).
@@ -1033,8 +1041,9 @@ def download(
     # 4.5 Verify the notary signature. A failed check fails the download (#135).
     # (The model has already parsed this string, so it is valid JSON.)
     raw_document = json.loads(metadata_str)
+    signature_source = None
     if verify:
-        _verify_download_signature(
+        signature_source = _verify_download_signature(
             raw_document,
             gateway_url=gateway_url if use_gateway else None,
             notary_address=notary_address,
@@ -1085,19 +1094,30 @@ def download(
 
     # 9. Verification
     if calculated_content_hash == expected_content_hash:
-        typer.secho("SUCCESS: Content hash verification passed!", fg=typer.colors.GREEN)
+        # Both values come from the same response: this shows the document is
+        # internally consistent, not that it is the content of the requested
+        # reference (#134). Say exactly that.
+        typer.secho("Content hash matches the document's content_hash.", fg=typer.colors.GREEN)
         # 11. Save decoded raw_provenance_bytes
         data_filename = f"{swarm_hash}.data"
         data_filepath = output_dir / data_filename
         try:
             file_utils.save_bytes_to_file(data_filepath, raw_provenance_bytes)
             typer.echo(f"Decoded provenance data saved to: {data_filepath}")
-            typer.secho(f"\nDownload and verification successful.", fg=typer.colors.GREEN, bold=True)
+            typer.secho("\nDownload complete.", fg=typer.colors.GREEN, bold=True)
+            if signature_source == "pinned":
+                typer.echo("The data is signed by the pinned notary.")
+            elif signature_source:
+                typer.echo(f"The data is signed by the notary of the gateway it came from ({signature_source}).")
+            typer.echo("Note: the content is not checked against the Swarm reference itself; the gateway "
+                       "that served it is trusted for that." + ("" if signature_source == "pinned" else
+                       " A notary signature checked against --notary-address does not depend on it."))
         except Exception as e:
             typer.secho(f"ERROR: Failed to save decoded data file: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
     else:
-        typer.secho("ERROR: Content hash verification FAILED!", fg=typer.colors.RED, bold=True)
+        typer.secho("ERROR: Content hash mismatch: the document's data does not match its content_hash.",
+                    fg=typer.colors.RED, bold=True)
         typer.echo(f"  Calculated hash: {calculated_content_hash}")
         typer.echo(f"  Expected hash:   {expected_content_hash}")
         # Optionally save the (unverified) decoded data with a warning filename

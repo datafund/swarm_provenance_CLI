@@ -158,7 +158,7 @@ class TestLocalBackendDownload:
             )
 
             assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
-            assert "SUCCESS: Content hash verification passed!" in result.stdout
+            assert "Content hash matches the document's content_hash." in result.stdout
 
     def test_download_not_found(self, mocker):
         """Tests download fails gracefully when data not found."""
@@ -275,7 +275,7 @@ class TestGatewayBackendDownload:
             )
 
             assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
-            assert "SUCCESS: Content hash verification passed!" in result.stdout
+            assert "Content hash matches the document's content_hash." in result.stdout
 
 
 # =============================================================================
