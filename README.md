@@ -17,6 +17,11 @@ and upload them to the Swarm decentralized storage network.
 # Install
 pip install -e .
 
+# Or, without cloning, from a release tag (v0.11.0 or later; older tags do not
+# build) or a commit SHA. The package is not on PyPI, so
+# never `pip install swarm-provenance-uploader` from the index.
+pip install "swarm-provenance-uploader[x402] @ git+https://github.com/datafund/swarm_provenance_CLI@<release-tag>"
+
 # Check version
 swarm-prov-upload --version
 
@@ -38,20 +43,20 @@ swarm-prov-upload upload --file /path/to/data.txt --size medium
 # Upload with existing stamp (skip purchase)
 swarm-prov-upload upload --file /path/to/data.txt --stamp-id <existing_stamp_id>
 
-# Download and verify
+# Download (checks content hash and notary signature)
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads
 
 # Upload with notary signing (gateway only)
 swarm-prov-upload upload --file /path/to/data.txt --sign notary
 
-# Download and verify data (signature verification is on by default)
+# Download (a notary signature that does not verify fails the download)
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads
+
+# Also fail if the document carries no notary signature, and pin the notary
+swarm-prov-upload download <swarm_hash> --output-dir ./downloads --require-signature --notary-address 0x...
 
 # Download without signature verification
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads --no-verify
-
-# Download with strict verification (fail on invalid signature)
-swarm-prov-upload download <swarm_hash> --output-dir ./downloads --strict
 ```
 
 ## Setup
@@ -411,7 +416,7 @@ swarm-prov-upload upload --file /path/to/data.txt --stamp-id <existing_stamp_id>
 # Upload using pooled stamp (instant ~5s vs >1min for purchase)
 swarm-prov-upload upload --file /path/to/data.txt --usePool
 
-# Download and verify data
+# Download data (checks content hash and notary signature)
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads --verbose
 ```
 
@@ -679,18 +684,25 @@ swarm-prov-upload notary verify --file signed_document.json
 
 #### Verification on Download
 
-Signature verification is enabled by default when downloading signed documents:
+Signature verification is enabled by default when downloading signed documents. A signature that does not verify, or cannot be checked, fails the download (exit 1) and nothing is saved:
 
 ```bash
 # Download with automatic verification (default)
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads
 
+# Also fail when the document has no notary signature
+swarm-prov-upload download <swarm_hash> --output-dir ./downloads --require-signature
+
+# Pin the expected notary instead of asking the gateway that served the document
+swarm-prov-upload download <swarm_hash> --notary-address 0x...   # or NOTARY_ADDRESS=0x...
+
 # Skip verification
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads --no-verify
-
-# Strict mode: fail (exit 1) if verification fails
-swarm-prov-upload download <swarm_hash> --output-dir ./downloads --strict
 ```
+
+What `download` checks: the decoded data against the document's own `content_hash`, and the notary signature when there is one. It does **not** check that the content is what the Swarm reference points to: the gateway (or, with `--backend local`, your Bee node) that serves it is trusted for that. A notary signature does not close that gap, even with a pinned `--notary-address`: it covers only the document's `data`, and the gateway's notary signs whatever an uploader sends with `--sign notary`. So a hostile gateway could serve a different, genuinely signed document for your reference. Pinning protects against a gateway that names a notary key of its own, not against substituted content. To be sure of the content, compare it with a hash you obtained independently (for example the original file's, or one anchored on-chain).
+
+The expected signer comes from `GET /api/v1/notary/info` on the same gateway, so a gateway serving forged documents could also name its own key; pin the notary address you trust with `--notary-address` or `NOTARY_ADDRESS`. The saved `<hash>.meta.json` is the document as downloaded, signatures included, so it can be checked again later with `swarm-prov-upload notary verify --file <hash>.meta.json`. `--strict` is kept as an alias of `--require-signature`.
 
 #### Signature Structure
 

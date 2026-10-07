@@ -1486,6 +1486,7 @@ class TestBlockchainBaseSepolia:
 # STORAGE REF TESTS (Issue #116)
 # =============================================================================
 
+@pytest.mark.integration
 @pytest.mark.blockchain
 @pytest.mark.slow
 class TestBlockchainStorageRefBaseSepolia:

@@ -30,6 +30,10 @@ All sub-branches merge into `feature/x402-support`, which only merges to `main` 
 - `feature/` - New features (e.g., `feature/add-stamp-purchase-command`)
 - `docs/` - Documentation only (e.g., `docs/update-readme`)
 
+### Secrets
+- Never commit keys, `.env*` files or per-developer editor settings (`.claude/settings.local.json` is ignored). CI's secret scan (gitleaks, `.gitleaks.toml`) fails the build on a finding.
+- A false positive (e.g. a variable *named* like a key) is allowed with a trailing `# gitleaks:allow` comment on that line, never by weakening the rules.
+
 ### Commit Messages
 
 **CRITICAL: NEVER mention "Claude", "AI", "Generated with", "Co-Authored-By: Claude", or any AI attribution in commits, PRs, or issues. This is a strict requirement - no exceptions.**
@@ -42,15 +46,13 @@ All sub-branches merge into `feature/x402-support`, which only merges to `main` 
 **IMPORTANT**: Increment the version number with each change that modifies functionality.
 
 ### Version Location
-- Primary: `swarm_provenance_uploader/__init__.py` (`__version__`)
-- Mirror: `pyproject.toml` (`version` field)
-
-Both files MUST be kept in sync.
+- Single source: `__version_base__` in `swarm_provenance_uploader/__init__.py`
+- `pyproject.toml` reads it (`dynamic = ["version"]`, `[tool.setuptools.dynamic]`); do not add a `version` field there
 
 ### Version Format
 Uses semantic versioning with optional git hash: `MAJOR.MINOR.PATCH[+git.SHORT_HASH]`
 
-- **Release versions**: `0.1.0`, `1.0.0` (clean semver for PyPI releases)
+- **Release versions**: `0.1.0`, `1.0.0` (clean semver, tagged `vX.Y.Z`; the package is installed from git tags, not PyPI)
 - **Development versions**: `0.1.1+git.abc1234` (includes git hash for traceability)
 
 ### When to Increment
@@ -59,8 +61,8 @@ Uses semantic versioning with optional git hash: `MAJOR.MINOR.PATCH[+git.SHORT_H
 - **MAJOR** (X.0.0): Breaking changes, incompatible API changes
 
 ### How to Update Version
-1. Update `__version__` in `swarm_provenance_uploader/__init__.py`
-2. Update `version` in `pyproject.toml`
+1. Update `__version_base__` in `swarm_provenance_uploader/__init__.py`
+2. Add the release to `CHANGELOG.md`
 3. The git hash suffix is added automatically at runtime (see below)
 
 ## Project Overview
@@ -85,8 +87,11 @@ pip install -e .[testing]
 # Run all tests (unit + integration)
 pytest
 
-# Run only unit tests (skip integration)
-pytest --ignore=tests/test_integration.py
+# Run only unit tests (what CI runs; nothing talks to real services)
+pytest --ignore=tests/test_integration.py -m "not integration"
+
+# Payment and chain tests need the real signing libraries, or they skip
+pip install -e .[x402,blockchain,testing]
 
 # Run only integration tests (requires real backends)
 pytest tests/test_integration.py -v
@@ -95,6 +100,7 @@ pytest tests/test_integration.py -v
 pytest -m local_bee    # Local Bee tests only
 pytest -m gateway      # Gateway tests only
 pytest -m integration  # All integration tests
+RUN_LIVE_TESTS=1 pytest tests/test_examples.py -m integration  # Live example demos (upload real data)
 ```
 
 ### CLI Usage
@@ -123,7 +129,7 @@ swarm-prov-upload upload --file /path/to/data.txt --usePool
 # Upload with local Bee backend (uses legacy amount)
 swarm-prov-upload --backend local upload --file /path/to/data.txt --amount 1000000000
 
-# Download and verify data
+# Download data (checks content hash and notary signature, not the reference: #134)
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads
 
 # Stamp management (gateway only)
@@ -159,7 +165,8 @@ swarm-prov-upload notary verify --file signed.json      # Verify local file sign
 swarm-prov-upload upload --file data.txt --sign notary  # Upload with notary signing
 swarm-prov-upload download <hash>                       # Download with signature verification (default)
 swarm-prov-upload download <hash> --no-verify           # Skip signature verification
-swarm-prov-upload download <hash> --strict              # Fail if signature verification fails
+swarm-prov-upload download <hash> --require-signature   # Also fail when unsigned (--strict is an alias)
+swarm-prov-upload download <hash> --notary-address 0x.. # Pin the expected notary (or NOTARY_ADDRESS)
 
 # Chain commands (optional, requires blockchain dependencies)
 swarm-prov-upload chain balance                                              # Wallet balance and chain info

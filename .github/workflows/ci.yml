@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, development]
   pull_request:
-    branches: [main]
+    branches: [main, development]
   workflow_dispatch:
 
 jobs:
@@ -14,7 +14,9 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
-        extras: ["testing", "blockchain,testing"]
+        # The payment and chain code is tested with its real dependencies
+        # (web3, eth-account): without them those tests skip.
+        extras: ["testing", "x402,blockchain,testing"]
     name: Python ${{ matrix.python-version }} (${{ matrix.extras }})
     steps:
       - uses: actions/checkout@v4
@@ -27,8 +29,86 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[${{ matrix.extras }}]"
 
+      # Unit tests only: anything marked `integration` talks to real services
+      # (and the example demos upload to the production gateway).
       - name: Run unit tests
-        run: pytest tests/ --ignore=tests/test_integration.py -v
+        run: pytest tests/ --ignore=tests/test_integration.py -m "not integration" -v
+
+  # Fails the build on a committed secret (#131). gitleaks is the open-source
+  # binary, pinned and checksum-verified (its GitHub Action needs a license
+  # for organisation repos).
+  secret-scan:
+    runs-on: ubuntu-latest
+    name: Secret scan
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar xzf gitleaks.tgz gitleaks
+
+      # Everything in the commit as checked out
+      - name: Scan the files
+        run: '"$RUNNER_TEMP/gitleaks" dir . --config .gitleaks.toml --redact --no-banner'
+
+      # The commits this push or pull request adds: a secret committed and
+      # removed again in the same change is still exposed. Earlier history is
+      # not rescanned; the one known leak in it (#131, keys rotated) is
+      # allowlisted in .gitleaks.toml so merges that carry it still pass.
+      - name: Scan the new commits
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "pull_request" ]; then
+            range="$PR_BASE..$PR_HEAD"
+          elif [ "$EVENT" = "push" ] && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            range="$BEFORE..$AFTER"
+          else
+            # A new branch, a force-push whose old head is gone, or a manual
+            # run: every commit that no other branch already has.
+            # (^ref, not --not: gitleaks adds its own arguments after these)
+            others=$(git for-each-ref --format='^%(refname)' refs/remotes/origin \
+                       | grep -v -x -F -e "^refs/remotes/origin/$BRANCH" -e "^refs/remotes/origin/HEAD" \
+                       | paste -sd ' ' - || true)  # one line, no trailing space
+            range="$AFTER $others"
+          fi
+          # gitleaks exits 0 when it scans nothing (an unresolvable range,
+          # or options it misreads), so compare its count with git's.
+          expected=$(git rev-list --count $range)
+          echo "Scanning $expected commit(s): $range"
+          "$RUNNER_TEMP/gitleaks" git . --config .gitleaks.toml --redact --no-banner \
+            --log-opts="$range" 2>&1 | tee "$RUNNER_TEMP/gitleaks.log"
+          scanned=$(grep -o '[0-9]* commits scanned' "$RUNNER_TEMP/gitleaks.log" | grep -o '^[0-9]*' || echo 0)
+          if [ "$expected" -gt 0 ] && [ "$scanned" -eq 0 ]; then
+            echo "::error::gitleaks scanned 0 of $expected commits"; exit 1
+          fi
+
+  # One stable check name to require on protected branches, whatever the matrix.
+  ci-passed:
+    if: always()
+    needs: [test, secret-scan]
+    runs-on: ubuntu-latest
+    name: CI passed
+    steps:
+      - name: All test jobs and the secret scan succeeded
+        run: |
+          test "${{ needs.test.result }}" = "success"
+          test "${{ needs.secret-scan.result }}" = "success"
 
   integration:
     runs-on: ubuntu-latest
@@ -43,10 +123,11 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -e ".[blockchain,testing]"
+        run: pip install -e ".[x402,blockchain,testing]" pytest-timeout
 
       - name: Run integration tests
         env:
           PROVENANCE_WALLET_KEY: ${{ secrets.TEST_WALLET_KEY }}
           PROVENANCE_GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
-        run: pytest tests/test_integration.py -v --timeout=300
+          RUN_LIVE_TESTS: "1"
+        run: pytest tests/test_integration.py tests/test_examples.py -m integration -v --timeout=300

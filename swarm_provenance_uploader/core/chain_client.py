@@ -5,7 +5,7 @@ Provides a facade over ChainProvider, ChainWallet, and DataProvenanceContract
 that mirrors the gateway_client.py pattern: simple method calls that handle
 gas estimation, signing, broadcasting, and receipt parsing.
 
-Requires optional dependencies: pip install swarm-provenance-uploader[blockchain]
+Requires optional dependencies (the `blockchain` extra): web3 and eth-account.
 """
 
 import logging

@@ -13,6 +13,8 @@ Demonstrates data verification, tamper detection, and integrity reporting.
 
 Content-addressed storage provides built-in integrity guarantees: any change to the data produces a different hash. This example shows how to:
 
+Note: `swarm-prov-upload download` does not check the content against the Swarm reference itself (the gateway that serves it is trusted for that). The tamper detection in this demo comes from comparing the download with the original file's hash, obtained independently, which is the check to rely on.
+
 - **Verify downloads**: Confirm that a downloaded file matches the original
 - **Detect tampering**: Show that even a small change (e.g., changing "24 months" to "36 months" in a contract) produces a completely different hash
 - **Notary verification**: Use the `--verify` flag to check for notary signatures on downloaded data

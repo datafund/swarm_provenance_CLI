@@ -198,7 +198,7 @@ class GatewayClient:
 
         # x402 configuration
         self.x402_enabled = x402_enabled
-        self._x402_private_key = x402_private_key
+        self._x402_private_key = x402_private_key  # gitleaks:allow (a variable name, not a key)
         self._x402_network = x402_network
         self._x402_auto_pay = x402_auto_pay
         self._x402_max_auto_pay_usd = x402_max_auto_pay_usd
@@ -1029,6 +1029,9 @@ class GatewayClient:
         Returns:
             StampDetails if found, None if stamp doesn't exist.
         """
+        from .file_utils import is_stamp_id
+        if not is_stamp_id(stamp_id):
+            raise ValueError(f"Not a stamp ID (64 hex characters): {stamp_id!r}")
         url = self._make_url(f"/api/v1/stamps/{stamp_id.lower()}")
         if verbose:
             print(f"--- DEBUG: Get Stamp ---")
@@ -1062,6 +1065,9 @@ class GatewayClient:
         Returns:
             The batch ID of the extended stamp.
         """
+        from .file_utils import is_stamp_id
+        if not is_stamp_id(stamp_id):
+            raise ValueError(f"Not a stamp ID (64 hex characters): {stamp_id!r}")
         url = self._make_url(f"/api/v1/stamps/{stamp_id.lower()}/extend")
         payload = {"amount": amount}
 
@@ -1159,7 +1165,14 @@ class GatewayClient:
 
         Returns:
             The raw bytes of the content.
+
+        Raises:
+            ValueError: If reference is not a Swarm reference (64 or 128 hex
+                characters); it is placed in the URL path.
         """
+        from .file_utils import is_swarm_reference
+        if not is_swarm_reference(reference):
+            raise ValueError(f"Not a Swarm reference (64 or 128 hex characters): {reference!r}")
         url = self._make_url(f"/api/v1/data/{reference.lower()}")
         if verbose:
             print(f"--- DEBUG: Download Data ---")
@@ -1447,6 +1460,9 @@ class GatewayClient:
         Raises:
             StampNotFoundError: If the stamp does not exist
         """
+        from .file_utils import is_stamp_id
+        if not is_stamp_id(stamp_id):
+            raise ValueError(f"Not a stamp ID (64 hex characters): {stamp_id!r}")
         url = self._make_url(f"/api/v1/stamps/{stamp_id.lower()}/check")
         if verbose:
             print(f"--- DEBUG: Check Stamp Health ---")

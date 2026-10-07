@@ -5,7 +5,7 @@ This module handles x402 protocol payments using USDC on Base chain.
 It parses 402 responses, signs payment authorizations using EIP-712,
 and constructs the X-PAYMENT header for retrying requests.
 
-Requires optional dependencies: pip install swarm-provenance-uploader[x402]
+Requires optional dependencies (the `x402` extra): web3 and eth-account.
 """
 
 import base64
@@ -16,6 +16,7 @@ import secrets
 import time
 from typing import Optional, Tuple
 
+from .._requirements import INSTALL_SIGNING_DEPS
 from ..exceptions import (
     InsufficientBalanceError,
     PaymentRejectedError,
@@ -46,7 +47,7 @@ def _import_x402_deps():
             _web3 = _web3_module
         except ImportError as e:
             raise X402ConfigurationError(
-                "x402 dependencies not installed. Run: pip install swarm-provenance-uploader[x402]"
+                f"x402 dependencies not installed. Run: {INSTALL_SIGNING_DEPS}"
             ) from e
     return _eth_account, _web3
 
