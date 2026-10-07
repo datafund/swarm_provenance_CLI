@@ -8,6 +8,7 @@ Supports x402 pay-per-request payments when enabled.
 """
 
 import base64
+import inspect
 import json
 import requests
 import os
@@ -75,8 +76,9 @@ class GatewayClient:
         x402_network: str = "base-sepolia",
         x402_auto_pay: bool = False,
         x402_max_auto_pay_usd: float = 1.00,
-        x402_payment_callback: Optional[Callable[[str, str], bool]] = None,
+        x402_payment_callback: Optional[Callable[..., bool]] = None,
         free_tier: bool = False,
+        x402_on_payment_sent: Optional[Callable[[dict], None]] = None,
     ):
         """
         Initialize the gateway client.
@@ -88,10 +90,20 @@ class GatewayClient:
             x402_private_key: Private key for signing payments
             x402_network: Network for payments ('base-sepolia' or 'base')
             x402_auto_pay: Auto-pay without prompting (up to max amount)
-            x402_max_auto_pay_usd: Maximum auto-pay amount in USD
-            x402_payment_callback: Optional callback for payment confirmation.
-                                   Called with (amount_usd, description) -> bool
+            x402_max_auto_pay_usd: Maximum auto-pay amount in USD. With auto-pay
+                                   and no callback this is a hard cap: a larger
+                                   amount is refused before anything is signed.
+            x402_payment_callback: Optional callback for payment confirmation,
+                                   asked for any amount not auto-paid.
+                                   Called with (amount_usd, description) -> bool;
+                                   a callback that also accepts an `option`
+                                   keyword gets the X402PaymentOption (network,
+                                   payTo, asset) as well.
             free_tier: Send X-Payment-Mode: free header (rate-limited)
+            x402_on_payment_sent: Optional hook called with the payment's details
+                                  (payer, nonce, amount, amount_usd, pay_to,
+                                  network, transaction) once a signed payment has
+                                  been sent and not refused.
         """
         self.base_url = (base_url or os.getenv("PROVENANCE_GATEWAY_URL", self.DEFAULT_URL)).rstrip("/")
         self.api_key = api_key or os.getenv("PROVENANCE_GATEWAY_API_KEY")
@@ -104,6 +116,7 @@ class GatewayClient:
         self._x402_auto_pay = x402_auto_pay
         self._x402_max_auto_pay_usd = x402_max_auto_pay_usd
         self._x402_payment_callback = x402_payment_callback
+        self._x402_on_payment_sent = x402_on_payment_sent
         self._x402_client = None  # Lazy initialization
 
     def _get_x402_client(self):
@@ -196,13 +209,21 @@ class GatewayClient:
         # Check if we should auto-pay or need confirmation
         if not self._should_auto_pay(amount_float):
             if self._x402_payment_callback:
-                description = option.description or f"API request to {option.resource}"
-                if not self._x402_payment_callback(amount_usd, description):
+                if not self._confirm_payment(amount_usd, option):
                     raise PaymentRequiredError(
                         f"Payment of {amount_usd} declined by user",
                         payment_options=[option.model_dump()],
                     )
-            elif not self._x402_auto_pay:
+            elif self._x402_auto_pay:
+                # Above the auto-pay limit and nobody to ask: the limit is a
+                # hard cap, so refuse before anything is signed.
+                raise PaymentRequiredError(
+                    f"Payment of {amount_usd} exceeds the auto-pay limit of "
+                    f"${self._x402_max_auto_pay_usd:.6f}; nothing was signed. "
+                    "Raise the limit or confirm the payment interactively.",
+                    payment_options=[option.model_dump()],
+                )
+            else:
                 # No callback and not auto-pay mode - raise for CLI to handle
                 raise PaymentRequiredError(
                     f"Payment required: {amount_usd}. Use --auto-pay or confirm payment.",
@@ -216,6 +237,29 @@ class GatewayClient:
             print(f"DEBUG: Payment signed, header length: {len(payment_header)}")
 
         return payment_header, amount_usd
+
+    def _confirm_payment(self, amount_usd: str, option) -> bool:
+        """Ask the payment callback, passing the option if it accepts one."""
+        callback = self._x402_payment_callback
+        description = option.description or f"API request to {option.resource}"
+        try:
+            params = inspect.signature(callback).parameters.values()
+            takes_option = any(
+                p.name == "option" or p.kind == inspect.Parameter.VAR_KEYWORD for p in params
+            )
+        except (TypeError, ValueError):
+            takes_option = False
+        if takes_option:
+            return bool(callback(amount_usd, description, option=option))
+        return bool(callback(amount_usd, description))
+
+    def _notify_payment_sent(self, payment: dict) -> None:
+        """Tell the x402_on_payment_sent hook; a failing hook never breaks the request."""
+        if self._x402_on_payment_sent:
+            try:
+                self._x402_on_payment_sent(dict(payment))
+            except Exception:
+                pass
 
     def _parse_payment_response(
         self,
@@ -298,6 +342,7 @@ class GatewayClient:
                 # never sent: an ordinary failure, nothing was charged.
                 raise
             except requests.exceptions.RequestException as e:
+                self._notify_payment_sent(payment)
                 raise PaymentOutcomeUnknownError(
                     f"The paid request did not complete ({type(e).__name__}). "
                     "The payment may have been taken.",
@@ -331,6 +376,8 @@ class GatewayClient:
 
             payment["transaction"] = self._payment_transaction(response, payment_result)
             response.x402_payment = payment
+            if response.status_code != 402:  # a second 402 means it was not accepted
+                self._notify_payment_sent(payment)
             self._raise_for_paid_failure(response, payment)
 
         return response

@@ -174,11 +174,16 @@ swarm-prov-upload --x402 upload --file data.txt
 
 Output:
 ```
-Payment required: $0.05 for stamp purchase
-Confirm payment? [y/N]: y
+Payment required: $0.050000 USDC
+  For:     Stamp purchase
+  Network: base-sepolia
+  Pay to:  0x1234...5678
+  Asset:   USDC 0x036CbD53842c5426634e7929541eC2318f3dCF7e
+Pay now? [y/N]: y
 Processing payment...
-Upload successful: abc123...
 ```
+
+The prompt shows the exact amount (all 6 USDC decimals), the network, the recipient and the token from the gateway's payment request. It defaults to **No**: pressing Enter, or a newline piped into the command, declines. `upload` can ask twice (stamp, then upload); the second prompt shows what was already sent in this command, and the success message prints the total.
 
 ### Auto-pay mode
 
@@ -191,7 +196,12 @@ swarm-prov-upload --x402 --auto-pay --max-pay 1.00 upload --file data.txt
 # Or set in environment
 export X402_AUTO_PAY=true
 export X402_MAX_AUTO_PAY_USD=1.00
+
+# Turn it off for one command even if X402_AUTO_PAY=true
+swarm-prov-upload --x402 --no-auto-pay upload --file data.txt
 ```
+
+The limit is per payment. A payment above it is never signed automatically: the CLI asks instead, and library use without a confirmation callback refuses it before signing. `--no-x402` and `--no-free` likewise override `X402_ENABLED` and `FREE_TIER` for one command.
 
 ## Switching to Mainnet
 

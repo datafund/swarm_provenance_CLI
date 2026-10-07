@@ -340,8 +340,8 @@ Uses python-dotenv for environment configuration:
 - `X402_ENABLED`: Enable x402 payment support (default: false)
 - `X402_PRIVATE_KEY`: Wallet private key for signing payments
 - `X402_NETWORK`: `base-sepolia` (testnet) or `base` (mainnet)
-- `X402_AUTO_PAY`: Enable auto-pay without prompts (default: false)
-- `X402_MAX_AUTO_PAY_USD`: Maximum auto-pay amount per request (default: 1.00)
+- `X402_AUTO_PAY`: Enable auto-pay without prompts (default: false; `--no-auto-pay` overrides it per command)
+- `X402_MAX_AUTO_PAY_USD`: Maximum auto-pay amount per request (default: 1.00). A hard cap: above it the CLI prompts (default No) and library use without a callback refuses before signing
 
 **Chain / Blockchain Configuration**:
 - `CHAIN_ENABLED`: Enable on-chain anchoring (default: false)

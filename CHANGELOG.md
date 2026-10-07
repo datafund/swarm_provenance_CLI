@@ -14,7 +14,14 @@ Payment safety (epic #145).
 - A second 402 after paying raises `PaymentRejectedError` with the gateway's reason (#127)
 - Paid calls (stamp purchase, upload, signed upload, pool acquire, manifest upload) wait 180 s instead of 30–120 s, longer than the gateway's own work after settling (#127)
 
+- The auto-pay limit is a hard cap: with auto-pay on and no confirmation callback, a payment above `x402_max_auto_pay_usd` is refused before signing (it was signed) (#128)
+- The payment prompt defaults to No (`[y/N]`), so Enter or a piped newline no longer pays (#128)
+- Amounts are shown with all 6 USDC decimals ($0.004 showed as "$0.00"); the prompt shows the payment option's network (not the configured one), the `payTo` address and the asset (#128)
+
 ### Added
+- `--no-x402`, `--no-auto-pay` and `--no-free` flags, which override `X402_ENABLED`, `X402_AUTO_PAY` and `FREE_TIER` for one command (#128)
+- A running total of payments sent during a command, shown at the second prompt and after a successful `upload` / `upload-collection` (#128)
+- `GatewayClient(x402_on_payment_sent=...)` hook, and payment callbacks that accept an `option` keyword receive the `X402PaymentOption` (#128)
 - A 402 option whose `extra` advertises a different EIP-712 `name` or `version` than the USDC contract uses is refused before signing, with a message naming the mismatch (#126)
 
 ## [0.8.3] - 2026-03-03

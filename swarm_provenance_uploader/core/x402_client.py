@@ -615,7 +615,8 @@ class X402Client:
             amount: Amount in smallest units (6 decimals).
 
         Returns:
-            Formatted string like "$0.05".
+            Formatted string with all 6 decimals, like "$0.050000". Rounding to
+            cents would show a $0.004 payment as "$0.00".
         """
-        usdc = int(amount) / 1_000_000
-        return f"${usdc:.2f}"
+        raw = int(amount)
+        return f"${raw // 1_000_000}.{raw % 1_000_000:06d}"

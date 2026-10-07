@@ -3,6 +3,9 @@
 import base64
 import json
 import os
+import sys
+from contextlib import contextmanager
+
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -41,6 +44,26 @@ SAMPLE_402_RESPONSE = {
 }
 
 
+@contextmanager
+def _fresh_x402_deps_cache():
+    """Clear x402_client's cached eth-account/web3 so this test's mocks are used.
+
+    The module caches the lazily imported dependencies in globals. If it was
+    imported outside a sys.modules patch, the cache would otherwise keep
+    whatever mock an earlier test installed.
+    """
+    module = sys.modules.get("swarm_provenance_uploader.core.x402_client")
+    if module is None:
+        yield
+        return
+    saved = (module._eth_account, module._web3)
+    module._eth_account = module._web3 = None
+    try:
+        yield
+    finally:
+        module._eth_account, module._web3 = saved
+
+
 @pytest.fixture
 def mock_eth_deps():
     """Mock eth-account and web3 dependencies."""
@@ -72,7 +95,7 @@ def mock_eth_deps():
                 "eth_account.messages": MagicMock(encode_typed_data=MagicMock(return_value=b"typed_data")),
                 "web3": MagicMock(Web3=mock_web3_class),
             },
-        ):
+        ), _fresh_x402_deps_cache():
             yield {
                 "account": mock_account,
                 "account_class": mock_account_class,
@@ -312,7 +335,7 @@ class TestX402ClientBalance:
                     "eth_account.messages": MagicMock(encode_typed_data=MagicMock(return_value=b"typed_data")),
                     "web3": MagicMock(Web3=mock_web3_class),
                 },
-            ):
+            ), _fresh_x402_deps_cache():
                 # Force reimport to get new mocks
                 import importlib
                 import swarm_provenance_uploader.core.x402_client as x402_module
@@ -416,7 +439,7 @@ class TestX402ClientCreatePaymentHeader:
                     "eth_account.messages": MagicMock(encode_typed_data=MagicMock(return_value=b"typed_data")),
                     "web3": MagicMock(Web3=mock_web3_class),
                 },
-            ):
+            ), _fresh_x402_deps_cache():
                 # Force reimport to get new mocks
                 import swarm_provenance_uploader.core.x402_client as x402_module
                 x402_module._eth_account = None
@@ -442,26 +465,27 @@ class TestX402ClientFormatting:
 
         client = X402Client(skip_domain_validation=True)
 
-        assert client.format_amount_usd("50000") == "$0.05"
-        assert client.format_amount_usd("1000000") == "$1.00"
-        assert client.format_amount_usd("10000000") == "$10.00"
+        assert client.format_amount_usd("50000") == "$0.050000"
+        assert client.format_amount_usd("1000000") == "$1.000000"
+        assert client.format_amount_usd("10000000") == "$10.000000"
 
     def test_format_amount_usd_zero(self, mock_eth_deps):
         """Tests formatting zero amount."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
         client = X402Client(skip_domain_validation=True)
-        assert client.format_amount_usd("0") == "$0.00"
+        assert client.format_amount_usd("0") == "$0.000000"
 
     def test_format_amount_usd_small(self, mock_eth_deps):
         """Tests formatting very small amounts."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
         client = X402Client(skip_domain_validation=True)
-        # 1 smallest unit = $0.000001, rounds to $0.00
-        assert client.format_amount_usd("1") == "$0.00"
-        # 100 smallest units = $0.0001, rounds to $0.00
-        assert client.format_amount_usd("100") == "$0.00"
+        # Every smallest unit is shown: rounding to cents would hide the price (#128)
+        assert client.format_amount_usd("1") == "$0.000001"
+        assert client.format_amount_usd("100") == "$0.000100"
+        assert client.format_amount_usd("4000") == "$0.004000"
+        assert client.format_amount_usd("123456789") == "$123.456789"
 
 
 class TestX402ClientCustomRPC:
@@ -542,7 +566,7 @@ class TestX402ClientPrivateKeyFormat:
                     "eth_account.messages": MagicMock(),
                     "web3": MagicMock(Web3=mock_web3_class),
                 },
-            ):
+            ), _fresh_x402_deps_cache():
                 import swarm_provenance_uploader.core.x402_client as x402_module
                 x402_module._eth_account = None
                 x402_module._web3 = None
@@ -585,7 +609,7 @@ class TestX402ClientErrorHandling:
                     "eth_account.messages": MagicMock(),
                     "web3": MagicMock(Web3=mock_web3_class),
                 },
-            ):
+            ), _fresh_x402_deps_cache():
                 import swarm_provenance_uploader.core.x402_client as x402_module
                 x402_module._eth_account = None
                 x402_module._web3 = None

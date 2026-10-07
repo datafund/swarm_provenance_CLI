@@ -62,6 +62,9 @@ _x402_config = {
     "network": config.X402_NETWORK,
 }
 
+# Payments sent during this command (reset per invocation in main())
+_x402_session = {"spent": 0, "payments": 0}
+
 # Global state for chain / blockchain configuration
 _chain_config = {
     "enabled": config.CHAIN_ENABLED,
@@ -112,27 +115,66 @@ def _get_chain_client(verbose: bool = False):
         raise typer.Exit(code=1)
 
 
-def _x402_payment_callback(amount_usd: str, description: str) -> bool:
+def _format_usdc(raw: int) -> str:
+    """Format USDC smallest units with all 6 decimals, e.g. "$0.004000"."""
+    return f"${raw // 1_000_000}.{raw % 1_000_000:06d}"
+
+
+def _x402_payment_callback(amount_usd: str, description: str, option=None) -> bool:
     """
     Callback for x402 payment confirmation prompts.
 
+    Shows what will be signed, read from the selected payment option (network,
+    recipient, token), and defaults to No: a bare Enter or a piped newline
+    does not pay.
+
     Args:
-        amount_usd: Formatted amount string (e.g., "$0.05")
+        amount_usd: Formatted amount string (e.g., "$0.050000")
         description: Description of what the payment is for
+        option: The selected X402PaymentOption, if the client passes it
 
     Returns:
         True if user confirms, False otherwise
     """
+    from .core.x402_client import USDC_CONTRACTS
+
+    network = option.network if option is not None else _x402_config["network"]
     typer.echo("")
     typer.secho(f"Payment required: {amount_usd} USDC", fg=typer.colors.YELLOW, bold=True)
-    typer.echo(f"  For: {description}")
-    typer.echo(f"  Network: {_x402_config['network']}")
+    typer.echo(f"  For:     {description}")
+    typer.echo(f"  Network: {network}")
+    if option is not None:
+        typer.echo(f"  Pay to:  {option.payTo}")
+        typer.echo(f"  Asset:   USDC {option.asset or USDC_CONTRACTS.get(network, '?')}")
+    if _x402_session["payments"]:
+        typer.echo(
+            f"  Already sent in this command: {_format_usdc(_x402_session['spent'])} USDC "
+            f"({_x402_session['payments']} payment(s))"
+        )
 
     # Prompt for confirmation
-    confirm = typer.confirm("Pay now?", default=True)
+    confirm = typer.confirm("Pay now?", default=False)
     if confirm:
         typer.echo("Processing payment...")
     return confirm
+
+
+def _record_x402_payment(payment: dict):
+    """x402_on_payment_sent hook: add a sent payment to this command's total."""
+    try:
+        _x402_session["spent"] += int(payment.get("amount") or 0)
+    except (TypeError, ValueError):
+        pass
+    _x402_session["payments"] += 1
+
+
+def _echo_x402_spent():
+    """Print the total sent in this command, if anything was paid."""
+    if _x402_session["payments"]:
+        typer.echo(
+            f"Payments sent: {_format_usdc(_x402_session['spent'])} USDC "
+            f"({_x402_session['payments']} payment(s))"
+        )
 
 
 _X402_EXPLORERS = {
@@ -222,6 +264,7 @@ def _get_gateway_client_with_x402(gateway_url: str, verbose: bool = False) -> Ga
             x402_auto_pay=_x402_config["auto_pay"],
             x402_max_auto_pay_usd=_x402_config["max_auto_pay_usd"],
             x402_payment_callback=_x402_payment_callback,
+            x402_on_payment_sent=_record_x402_payment,
             free_tier=_backend_config["free_tier"],
         )
     else:
@@ -580,6 +623,7 @@ def upload(
     typer.secho(f"\nSUCCESS! Upload complete.", fg=typer.colors.GREEN, bold=True)
     typer.echo("Swarm Reference Hash:")
     typer.secho(f"{swarm_ref_hash}", fg=typer.colors.CYAN)
+    _echo_x402_spent()
 
     # Display signature info if signing was used
     if use_signing and signed_document:
@@ -1014,6 +1058,7 @@ def upload_collection(
         for fi in file_infos:
             typer.echo(f"  {fi['path']} ({fi['size']} bytes)")
         typer.echo(f"\nTotal size: {total_size} bytes")
+        _echo_x402_spent()
         typer.echo(f"Collection hash: {collection_hash}")
         if provenance_standard:
             typer.echo(f"Provenance standard: {provenance_standard}")
@@ -2715,12 +2760,12 @@ def main(
         help=f"Gateway URL (when backend=gateway). [default: {config.GATEWAY_URL}]"
     )] = None,
     x402: Annotated[Optional[bool], typer.Option(
-        "--x402",
-        help="Enable x402 pay-per-request payments (USDC on Base chain)."
+        "--x402/--no-x402",
+        help="Enable x402 pay-per-request payments (USDC on Base chain). --no-x402 overrides X402_ENABLED."
     )] = None,
     auto_pay: Annotated[Optional[bool], typer.Option(
-        "--auto-pay",
-        help="Auto-pay without prompting (up to --max-pay limit)."
+        "--auto-pay/--no-auto-pay",
+        help="Auto-pay without prompting (up to --max-pay limit). --no-auto-pay overrides X402_AUTO_PAY."
     )] = None,
     max_pay: Annotated[Optional[float], typer.Option(
         "--max-pay",
@@ -2739,8 +2784,8 @@ def main(
         help="Custom RPC URL for blockchain connection."
     )] = None,
     free: Annotated[Optional[bool], typer.Option(
-        "--free",
-        help="Use gateway free tier (X-Payment-Mode: free, rate-limited)."
+        "--free/--no-free",
+        help="Use gateway free tier (X-Payment-Mode: free, rate-limited). --no-free overrides FREE_TIER."
     )] = None,
 ):
     """
@@ -2754,6 +2799,8 @@ def main(
 
     For testing/development, use --free for rate-limited free tier access.
     """
+    _x402_session.update(spent=0, payments=0)
+
     if backend:
         if backend not in ("gateway", "local"):
             typer.secho(f"ERROR: Invalid backend '{backend}'. Use 'gateway' or 'local'.", fg=typer.colors.RED, err=True)

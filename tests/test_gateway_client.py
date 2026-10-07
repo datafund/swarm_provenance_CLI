@@ -1531,3 +1531,176 @@ class TestPaidRequestTimeouts:
         requests_mock.post(f"{GW}/api/v1/data/manifest", json={"reference": DUMMY_SWARM_REF})
         GatewayClient(base_url=GW).upload_manifest(str(tar), DUMMY_STAMP)
         self._assert_paid_timeout(requests_mock)
+
+
+# --- Hard auto-pay cap and confirmation (#128) ---
+
+def _option(amount="50000", network="base-sepolia"):
+    from swarm_provenance_uploader.models import X402PaymentOption
+
+    return X402PaymentOption(
+        scheme="exact", network=network, maxAmountRequired=amount, resource="/api/v1/stamps/",
+        description="Stamp purchase", payTo=PAY_TO,
+        asset="0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    )
+
+
+@pytest.fixture
+def mock_x402():
+    """A stand-in X402Client offering one option; signing is recorded, never real."""
+    from unittest.mock import MagicMock
+
+    x402 = MagicMock()
+    x402.parse_402_response.return_value = MagicMock()
+    x402.select_payment_option.return_value = _option()
+    x402.format_amount_usd.side_effect = lambda a: f"${int(a) // 1_000_000}.{int(a) % 1_000_000:06d}"
+    x402.sign_payment.return_value = _signed_header()
+    return x402
+
+
+def _client_with(mock_x402, **kwargs):
+    from unittest.mock import patch
+
+    client = GatewayClient(base_url=GW, x402_enabled=True, **kwargs)
+    patcher = patch.object(client, "_get_x402_client", return_value=mock_x402)
+    patcher.start()
+    return client, patcher
+
+
+class TestAutoPayHardCap:
+    def test_above_cap_without_callback_refuses_before_signing(self, mock_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        mock_x402.select_payment_option.return_value = _option(amount="5000000")  # $5
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_max_auto_pay_usd=1.00)
+        try:
+            with pytest.raises(PaymentRequiredError, match="exceeds the auto-pay limit"):
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+        mock_x402.sign_payment.assert_not_called()
+        assert requests_mock.call_count == 1  # never retried with a payment
+
+    def test_just_above_cap_refused(self, mock_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        mock_x402.select_payment_option.return_value = _option(amount="1000001")  # $1.000001
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_max_auto_pay_usd=1.00)
+        try:
+            with pytest.raises(PaymentRequiredError):
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+        mock_x402.sign_payment.assert_not_called()
+
+    def test_at_cap_auto_pays(self, mock_x402, requests_mock):
+        mock_x402.select_payment_option.return_value = _option(amount="1000000")  # exactly $1
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_max_auto_pay_usd=1.00)
+        try:
+            assert client.purchase_stamp() == DUMMY_STAMP
+        finally:
+            patcher.stop()
+        mock_x402.sign_payment.assert_called_once()
+
+    def test_above_cap_with_callback_asks(self, mock_x402, requests_mock):
+        from unittest.mock import MagicMock
+
+        mock_x402.select_payment_option.return_value = _option(amount="5000000")
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        callback = MagicMock(return_value=True)
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_max_auto_pay_usd=1.00,
+                                       x402_payment_callback=callback)
+        try:
+            assert client.purchase_stamp() == DUMMY_STAMP
+        finally:
+            patcher.stop()
+        callback.assert_called_once()
+
+
+class TestPaymentCallbackOption:
+    def test_two_argument_callback_still_supported(self, mock_x402, requests_mock):
+        calls = []
+
+        def legacy(amount_usd, description):
+            calls.append((amount_usd, description))
+            return True
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        client, patcher = _client_with(mock_x402, x402_payment_callback=legacy)
+        try:
+            client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert calls == [("$0.050000", "Stamp purchase")]
+
+    def test_callback_accepting_option_receives_it(self, mock_x402, requests_mock):
+        seen = {}
+
+        def confirm(amount_usd, description, option=None):
+            seen["option"] = option
+            return True
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        client, patcher = _client_with(mock_x402, x402_payment_callback=confirm)
+        try:
+            client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert seen["option"].payTo == PAY_TO
+        assert seen["option"].network == "base-sepolia"
+
+
+class TestPaymentSentHook:
+    def test_hook_called_for_sent_payment(self, mock_x402, requests_mock):
+        sent = []
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 201, "json": {"batchID": DUMMY_STAMP}, "headers": {"X-Payment-Transaction": TX_HASH},
+        }])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_on_payment_sent=sent.append)
+        try:
+            client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert len(sent) == 1
+        assert sent[0]["amount"] == "50000"
+        assert sent[0]["transaction"] == TX_HASH
+
+    def test_hook_called_when_outcome_unknown(self, mock_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        sent = []
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"exc": requests.exceptions.ReadTimeout}])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_on_payment_sent=sent.append)
+        try:
+            with pytest.raises(PaymentOutcomeUnknownError):
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert len(sent) == 1
+
+    def test_hook_not_called_when_payment_rejected(self, mock_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRejectedError
+
+        sent = []
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, PAYMENT_REQUIRED])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_on_payment_sent=sent.append)
+        try:
+            with pytest.raises(PaymentRejectedError):
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert sent == []
+
+    def test_failing_hook_does_not_break_request(self, mock_x402, requests_mock):
+        def boom(payment):
+            raise RuntimeError("hook bug")
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_on_payment_sent=boom)
+        try:
+            assert client.purchase_stamp() == DUMMY_STAMP
+        finally:
+            patcher.stop()

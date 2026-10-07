@@ -4730,3 +4730,119 @@ class TestPaymentOutcomeReporting:
         assert result.exit_code == 1
         assert "the collection upload did not complete" in result.output
         assert self.PAYMENT["nonce"] in result.output
+
+
+# --- Payment prompt and flags (#128) ---
+
+def _invoke_prompt(user_input, option=None, amount_usd="$0.004000"):
+    """Run the CLI payment prompt in a throwaway Typer app; exit 0 = paid, 3 = declined."""
+    from swarm_provenance_uploader.cli import _x402_payment_callback
+
+    prompt_app = typer.Typer()
+
+    @prompt_app.command()
+    def ask():
+        raise typer.Exit(0 if _x402_payment_callback(amount_usd, "Stamp purchase", option=option) else 3)
+
+    return runner.invoke(prompt_app, [], input=user_input)
+
+
+def _payment_option(network="base"):
+    from swarm_provenance_uploader.models import X402PaymentOption
+
+    return X402PaymentOption(
+        scheme="exact", network=network, maxAmountRequired="4000", resource="/api/v1/stamps/",
+        payTo="0x1234567890AbcdEF1234567890aBcDeF12345678",
+        asset="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    )
+
+
+class TestPaymentPrompt:
+    def test_enter_declines(self):
+        result = _invoke_prompt("\n", option=_payment_option())
+        assert result.exit_code == 3
+        assert "[y/N]" in result.output
+
+    def test_piped_newline_declines(self):
+        assert _invoke_prompt("\n\n", option=_payment_option()).exit_code == 3
+
+    def test_yes_pays(self):
+        result = _invoke_prompt("y\n", option=_payment_option())
+        assert result.exit_code == 0
+        assert "Processing payment" in result.output
+
+    def test_shows_option_network_pay_to_and_asset(self):
+        _x402_config["network"] = "base-sepolia"
+        result = _invoke_prompt("n\n", option=_payment_option(network="base"))
+        assert "$0.004000 USDC" in result.output
+        assert "Network: base\n" in result.output
+        assert "0x1234567890AbcdEF1234567890aBcDeF12345678" in result.output
+        assert "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" in result.output
+
+    def test_shows_running_total(self):
+        from swarm_provenance_uploader.cli import _record_x402_payment, _x402_session
+
+        _x402_session.update(spent=0, payments=0)
+        _record_x402_payment({"amount": "50000"})
+        try:
+            result = _invoke_prompt("n\n", option=_payment_option())
+        finally:
+            _x402_session.update(spent=0, payments=0)
+        assert "Already sent in this command: $0.050000 USDC (1 payment(s))" in result.output
+
+
+class TestPaymentFlagOverrides:
+    """--no-* flags must override settings that came from the environment."""
+
+    def test_no_auto_pay_overrides_env(self):
+        _x402_config["auto_pay"] = True  # as if X402_AUTO_PAY=true
+        result = runner.invoke(app, ["--no-auto-pay", "x402", "status"])
+        assert result.exit_code == 0
+        assert _x402_config["auto_pay"] is False
+
+    def test_no_x402_overrides_env(self):
+        _x402_config["enabled"] = True
+        result = runner.invoke(app, ["--no-x402", "x402", "status"])
+        assert result.exit_code == 0
+        assert _x402_config["enabled"] is False
+
+    def test_no_free_overrides_env(self):
+        _backend_config["free_tier"] = True
+        result = runner.invoke(app, ["--no-free", "x402", "status"])
+        assert result.exit_code == 0
+        assert _backend_config["free_tier"] is False
+
+    def test_session_total_reset_per_command(self):
+        from swarm_provenance_uploader.cli import _x402_session
+
+        _x402_session.update(spent=123, payments=2)
+        runner.invoke(app, ["x402", "status"])
+        assert _x402_session == {"spent": 0, "payments": 0}
+
+
+class TestUploadPaymentTotal:
+    def test_upload_reports_total_of_both_payments(self, mocker):
+        from swarm_provenance_uploader.cli import _record_x402_payment
+
+        def purchase(**kwargs):
+            _record_x402_payment({"amount": "50000"})
+            return DUMMY_STAMP
+
+        def upload(*args, **kwargs):
+            _record_x402_payment({"amount": "10000"})
+            return DUMMY_SWARM_REF
+
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.side_effect = purchase
+        mock_client.upload_data.side_effect = upload
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=DUMMY_STAMP, usable=True, exists=True, depth=17, amount="1",
+            bucketDepth=16, immutableFlag=False, batchTTL=3600,
+        )
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["upload", "--file", "d.txt"])
+        assert result.exit_code == 0, result.output
+        assert "Payments sent: $0.060000 USDC (2 payment(s))" in result.output
