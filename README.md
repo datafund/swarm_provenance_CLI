@@ -179,6 +179,7 @@ swarm-prov-upload x402 info
 | `X402_NETWORK` | `base-sepolia` (testnet) or `base` (mainnet) | `base-sepolia` |
 | `X402_AUTO_PAY` | Auto-pay without prompts | `false` |
 | `X402_MAX_AUTO_PAY_USD` | Maximum auto-pay amount per request | `1.00` |
+| `X402_EXPECTED_PAY_TO` | Only pay this recipient address (optional) | not set |
 | `X402_RPC_URL` | Custom RPC URL (optional) | Uses default |
 
 ### Global Flags
@@ -190,6 +191,7 @@ swarm-prov-upload x402 info
 | `--auto-pay` / `--no-auto-pay` | Enable/disable auto-pay |
 | `--max-pay FLOAT` | Maximum auto-pay amount in USD |
 | `--x402-network TEXT` | Network: `base-sepolia` or `base` |
+| `--idempotency-key TEXT` | Idempotency-Key for this command's paid requests; pass the key printed by a failed run to repeat it without paying twice (on a gateway that supports it) |
 
 ### Testnet Setup
 
@@ -523,6 +525,9 @@ You can also use any Swarm gateway or a local Bee node to access the files.
 ```bash
 # List all stamps
 swarm-prov-upload stamps list
+
+# Full IDs (to pass to --stamp-id) and labels; only the stamps your x402 wallet bought
+swarm-prov-upload stamps list --full --wallet 0xYourPayerAddress
 
 # Get stamp details
 swarm-prov-upload stamps info <stamp_id>

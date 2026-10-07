@@ -1,7 +1,9 @@
 import json
+import re
 import pytest
 import typer
 from typer.testing import CliRunner
+from swarm_provenance_uploader import exceptions
 from swarm_provenance_uploader.cli import app, _backend_config, _x402_config, _chain_config
 from swarm_provenance_uploader.models import (
     StampDetails,
@@ -31,6 +33,8 @@ def reset_backend_config():
     _x402_config["auto_pay"] = False
     _x402_config["max_auto_pay_usd"] = 1.00
     _x402_config["network"] = "base-sepolia"
+    _x402_config["expected_pay_to"] = None
+    _backend_config.pop("_http_warning_shown", None)
     _chain_config["enabled"] = False
     _chain_config["chain"] = "base-sepolia"
     _chain_config["rpc_url"] = None
@@ -48,6 +52,8 @@ def reset_backend_config():
     _x402_config["auto_pay"] = False
     _x402_config["max_auto_pay_usd"] = 1.00
     _x402_config["network"] = "base-sepolia"
+    _x402_config["expected_pay_to"] = None
+    _backend_config.pop("_http_warning_shown", None)
     _chain_config["enabled"] = False
     _chain_config["chain"] = "base-sepolia"
     _chain_config["rpc_url"] = None
@@ -4643,3 +4649,673 @@ class TestChainInsufficientFunds:
 
         assert result.exit_code == 0
         assert "alchemy.com/faucets/base-sepolia" in result.output
+
+# --- Payment outcome reporting (#127) ---
+
+class TestPaymentOutcomeReporting:
+    """A payment that may have been taken is reported with its identifiers, without -v."""
+
+    PAYMENT = dict(
+        payer="0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00",
+        nonce="0x" + "ab" * 32,
+        amount="50000",
+        amount_usd="$0.050000",
+        pay_to="0x1234567890AbcdEF1234567890aBcDeF12345678",
+        network="base-sepolia",
+    )
+    TX = "0x" + "cd" * 32
+
+    def _upload(self, mocker, **client_behaviour):
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.return_value = DUMMY_STAMP
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=DUMMY_STAMP, usable=True, exists=True, depth=17, amount="1",
+            bucketDepth=16, immutableFlag=False, batchTTL=3600,
+        )
+        for name, effect in client_behaviour.items():
+            getattr(mock_client, name).side_effect = effect
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        mocker.patch("swarm_provenance_uploader.cli.time.sleep")
+        with runner.isolated_filesystem():
+            with open("data.txt", "w") as f:
+                f.write("data")
+            return runner.invoke(app, ["upload", "--file", "data.txt"])
+
+    def test_unknown_outcome_on_purchase(self, mocker):
+        err = exceptions.PaymentOutcomeUnknownError("The paid request did not complete (ReadTimeout).", **self.PAYMENT)
+        result = self._upload(mocker, purchase_stamp=err)
+
+        assert result.exit_code == 1
+        assert "may have been taken" in result.output
+        assert self.PAYMENT["nonce"] in result.output
+        assert self.PAYMENT["payer"] in result.output
+        assert "$0.050000 USDC" in result.output
+        assert "Do not re-run" in result.output
+        assert f"sepolia.basescan.org/address/{self.PAYMENT['payer']}" in result.output
+        assert "Valid until" not in result.output  # no validBefore known in this test
+        assert "Failed purchasing stamp" not in result.output
+
+    def test_settled_not_delivered_on_upload_shows_transaction(self, mocker):
+        err = exceptions.PaymentSettledNotDeliveredError(
+            "The payment was collected but the request failed (HTTP 500).",
+            transaction=self.TX, **self.PAYMENT,
+        )
+        result = self._upload(mocker, upload_data=err)
+
+        assert result.exit_code == 1
+        assert "Payment was taken, but the upload failed" in result.output
+        assert self.TX in result.output
+        assert f"sepolia.basescan.org/tx/{self.TX}" in result.output
+        assert "Contact the gateway operator" in result.output
+
+    def test_purchase_pending(self, mocker):
+        err = exceptions.StampPurchasePendingError(
+            "Payment received, but the Bee node did not confirm the purchase in time.",
+            label="x402-abc", depth=17,
+            lookup="GET /api/v1/stamps/?wallet=0x742d. Retrying with the same Idempotency-Key returns the batch.",
+            transaction=self.TX, **self.PAYMENT,
+        )
+        result = self._upload(mocker, purchase_stamp=err)
+
+        assert result.exit_code == 1
+        assert "not confirmed yet" in result.output
+        assert "x402-abc" in result.output
+        assert "Do not buy another one" in result.output
+        assert f"stamps list --wallet {self.PAYMENT['payer']} --full" in result.output
+        assert "Idempotency-Key" not in result.output  # the gateway's hint does not apply to the CLI
+
+    def test_upload_collection_unknown_outcome(self, mocker, tmp_path):
+        (tmp_path / "a.txt").write_text("a")
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.return_value = DUMMY_STAMP
+        mock_client.upload_manifest.side_effect = exceptions.PaymentOutcomeUnknownError(
+            "The paid request failed with HTTP 502.", status_code=502, **self.PAYMENT,
+        )
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+
+        result = runner.invoke(app, ["upload-collection", str(tmp_path)])
+
+        assert result.exit_code == 1
+        assert "the collection upload did not complete" in result.output
+        assert self.PAYMENT["nonce"] in result.output
+
+
+# --- Payment prompt and flags (#128) ---
+
+def _invoke_prompt(user_input, option=None, amount_usd="$0.004000"):
+    """Run the CLI payment prompt in a throwaway Typer app; exit 0 = paid, 3 = declined."""
+    from swarm_provenance_uploader.cli import _x402_payment_callback
+
+    prompt_app = typer.Typer()
+
+    @prompt_app.command()
+    def ask():
+        raise typer.Exit(0 if _x402_payment_callback(amount_usd, "Stamp purchase", option=option) else 3)
+
+    return runner.invoke(prompt_app, [], input=user_input)
+
+
+def _payment_option(network="base"):
+    from swarm_provenance_uploader.models import X402PaymentOption
+
+    return X402PaymentOption(
+        scheme="exact", network=network, maxAmountRequired="4000", resource="/api/v1/stamps/",
+        payTo="0x1234567890AbcdEF1234567890aBcDeF12345678",
+        asset="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    )
+
+
+class TestPaymentPrompt:
+    def test_enter_declines(self):
+        result = _invoke_prompt("\n", option=_payment_option())
+        assert result.exit_code == 3
+        assert "[y/N]" in result.output
+
+    def test_piped_newline_declines(self):
+        assert _invoke_prompt("\n\n", option=_payment_option()).exit_code == 3
+
+    def test_yes_pays(self):
+        result = _invoke_prompt("y\n", option=_payment_option())
+        assert result.exit_code == 0
+        assert "Processing payment" in result.output
+
+    def test_shows_option_network_pay_to_and_asset(self):
+        _x402_config["network"] = "base-sepolia"
+        result = _invoke_prompt("n\n", option=_payment_option(network="base"))
+        assert "$0.004000 USDC" in result.output
+        assert "Network: base\n" in result.output
+        assert "0x1234567890AbcdEF1234567890aBcDeF12345678" in result.output
+        assert "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" in result.output
+
+    def test_shows_running_total(self):
+        from swarm_provenance_uploader.cli import _record_x402_payment, _x402_session
+
+        _x402_session.update(spent=0, payments=0, reported=False)
+        _record_x402_payment({"amount": "50000"})
+        try:
+            result = _invoke_prompt("n\n", option=_payment_option())
+        finally:
+            _x402_session.update(spent=0, payments=0, reported=False)
+        assert "Already sent in this command: $0.050000 USDC (1 payment(s))" in result.output
+
+
+class TestPaymentFlagOverrides:
+    """--no-* flags must override settings that came from the environment."""
+
+    def test_no_auto_pay_overrides_env(self):
+        _x402_config["auto_pay"] = True  # as if X402_AUTO_PAY=true
+        result = runner.invoke(app, ["--no-auto-pay", "x402", "status"])
+        assert result.exit_code == 0
+        assert _x402_config["auto_pay"] is False
+
+    def test_no_x402_overrides_env(self):
+        _x402_config["enabled"] = True
+        result = runner.invoke(app, ["--no-x402", "x402", "status"])
+        assert result.exit_code == 0
+        assert _x402_config["enabled"] is False
+
+    def test_no_free_overrides_env(self):
+        _backend_config["free_tier"] = True
+        result = runner.invoke(app, ["--no-free", "x402", "status"])
+        assert result.exit_code == 0
+        assert _backend_config["free_tier"] is False
+
+    def test_session_total_reset_per_command(self):
+        from swarm_provenance_uploader.cli import _x402_session
+
+        _x402_session.update(spent=123, payments=2, reported=True)
+        runner.invoke(app, ["x402", "status"])
+        assert _x402_session == {"spent": 0, "payments": 0, "reported": False,
+                                 "idempotency_key": None, "idempotency_key_given": False}
+
+
+class TestUploadPaymentTotal:
+    def test_upload_reports_total_of_both_payments(self, mocker):
+        from swarm_provenance_uploader.cli import _record_x402_payment
+
+        def purchase(**kwargs):
+            _record_x402_payment({"amount": "50000"})
+            return DUMMY_STAMP
+
+        def upload(*args, **kwargs):
+            _record_x402_payment({"amount": "10000"})
+            return DUMMY_SWARM_REF
+
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.side_effect = purchase
+        mock_client.upload_data.side_effect = upload
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=DUMMY_STAMP, usable=True, exists=True, depth=17, amount="1",
+            bucketDepth=16, immutableFlag=False, batchTTL=3600,
+        )
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["upload", "--file", "d.txt"])
+        assert result.exit_code == 0, result.output
+        assert "Payments sent: $0.060000 USDC (2 payment(s))" in result.output
+
+
+# --- Payment request presentation (#129) ---
+
+class TestPaymentRequestPresentation:
+    def test_http_gateway_warning_with_x402(self, mocker):
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        from swarm_provenance_uploader.cli import _get_gateway_client_with_x402
+
+        _x402_config["enabled"] = True
+        warn_app = typer.Typer()
+
+        @warn_app.command()
+        def go():
+            _get_gateway_client_with_x402("http://gateway.example.com")
+            _get_gateway_client_with_x402("http://gateway.example.com")
+
+        result = runner.invoke(warn_app, [])
+        assert result.output.count("x402 payments over plain http") == 1
+
+    def test_no_http_warning_for_https(self, mocker):
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        from swarm_provenance_uploader.cli import _get_gateway_client_with_x402
+
+        _x402_config["enabled"] = True
+        warn_app = typer.Typer()
+
+        @warn_app.command()
+        def go():
+            _get_gateway_client_with_x402("https://gateway.example.com")
+
+        assert "plain http" not in runner.invoke(warn_app, []).output
+
+    def test_expected_pay_to_passed_to_client(self, mocker):
+        constructor = mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        from swarm_provenance_uploader.cli import _get_gateway_client_with_x402
+
+        _x402_config["enabled"] = True
+        _x402_config["expected_pay_to"] = "0x" + "2" * 40
+        _get_gateway_client_with_x402("https://gateway.example.com")
+        assert constructor.call_args.kwargs["x402_expected_pay_to"] == "0x" + "2" * 40
+
+    def test_status_shows_pay_to_pin(self):
+        _x402_config["expected_pay_to"] = "0x" + "2" * 40
+        result = runner.invoke(app, ["x402", "status"])
+        assert "Pay-to pin:   0x" + "2" * 40 in result.output
+
+
+class TestPaymentOutcomeExpiry:
+    def test_unknown_outcome_shows_authorization_expiry(self, mocker):
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.side_effect = exceptions.PaymentOutcomeUnknownError(
+            "The paid request did not complete (ReadTimeout).",
+            payer="0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00", nonce="0x" + "ab" * 32,
+            network="base-sepolia", valid_before=1_900_000_000,
+        )
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["upload", "--file", "d.txt"])
+        assert result.exit_code == 1
+        assert re.search(r"Valid until:\s+2030-03-17 17:46:40 UTC", result.output)
+        assert "If no such transfer has appeared by then" in result.output
+
+    def test_pool_acquire_unknown_outcome(self, mocker):
+        mock_client = mocker.MagicMock()
+        mock_client.get_pool_available_count.return_value = 3
+        mock_client.acquire_stamp_from_pool.side_effect = exceptions.PaymentOutcomeUnknownError(
+            "The paid request failed with HTTP 502.", nonce="0x" + "ab" * 32, network="base-sepolia",
+        )
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["upload", "--file", "d.txt", "--usePool"])
+        assert result.exit_code == 1
+        assert "the pool stamp acquisition did not complete" in result.output
+        assert "0x" + "ab" * 32 in result.output
+
+
+class TestPaymentPromptReviewCases:
+    """Cases from the #128 review."""
+
+    def test_no_stdin_declines_with_message(self, mocker):
+        import click
+
+        # A closed stdin makes click's confirm raise Abort (CliRunner feeds "" instead)
+        mocker.patch("swarm_provenance_uploader.cli.typer.confirm", side_effect=click.exceptions.Abort())
+        result = _invoke_prompt("", option=_payment_option())
+        assert result.exit_code == 3
+        assert "no input" in result.output
+
+    def test_decline_message_when_x402_enabled(self, mocker):
+        _x402_config["enabled"] = True
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.side_effect = exceptions.PaymentRequiredError("Payment of $0.050000 declined by user")
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["upload", "--file", "d.txt"])
+        assert result.exit_code == 1
+        assert "Payment not made: Payment of $0.050000 declined by user" in result.output
+        assert "Use --x402 to enable" not in result.output
+
+    def test_total_printed_when_command_fails_after_paying(self, mocker):
+        from swarm_provenance_uploader.cli import _record_x402_payment
+
+        def purchase(**kwargs):
+            _record_x402_payment({"amount": "50000"})
+            return DUMMY_STAMP
+
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.side_effect = purchase
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=DUMMY_STAMP, usable=True, exists=True, depth=17, amount="1",
+            bucketDepth=16, immutableFlag=False, batchTTL=3600,
+        )
+        mock_client.upload_data.side_effect = exceptions.PaymentRequiredError("declined")
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["upload", "--file", "d.txt"])
+        assert result.exit_code == 1
+        assert result.output.count("Payments sent: $0.050000 USDC (1 payment(s))") == 1
+
+    def test_flags_absent_keep_env_values(self):
+        _x402_config.update(enabled=True, auto_pay=True)
+        _backend_config["free_tier"] = True
+        assert runner.invoke(app, ["x402", "status"]).exit_code == 0
+        assert _x402_config["enabled"] is True
+        assert _x402_config["auto_pay"] is True
+        assert _backend_config["free_tier"] is True
+
+    def test_help_does_not_claim_flag_defaults(self):
+        result = runner.invoke(app, ["--help"])
+        assert "default: no-auto-pay" not in result.output
+        assert "default: no-x402" not in result.output
+
+    def test_status_shows_exact_cap(self):
+        _x402_config["max_auto_pay_usd"] = 0.004
+        assert "Max auto-pay: $0.004000" in runner.invoke(app, ["x402", "status"]).output
+
+
+class TestPayToPinStatus:
+    def test_status_warns_on_invalid_pin(self):
+        _x402_config["expected_pay_to"] = "operator.eth"
+        result = runner.invoke(app, ["x402", "status"])
+        assert "is not an address" in result.output
+
+
+# --- Full stamp IDs and reuse hints (#130) ---
+
+class TestStampIdVisibility:
+    STAMP = "c0ffee" + "ab" * 29
+
+    def _client(self, mocker, usable=True):
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.return_value = self.STAMP
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=self.STAMP, usable=usable, exists=True, depth=17, amount="1",
+            bucketDepth=16, immutableFlag=False, batchTTL=3600,
+        )
+        mock_client.upload_data.return_value = DUMMY_SWARM_REF
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        mocker.patch("swarm_provenance_uploader.cli.time.sleep")
+        return mock_client
+
+    def _upload(self, *extra):
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            return runner.invoke(app, ["upload", "--file", "d.txt", *extra])
+
+    def test_full_id_printed_after_purchase_without_verbose(self, mocker):
+        self._client(mocker)
+        result = self._upload()
+        assert result.exit_code == 0, result.output
+        assert f"Postage stamp purchased (ID: {self.STAMP})" in result.output
+        assert "can be reused" not in result.output  # used: no hint on success
+
+    def test_upload_failure_after_purchase_repeats_id_with_hint(self, mocker):
+        client = self._client(mocker)
+        client.upload_data.side_effect = ConnectionError("Failed to upload data: 503")
+        result = self._upload()
+        assert result.exit_code == 1
+        assert "The stamp bought for this command can be reused" in result.output
+        assert f"add --stamp-id {self.STAMP}" in result.output
+
+    def test_unknown_payment_outcome_on_upload_still_gives_stamp_hint(self, mocker):
+        client = self._client(mocker)
+        client.upload_data.side_effect = exceptions.PaymentOutcomeUnknownError("timed out")
+        result = self._upload()
+        assert result.exit_code == 1
+        assert "may have been taken" in result.output
+        assert f"--stamp-id {self.STAMP}" in result.output
+
+    def test_stamp_never_usable_gives_hint(self, mocker):
+        self._client(mocker, usable=False)
+        result = self._upload("--stamp-retries", "2", "--stamp-interval", "0")
+        assert result.exit_code == 1
+        assert f"--stamp-id {self.STAMP}" in result.output
+
+    def test_pool_stamp_failure_gives_hint(self, mocker):
+        client = self._client(mocker)
+        client.get_pool_available_count.return_value = 1
+        client.acquire_stamp_from_pool.return_value = mocker.MagicMock(
+            batch_id=self.STAMP, depth=17, size_name="small", fallback_used=False,
+        )
+        client.upload_data.side_effect = ConnectionError("nope")
+        result = self._upload("--usePool")
+        assert result.exit_code == 1
+        assert f"Stamp acquired from pool (ID: {self.STAMP})" in result.output
+        assert "acquired from the pool for this command" in result.output
+
+    def test_existing_stamp_failure_gives_no_hint(self, mocker):
+        client = self._client(mocker)
+        client.upload_data.side_effect = ConnectionError("nope")
+        result = self._upload("--stamp-id", self.STAMP)
+        assert result.exit_code == 1
+        assert f"Using existing stamp: {self.STAMP}" in result.output
+        assert "can be reused" not in result.output
+
+    def test_collection_failure_after_purchase_gives_hint(self, mocker, tmp_path):
+        (tmp_path / "a.txt").write_text("a")
+        client = self._client(mocker)
+        client.upload_manifest.side_effect = ConnectionError("nope")
+        result = runner.invoke(app, ["upload-collection", str(tmp_path)])
+        assert result.exit_code == 1
+        assert f"Postage stamp purchased (ID: {self.STAMP})" in result.output
+        assert f"--stamp-id {self.STAMP}" in result.output
+
+    def test_hint_not_carried_into_next_command(self):
+        from swarm_provenance_uploader.cli import _unused_stamp
+
+        _unused_stamp.update(id=self.STAMP, how="bought")  # left over from an earlier command
+        result = runner.invoke(app, ["x402", "status"])
+        assert "can be reused" not in result.output
+
+    def test_hint_goes_to_stderr(self, mocker):
+        client = self._client(mocker)
+        client.upload_data.side_effect = ConnectionError("nope")
+        split = CliRunner(mix_stderr=False)
+        with split.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = split.invoke(app, ["upload", "--file", "d.txt"])
+        assert f"add --stamp-id {self.STAMP}" in result.stderr
+        assert "can be reused" not in result.stdout
+
+    def test_hint_after_unknown_outcome_does_not_say_retry_now(self, mocker):
+        client = self._client(mocker)
+        client.upload_data.side_effect = exceptions.PaymentOutcomeUnknownError("timed out")
+        result = self._upload()
+        assert "If you run the command again, add --stamp-id" in result.output
+        assert "To retry without buying another" not in result.output
+
+    def test_local_backend_purchase_gives_hint(self, mocker):
+        mocker.patch("swarm_provenance_uploader.cli.swarm_client.purchase_postage_stamp", return_value=self.STAMP)
+        mocker.patch("swarm_provenance_uploader.cli.swarm_client.get_stamp_info",
+                     return_value={"exists": True, "usable": True, "batchTTL": 3600})
+        mocker.patch("swarm_provenance_uploader.cli.swarm_client.upload_data", side_effect=ConnectionError("nope"))
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--backend", "local", "upload", "--file", "d.txt"])
+        assert result.exit_code == 1
+        assert f"add --stamp-id {self.STAMP}" in result.output
+
+    def test_flags_ignored_with_stamp_id_are_named(self, mocker):
+        self._client(mocker)
+        result = self._upload("--stamp-id", self.STAMP, "--usePool", "--size", "small")
+        assert "--usePool, --size ignored with --stamp-id" in result.output
+
+
+class TestStampsListFull:
+    STAMP = "c0ffee" + "ab" * 29
+
+    def _list(self, mocker, *args, label="paid-1a2b"):
+        client = mocker.MagicMock()
+        client.list_stamps.return_value = StampListResponse(stamps=[StampDetails(
+            batchID=self.STAMP, usable=True, depth=17, amount="1", bucketDepth=16,
+            immutableFlag=False, batchTTL=86400, utilization=0, label=label,
+        )], total_count=1)
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=client)
+        return client, runner.invoke(app, ["stamps", "list", *args])
+
+    def test_default_shortens_and_points_to_full(self, mocker):
+        _, result = self._list(mocker)
+        assert self.STAMP not in result.output
+        assert "use --full" in result.output
+
+    def test_full_shows_complete_ids_and_labels(self, mocker):
+        _, result = self._list(mocker, "--full")
+        assert result.exit_code == 0, result.output
+        assert self.STAMP in result.output
+        assert "paid-1a2b" in result.output
+
+    def test_wallet_filter_passed_to_gateway(self, mocker):
+        client, result = self._list(mocker, "--wallet", "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00")
+        assert result.exit_code == 0
+        assert client.list_stamps.call_args.kwargs["wallet"] == "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
+
+    def test_label_control_characters_dropped(self, mocker):
+        _, result = self._list(mocker, "--full", label="evil\x1b[2Jlabel")
+        assert "\x1b" not in result.output
+
+
+# --- Idempotency-Key in the CLI (#124) ---
+
+class TestIdempotencyKeyCli:
+    def _upload(self, mocker, *global_args, **behaviour):
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.return_value = DUMMY_STAMP
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=DUMMY_STAMP, usable=True, exists=True, depth=17, amount="1",
+            bucketDepth=16, immutableFlag=False, batchTTL=3600,
+        )
+        mock_client.upload_data.return_value = DUMMY_SWARM_REF
+        for name, effect in behaviour.items():
+            getattr(mock_client, name).side_effect = effect
+        constructor = mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--x402", *global_args, "upload", "--file", "d.txt"])
+        keys = [c.kwargs.get("idempotency_key") for c in constructor.call_args_list]
+        return result, keys
+
+    def test_one_key_for_all_paid_steps_of_a_command(self, mocker):
+        result, keys = self._upload(mocker)
+        assert result.exit_code == 0, result.output
+        assert len(keys) >= 2 and len(set(keys)) == 1 and keys[0]
+
+    def test_new_key_per_command(self, mocker):
+        _, first = self._upload(mocker)
+        _, second = self._upload(mocker)
+        assert first[0] != second[0]
+
+    def test_given_key_used(self, mocker):
+        _, keys = self._upload(mocker, "--idempotency-key", "retry-123")
+        assert set(keys) == {"retry-123"}
+
+    def test_invalid_given_key_rejected(self, mocker):
+        result, _ = self._upload(mocker, "--idempotency-key", "k" * 300)
+        assert result.exit_code == 1
+        assert "--idempotency-key must be" in result.output
+
+    def test_unknown_outcome_offers_key_rerun(self, mocker):
+        err = exceptions.PaymentOutcomeUnknownError(
+            "timed out", nonce="0x" + "ab" * 32, network="base-sepolia", idempotency_key="k-1",
+        )
+        result, _ = self._upload(mocker, purchase_stamp=err)
+        assert result.exit_code == 1
+        assert re.search(r"Idempotency-Key:\s+k-1", result.output)
+        assert "swarm-prov-upload --idempotency-key k-1 <same command and options>" in result.output
+
+    def test_rerun_line_rebuilt_from_entry_point_args(self, mocker):
+        from swarm_provenance_uploader.cli import _rerun_with_key
+
+        mocker.patch("swarm_provenance_uploader.cli.sys.argv",
+                     ["/usr/bin/swarm-prov-upload", "--x402", "--idempotency-key", "old", "upload", "--file", "my data.txt"])
+        assert _rerun_with_key("k-1") == "swarm-prov-upload --idempotency-key k-1 --x402 upload --file 'my data.txt'"
+
+    def test_reused_generated_key_through_cli_blames_cli(self, mocker):
+        """No --idempotency-key given: the CLI must tell the client it chose the key itself."""
+        constructor = mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        from swarm_provenance_uploader.cli import _get_gateway_client_with_x402
+
+        _x402_config["enabled"] = True
+        _get_gateway_client_with_x402("https://gateway.example.com")
+        assert constructor.call_args.kwargs["idempotency_key_given"] is False
+
+    def test_given_key_marked_as_given(self, mocker):
+        _, keys = self._upload(mocker, "--idempotency-key", "retry-123")
+        from swarm_provenance_uploader.cli import _x402_session
+        assert _x402_session["idempotency_key_given"] is True
+
+    def test_settlement_unknown_prints_original_nonce(self, mocker):
+        err = exceptions.PaymentOutcomeUnknownError(
+            "The first request with this Idempotency-Key was sent for settlement and no answer came back.",
+            nonce="0x" + "f" * 64, network="base-sepolia", code="IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN",
+        )
+        result, _ = self._upload(mocker, purchase_stamp=err)
+        assert result.exit_code == 1
+        assert "0x" + "f" * 64 in result.output
+        assert "Check whether the authorization above was used" in result.output
+
+    def test_settled_pending_prints_transaction_and_operator(self, mocker):
+        err = exceptions.PaymentSettledNotDeliveredError(
+            "The first request with this Idempotency-Key was paid, but its result is not available.",
+            transaction="0x" + "cd" * 32, code="IDEMPOTENCY_KEY_SETTLED_PENDING", network="base-sepolia",
+        )
+        result, _ = self._upload(mocker, upload_data=err)
+        assert result.exit_code == 1
+        assert "0x" + "cd" * 32 in result.output
+        assert "Contact the gateway operator" in result.output
+
+    def test_delivered_not_stored_on_upload_exits_zero(self, mocker):
+        err = exceptions.PaymentDeliveredNotStoredError(
+            "succeeded and was paid once", transaction="0x" + "cd" * 32, code="IDEMPOTENCY_KEY_DELIVERED_NOT_STORED",
+        )
+        result, _ = self._upload(mocker, upload_data=err)
+        assert result.exit_code == 0, result.output
+        assert "The upload succeeded and was paid once" in result.output
+        assert "0x" + "cd" * 32 in result.output
+        assert "ERROR" not in result.output
+        assert "can be reused" not in result.output  # the stamp was used by the upload
+
+    def test_delivered_not_stored_on_stamp_step_points_to_stamp(self, mocker):
+        err = exceptions.PaymentDeliveredNotStoredError(
+            "succeeded and was paid once", transaction="0x" + "cd" * 32,
+            payer="0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00",
+        )
+        result, _ = self._upload(mocker, purchase_stamp=err)
+        assert result.exit_code == 1  # the upload itself has not happened
+        assert "The stamp purchase succeeded and was paid once" in result.output
+        assert "stamps list --wallet" in result.output
+        assert "--stamp-id" in result.output
+
+
+class TestStampsOutputReviewCases:
+    STAMP = "c0ffee" + "ab" * 29
+
+    def _stamp(self, usable=True, label=None):
+        return StampDetails(batchID=self.STAMP, usable=usable, depth=17, amount="1", bucketDepth=16,
+                            immutableFlag=False, batchTTL=86400, utilization=0, label=label)
+
+    def test_list_columns_align_without_colour(self, mocker):
+        client = mocker.MagicMock()
+        client.list_stamps.return_value = StampListResponse(
+            stamps=[self._stamp(usable=True), self._stamp(usable=False)], total_count=2)
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=client)
+        lines = [l for l in runner.invoke(app, ["stamps", "list"]).output.splitlines() if self.STAMP[:8] in l]
+        assert len(lines) == 2
+        assert lines[0].index("1d 0h") == lines[1].index("1d 0h")  # TTL column lines up
+
+    def test_info_label_sanitized(self, mocker):
+        client = mocker.MagicMock()
+        client.get_stamp.return_value = self._stamp(label="evil\x1b[2Jlabel")
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=client)
+        result = runner.invoke(app, ["stamps", "info", self.STAMP])
+        assert "\x1b" not in result.output
+        assert "evil[2Jlabel" in result.output
+
+
+class TestRerunLine:
+    def test_url_options_redacted_and_key_quoted(self, mocker):
+        from swarm_provenance_uploader.cli import _rerun_with_key
+
+        mocker.patch("swarm_provenance_uploader.cli.sys.argv", [
+            "swarm-prov-upload", "--gateway-url", "https://u:secret@gw", "--chain-rpc=https://rpc/key123",
+            "upload", "--file", "d.txt"])
+        line = _rerun_with_key("my key")
+        assert "secret" not in line and "key123" not in line
+        assert "--idempotency-key 'my key'" in line
+
+    def test_fallback_quotes_key(self, mocker):
+        from swarm_provenance_uploader.cli import _rerun_with_key
+
+        mocker.patch("swarm_provenance_uploader.cli.sys.argv", ["python", "-m", "x"])
+        assert "--idempotency-key 'k $(id)'" in _rerun_with_key("k $(id)")

@@ -11,6 +11,7 @@ Requires optional dependencies: pip install swarm-provenance-uploader[x402]
 import base64
 import json
 import os
+import re
 import secrets
 import time
 from typing import Optional, Tuple
@@ -19,6 +20,7 @@ from ..exceptions import (
     InsufficientBalanceError,
     PaymentRejectedError,
     PaymentRequiredError,
+    PaymentRequirementsError,
     X402ConfigurationError,
     X402NetworkError,
 )
@@ -60,6 +62,11 @@ RPC_ENDPOINTS = {
     "base-sepolia": "https://sepolia.base.org",
     "base": "https://mainnet.base.org",
 }
+
+# Used with fullmatch(): "$" alone would also accept a trailing newline.
+_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
+_AMOUNT_RE = re.compile(r"[0-9]+")
+_ZERO_ADDRESS = "0x" + "0" * 40
 
 # Chain IDs for supported networks
 CHAIN_IDS = {
@@ -185,17 +192,19 @@ def validate_domain_config(
 
 # EIP-712 domain for USDC permit
 # IMPORTANT: The domain name MUST match what the USDC contract uses for EIP-712 signing.
-# These values were verified against on-chain DOMAIN_SEPARATOR values.
+# The two networks differ: the Base Sepolia contract's name() is "USDC", the Base
+# mainnet contract's name() is "USD Coin". Both values were read from the contracts
+# and checked against their on-chain DOMAIN_SEPARATOR (pinned in tests).
 # Use validate_domain_config() to verify at runtime before signing payments.
 USDC_PERMIT_DOMAIN = {
     "base-sepolia": {
-        "name": "USDC",  # Verified 2026-01-20: matches contract's DOMAIN_SEPARATOR
+        "name": "USDC",  # Verified 2026-10-07: DOMAIN_SEPARATOR 0x71f17a3b...94c9818
         "version": "2",
         "chainId": 84532,
         "verifyingContract": USDC_CONTRACTS["base-sepolia"],
     },
     "base": {
-        "name": "USDC",  # Verified 2026-01-20: matches contract's DOMAIN_SEPARATOR
+        "name": "USD Coin",  # Verified 2026-10-07: DOMAIN_SEPARATOR 0x02fa7265...2c7834f
         "version": "2",
         "chainId": 8453,
         "verifyingContract": USDC_CONTRACTS["base"],
@@ -222,6 +231,7 @@ class X402Client:
         network: str = "base-sepolia",
         rpc_url: Optional[str] = None,
         skip_domain_validation: bool = False,
+        expected_pay_to: Optional[str] = None,
     ):
         """
         Initialize the x402 payment client.
@@ -234,6 +244,9 @@ class X402Client:
             skip_domain_validation: Skip runtime domain validation (for testing only).
                                     WARNING: Do not use in production as it disables
                                     protection against signing with wrong EIP-712 domain.
+            expected_pay_to: Only sign payments to this address. If None, reads
+                             the X402_EXPECTED_PAY_TO env var; unset means any
+                             well-formed recipient the gateway names.
 
         Raises:
             X402ConfigurationError: If private key is missing or invalid.
@@ -273,6 +286,15 @@ class X402Client:
 
         # USDC contract address for this network
         self._usdc_address = USDC_CONTRACTS.get(network)
+
+        # Optional pinned recipient
+        if expected_pay_to is None:
+            expected_pay_to = os.getenv("X402_EXPECTED_PAY_TO")
+        self.expected_pay_to = (expected_pay_to or "").strip() or None  # "" turns the pin off
+        if self.expected_pay_to and not _ADDRESS_RE.fullmatch(self.expected_pay_to):
+            raise X402ConfigurationError(
+                f"X402_EXPECTED_PAY_TO is not an address: {self.expected_pay_to!r}"
+            )
 
         # Domain validation state (lazy validation on first payment)
         # If skip_domain_validation=True, mark as already validated (for testing)
@@ -348,7 +370,8 @@ class X402Client:
         """
         Select a compatible payment option from requirements.
 
-        Prefers options matching the configured network.
+        Only options for the configured network that are safe to sign are
+        considered: see refusal_reason().
 
         Args:
             requirements: Payment requirements from 402 response.
@@ -357,7 +380,8 @@ class X402Client:
             The selected payment option.
 
         Raises:
-            PaymentRequiredError: If no compatible option found.
+            X402NetworkError: If no option is for the configured network.
+            PaymentRequirementsError: If every option for the network is refused.
         """
         # Filter for matching network
         compatible = [
@@ -374,12 +398,45 @@ class X402Client:
                 actual=", ".join(available_networks),
             )
 
-        # Prefer 'exact' scheme if available
-        exact_options = [opt for opt in compatible if opt.scheme == "exact"]
-        if exact_options:
-            return exact_options[0]
+        refusals = []
+        for opt in compatible:
+            reason = self.refusal_reason(opt)
+            if reason is None:
+                return opt
+            refusals.append(reason)
 
-        return compatible[0]
+        raise PaymentRequirementsError(
+            "Refused the gateway's payment request; nothing was signed: "
+            + "; ".join(dict.fromkeys(refusals)),
+            reasons=refusals,
+        )
+
+    def refusal_reason(self, option: X402PaymentOption) -> Optional[str]:
+        """
+        Why a payment option must not be signed, or None if it is acceptable.
+
+        The signer only implements EIP-3009 transfers of USDC (the 'exact'
+        scheme), so anything else the gateway asks for is refused rather than
+        signed as if it were that.
+        """
+        # Gateway values in these messages are repr()'d: the CLI prints them, and
+        # repr escapes control and formatting characters (terminal escapes).
+        if option.network != self.network:
+            return f"network {option.network!r} is not the configured '{self.network}'"
+        if option.scheme != "exact":
+            return f"scheme {option.scheme!r} is not supported (only 'exact')"
+        if option.asset and option.asset.lower() != self._usdc_address.lower():
+            return f"asset {option.asset!r} is not USDC on {self.network} ({self._usdc_address})"
+        if not _AMOUNT_RE.fullmatch(option.maxAmountRequired or ""):
+            return f"amount {option.maxAmountRequired!r} is not a whole number of USDC units"
+        if not _ADDRESS_RE.fullmatch(option.payTo or ""):
+            return f"payTo {option.payTo!r} is not an address"
+        if option.payTo == _ZERO_ADDRESS:
+            return "payTo is the zero address (the gateway has no pay-to address configured)"
+        if self.expected_pay_to and option.payTo.lower() != self.expected_pay_to.lower():
+            return (f"payTo {option.payTo} is not the expected recipient "
+                    f"{self.expected_pay_to} (X402_EXPECTED_PAY_TO)")
+        return None
 
     def get_usdc_balance(self) -> Tuple[int, float]:
         """
@@ -439,6 +496,32 @@ class X402Client:
             )
         return True
 
+    def _check_advertised_domain(self, payment_option: X402PaymentOption) -> None:
+        """
+        Compare the EIP-712 domain advertised in the 402 `extra` with ours.
+
+        Facilitators build the verification domain from `extra`, so a gateway
+        advertising a different name or version would reject a signature made
+        against the contract's real domain. Fail before signing with a message
+        that names the mismatch instead of a generic rejection after it.
+
+        Raises:
+            X402ConfigurationError: If `extra` names a different domain.
+        """
+        extra = payment_option.extra or {}
+        domain = USDC_PERMIT_DOMAIN.get(self.network, {})
+        for field in ("name", "version"):
+            advertised = extra.get(field)
+            # EIP-712 name and version are strings; a gateway sending version 2
+            # as a number means the same domain.
+            if advertised is not None and str(advertised) != domain.get(field):
+                raise X402ConfigurationError(
+                    f"Gateway advertises EIP-712 {field} '{advertised}' for {self.network}, "
+                    f"but the USDC contract uses '{domain.get(field)}'. The payment would be "
+                    "rejected at verification; nothing was signed. The gateway's x402 "
+                    "configuration needs updating."
+                )
+
     def _generate_nonce(self) -> bytes:
         """Generate a random 32-byte nonce for payment authorization."""
         return secrets.token_bytes(32)
@@ -464,6 +547,15 @@ class X402Client:
         """
         # Validate domain configuration against on-chain contract BEFORE signing
         # This prevents signing with an incorrect domain that would fail on-chain
+        # Local checks run first: a refused request or a domain mismatch is
+        # reported as such rather than hidden behind an RPC round-trip or error.
+        reason = self.refusal_reason(payment_option)
+        if reason:
+            raise PaymentRequirementsError(
+                f"Refused the gateway's payment request; nothing was signed: {reason}",
+                reasons=[reason],
+            )
+        self._check_advertised_domain(payment_option)
         self.validate_domain()
 
         try:
@@ -584,7 +676,8 @@ class X402Client:
             amount: Amount in smallest units (6 decimals).
 
         Returns:
-            Formatted string like "$0.05".
+            Formatted string with all 6 decimals, like "$0.050000". Rounding to
+            cents would show a $0.004 payment as "$0.00".
         """
-        usdc = int(amount) / 1_000_000
-        return f"${usdc:.2f}"
+        raw = int(amount)
+        return f"${raw // 1_000_000}.{raw % 1_000_000:06d}"

@@ -1,3 +1,4 @@
+import click
 import typer
 from typing import List, Optional
 from typing_extensions import Annotated
@@ -5,11 +6,13 @@ from pathlib import Path
 import sys
 import time
 import json
+import re
+import uuid
 import warnings
 
 from . import config, __version__
 from .core import file_utils, swarm_client, metadata_builder
-from .core.gateway_client import GatewayClient
+from .core.gateway_client import GatewayClient, is_insecure_gateway_url, is_valid_idempotency_key
 from .models import ProvenanceMetadata, ValidationError
 from . import exceptions
 
@@ -60,7 +63,19 @@ _x402_config = {
     "auto_pay": config.X402_AUTO_PAY,
     "max_auto_pay_usd": config.X402_MAX_AUTO_PAY_USD,
     "network": config.X402_NETWORK,
+    "expected_pay_to": config.X402_EXPECTED_PAY_TO,
 }
+
+# Payments sent during this command (reset per invocation in main())
+_x402_session = {"spent": 0, "payments": 0, "reported": False,
+                 # One Idempotency-Key per command (#124): sent with every paid
+                 # request, so a retry is answered from the first result.
+                 "idempotency_key": None, "idempotency_key_given": False}
+
+# A stamp this command bought or took from the pool and has not used yet.
+# If the command fails before the upload completes, its ID is repeated with a
+# --stamp-id hint so a retry does not buy another one (reset in main()).
+_unused_stamp = {"id": None, "how": None}
 
 # Global state for chain / blockchain configuration
 _chain_config = {
@@ -112,27 +127,268 @@ def _get_chain_client(verbose: bool = False):
         raise typer.Exit(code=1)
 
 
-def _x402_payment_callback(amount_usd: str, description: str) -> bool:
+def _format_usdc(raw: int) -> str:
+    """Format USDC smallest units with all 6 decimals, e.g. "$0.004000"."""
+    return f"${raw // 1_000_000}.{raw % 1_000_000:06d}"
+
+
+def _x402_payment_callback(amount_usd: str, description: str, option=None) -> bool:
     """
     Callback for x402 payment confirmation prompts.
 
+    Shows what will be signed, read from the selected payment option (network,
+    recipient, token), and defaults to No: a bare Enter or a piped newline
+    does not pay.
+
     Args:
-        amount_usd: Formatted amount string (e.g., "$0.05")
+        amount_usd: Formatted amount string (e.g., "$0.050000")
         description: Description of what the payment is for
+        option: The selected X402PaymentOption, if the client passes it
 
     Returns:
         True if user confirms, False otherwise
     """
+    from .core.x402_client import USDC_CONTRACTS
+
+    network = option.network if option is not None else _x402_config["network"]
     typer.echo("")
     typer.secho(f"Payment required: {amount_usd} USDC", fg=typer.colors.YELLOW, bold=True)
-    typer.echo(f"  For: {description}")
-    typer.echo(f"  Network: {_x402_config['network']}")
+    typer.echo(f"  For:     {description}")
+    typer.echo(f"  Network: {network}")
+    if option is not None:
+        typer.echo(f"  Pay to:  {option.payTo}")
+        typer.echo(f"  Asset:   USDC {option.asset or USDC_CONTRACTS.get(network, '?')}")
+    if _x402_session["payments"]:
+        typer.echo(
+            f"  Already sent in this command: {_format_usdc(_x402_session['spent'])} USDC "
+            f"({_x402_session['payments']} payment(s))"
+        )
 
     # Prompt for confirmation
-    confirm = typer.confirm("Pay now?", default=True)
+    try:
+        confirm = typer.confirm("Pay now?", default=False)
+    except click.exceptions.Abort:
+        # No input (stdin closed, e.g. a script or an agent): never pay.
+        typer.echo("\nNo answer (no input): payment not confirmed.", err=True)
+        return False
     if confirm:
         typer.echo("Processing payment...")
     return confirm
+
+
+def _record_x402_payment(payment: dict):
+    """x402_on_payment_sent hook: add a sent payment to this command's total."""
+    try:
+        _x402_session["spent"] += int(payment.get("amount") or 0)
+    except (TypeError, ValueError):
+        pass
+    _x402_session["payments"] += 1
+
+
+def _hold_unused_stamp(stamp_id: str, how: str):
+    """Remember a stamp this command acquired until the upload that uses it succeeds."""
+    _unused_stamp.update(id=stamp_id, how=how)
+
+
+def _echo_unused_stamp_hint():
+    """On a failed command, repeat the ID of the stamp it acquired, with a reuse hint."""
+    stamp_id = _unused_stamp["id"]
+    if not stamp_id:
+        return
+    typer.secho(f"\nThe stamp {_unused_stamp['how']} for this command can be reused:", fg=typer.colors.YELLOW, err=True)
+    typer.echo(f"  {stamp_id}", err=True)
+    # Conditional on purpose: after an unknown payment outcome the user must
+    # not simply retry; this only says what to add when they do.
+    typer.echo(f"If you run the command again, add --stamp-id {stamp_id} "
+               "to use this stamp instead of buying another.", err=True)
+    _unused_stamp.update(id=None, how=None)
+
+
+def _echo_x402_spent(err: bool = False):
+    """Print the total sent in this command, if anything was paid (once per command)."""
+    if _x402_session["payments"] and not _x402_session["reported"]:
+        typer.echo(
+            f"Payments sent: {_format_usdc(_x402_session['spent'])} USDC "
+            f"({_x402_session['payments']} payment(s))",
+            err=err,
+        )
+        _x402_session["reported"] = True
+
+
+_X402_EXPLORERS = {
+    "base-sepolia": "https://sepolia.basescan.org",
+    "base": "https://basescan.org",
+}
+
+
+def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: str,
+                            final_step: bool = False):
+    """
+    Explain a paid request whose payment may have been taken, then exit.
+
+    Printed without --verbose: the identifiers are what the user needs to check
+    the payment on-chain or ask the operator for the result or a refund, and a
+    re-run would sign a new authorization and pay again.
+
+    Args:
+        e: The payment outcome error raised by the gateway client.
+        action: What was being paid for, e.g. "the stamp purchase".
+        final_step: The paid request is the command's last step, so its
+            success (IDEMPOTENCY_KEY_DELIVERED_NOT_STORED) is the command's.
+
+    Raises:
+        typer.Exit: Always; code 0 when the final step is known to have
+            succeeded, 1 otherwise.
+    """
+    if isinstance(e, exceptions.PaymentDeliveredNotStoredError):
+        _report_delivered_not_stored(e, action, final_step)
+    if isinstance(e, exceptions.StampPurchasePendingError):
+        headline = f"Payment received, but {action} is not confirmed yet."
+    elif e.settled:
+        headline = f"Payment was taken, but {action} failed."
+    else:
+        headline = f"The payment may have been taken: {action} did not complete."
+    typer.secho(f"\nERROR: {headline}", fg=typer.colors.RED, err=True)
+    typer.echo(f"  {e}", err=True)
+
+    valid_until = None
+    if e.valid_before:
+        from datetime import datetime, timezone
+        valid_until = datetime.fromtimestamp(e.valid_before, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    fields = [
+        ("Amount", f"{e.amount_usd} USDC" if e.amount_usd else None),
+        ("Network", e.network),
+        ("Payer", e.payer),
+        ("Pay to", e.pay_to),
+        ("Nonce", e.nonce),
+        ("Valid until", None if e.settled else valid_until),
+        ("Transaction", e.transaction),
+        ("Idempotency-Key", e.idempotency_key),
+    ]
+    if isinstance(e, exceptions.StampPurchasePendingError):
+        fields += [("Stamp label", e.label), ("Depth", e.depth)]
+    for name, value in fields:
+        if value is not None:
+            typer.echo(f"  {name + ':':<17}{value}", err=True)
+
+    explorer = _X402_EXPLORERS.get(e.network or "")
+    link = None
+    if explorer and e.transaction:
+        link = f"{explorer}/tx/{e.transaction}"
+    elif explorer and e.payer:
+        link = f"{explorer}/address/{e.payer}#tokentxns"
+    typer.echo("", err=True)
+    if isinstance(e, exceptions.StampPurchasePendingError):
+        typer.echo("The stamp is registered to your wallet once the node reports it. "
+                   "Do not buy another one.", err=True)
+        if e.payer:
+            typer.echo("To find it, look for the label above in:", err=True)
+            typer.echo(f"  swarm-prov-upload stamps list --wallet {e.payer} --full", err=True)
+        if e.idempotency_key:
+            typer.echo("Or, once it is confirmed, re-run with the same key: a gateway that "
+                       "supports Idempotency-Key answers with the stamp, without charging again:",
+                       err=True)
+            typer.echo(f"  {_rerun_with_key(e.idempotency_key)}", err=True)
+    elif e.settled:
+        typer.echo("Contact the gateway operator with the transaction above for the "
+                   "result or a refund. Re-running pays again.", err=True)
+    else:
+        typer.echo("Do not re-run yet: a re-run signs a new payment and can pay twice.", err=True)
+        typer.echo("Check whether the authorization above was used (a USDC transfer "
+                   "from the payer to the pay-to address with this nonce):", err=True)
+        if link:
+            typer.echo(f"  {link}", err=True)
+            link = None
+        if valid_until:
+            typer.echo(f"The authorization can be collected until {valid_until}. If no such "
+                       "transfer has appeared by then, it never will, and re-running is safe.",
+                       err=True)
+        if e.idempotency_key:
+            typer.echo("A gateway that supports Idempotency-Key answers a re-run with the same "
+                       "key from the first request instead of charging again. To re-run that "
+                       "way, put the key before the command:", err=True)
+            typer.echo(f"  {_rerun_with_key(e.idempotency_key)}", err=True)
+    if link:
+        typer.echo(f"  {link}", err=True)
+    raise typer.Exit(code=1)
+
+
+_URL_OPTIONS = ("--gateway-url", "--chain-rpc", "--bee-url")
+
+
+def _rerun_with_key(key: str) -> str:
+    """The command line that repeats this command with an Idempotency-Key.
+
+    --idempotency-key is a global option, so it goes before the subcommand.
+    """
+    args = list(sys.argv[1:])
+    if "--idempotency-key" in args:
+        i = args.index("--idempotency-key")
+        del args[i:i + 2]
+    args = [a for a in args if not a.startswith("--idempotency-key=")]
+    # URLs can carry credentials (user:pass@, API keys in RPC URLs): never echo them
+    for i, arg in enumerate(args):
+        if arg in _URL_OPTIONS and i + 1 < len(args):
+            args[i + 1] = "<url>"
+        elif arg.split("=", 1)[0] in _URL_OPTIONS and "=" in arg:
+            args[i] = arg.split("=", 1)[0] + "=<url>"
+    import shlex
+    if args and Path(sys.argv[0]).stem == "swarm-prov-upload":
+        return "swarm-prov-upload --idempotency-key " + shlex.quote(key) + " " + " ".join(shlex.quote(a) for a in args)
+    # Not run from the entry point (e.g. python -m): the arguments may not be ours
+    return f"swarm-prov-upload --idempotency-key {shlex.quote(key)} <same command and options>"
+
+
+def _command_idempotency_key() -> str:
+    """This command's Idempotency-Key: --idempotency-key, or one random key per command."""
+    if not _x402_session["idempotency_key"]:
+        _x402_session["idempotency_key"] = str(uuid.uuid4())
+    return _x402_session["idempotency_key"]
+
+
+def _report_payment_required(e: exceptions.PaymentRequiredError):
+    """
+    Explain a payment that was not made (declined, over the limit, or x402 off), then exit.
+
+    Raises:
+        typer.Exit: Always, with code 1.
+    """
+    if _x402_config["enabled"]:
+        typer.secho(f"\nERROR: Payment not made: {e}", fg=typer.colors.RED, err=True)
+        typer.echo("Nothing was signed or paid. For non-interactive use, pass --auto-pay "
+                   "with a --max-pay limit that covers the amount.", err=True)
+    else:
+        typer.secho("\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
+        typer.echo("Use --x402 to enable x402 payments, or --free for the free tier.", err=True)
+    raise typer.Exit(code=1)
+
+
+def _report_delivered_not_stored(e: exceptions.PaymentDeliveredNotStoredError, action: str,
+                                 final_step: bool):
+    """
+    The paid request succeeded and was paid once, but its result cannot be returned.
+
+    Not a failure (#124): exits 0 when it was the command's last step.
+    """
+    typer.secho(f"\n{action[0].upper() + action[1:]} succeeded and was paid once, but the gateway "
+                "could not return its result (it was too large to keep for a retry).",
+                fg=typer.colors.YELLOW, err=True)
+    for name, value in (("Transaction", e.transaction), ("Payer", e.payer),
+                        ("Idempotency-Key", e.idempotency_key)):
+        if value:
+            typer.echo(f"  {name + ':':<17}{value}", err=True)
+    if final_step:
+        _unused_stamp.update(id=None, how=None)  # the upload used it
+        typer.echo("No Swarm reference is printed: the gateway could not return it. Ask the "
+                   "gateway operator for the result, citing the transaction above. Do not pay "
+                   "again.", err=True)
+        raise typer.Exit(code=0)
+    typer.echo("The stamp exists and is registered to your wallet. Find its ID with:", err=True)
+    if e.payer:
+        typer.echo(f"  swarm-prov-upload stamps list --wallet {e.payer} --full", err=True)
+    typer.echo("then run the command again with --stamp-id <id> instead of buying another.", err=True)
+    raise typer.Exit(code=1)
 
 
 def _get_gateway_client_with_x402(gateway_url: str, verbose: bool = False) -> GatewayClient:
@@ -150,15 +406,30 @@ def _get_gateway_client_with_x402(gateway_url: str, verbose: bool = False) -> Ga
         if verbose:
             typer.echo(f"    x402 payments enabled ({_x402_config['network']})")
 
-        return GatewayClient(
-            base_url=gateway_url,
-            x402_enabled=True,
-            x402_network=_x402_config["network"],
-            x402_auto_pay=_x402_config["auto_pay"],
-            x402_max_auto_pay_usd=_x402_config["max_auto_pay_usd"],
-            x402_payment_callback=_x402_payment_callback,
-            free_tier=_backend_config["free_tier"],
-        )
+        if is_insecure_gateway_url(gateway_url) and not _backend_config.get("_http_warning_shown"):
+            typer.secho(
+                f"WARNING: x402 payments over plain http ({gateway_url}): the payment request "
+                "(amount, recipient) can be altered in transit. Use an https gateway URL.",
+                fg=typer.colors.YELLOW, err=True,
+            )
+            _backend_config["_http_warning_shown"] = True
+
+        # The CLI shows its own warning above; the library's would repeat it.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", exceptions.InsecureGatewayWarning)
+            return GatewayClient(
+                base_url=gateway_url,
+                x402_enabled=True,
+                x402_network=_x402_config["network"],
+                x402_auto_pay=_x402_config["auto_pay"],
+                x402_max_auto_pay_usd=_x402_config["max_auto_pay_usd"],
+                x402_payment_callback=_x402_payment_callback,
+                x402_on_payment_sent=_record_x402_payment,
+                x402_expected_pay_to=_x402_config["expected_pay_to"],
+                idempotency_key=_command_idempotency_key(),
+                idempotency_key_given=_x402_session["idempotency_key_given"],
+                free_tier=_backend_config["free_tier"],
+            )
     else:
         return GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
 
@@ -277,10 +548,13 @@ def upload(
     acquired_from_pool = False
     if stamp_id:
         # User provided an existing stamp ID
+        ignored = [flag for flag, value in (("--usePool", use_pool), ("--size", size), ("--duration", duration),
+                                            ("--depth", stamp_depth), ("--amount", stamp_amount)) if value]
+        if ignored:
+            typer.secho(f"Note: {', '.join(ignored)} ignored with --stamp-id (no stamp is bought).",
+                        fg=typer.colors.YELLOW, err=True)
         used_existing_stamp = True
-        typer.echo(f"Using existing stamp: ...{stamp_id[-12:]}")
-        if verbose:
-            typer.echo(f"    Stamp ID: {stamp_id}")
+        typer.echo(f"Using existing stamp: {stamp_id}")
     elif use_pool:
         # Acquire stamp from pool (gateway only)
         if not use_gateway:
@@ -308,6 +582,7 @@ def upload(
             acquire_result = gw_client.acquire_stamp_from_pool(size=size, depth=stamp_depth, verbose=verbose)
             stamp_id = acquire_result.batch_id
             acquired_from_pool = True
+            _hold_unused_stamp(stamp_id, "acquired from the pool")
 
             if verbose:
                 typer.echo(f"    Stamp ID Received: {stamp_id} (Length: {len(stamp_id)})")
@@ -315,7 +590,7 @@ def upload(
                 if acquire_result.fallback_used:
                     typer.secho(f"    Note: Larger stamp substituted (fallback used)", fg=typer.colors.YELLOW)
             else:
-                msg = f"Stamp acquired from pool (ID: ...{stamp_id[-12:]})"
+                msg = f"Stamp acquired from pool (ID: {stamp_id})"
                 if acquire_result.fallback_used:
                     msg += " [fallback size]"
                 typer.echo(msg)
@@ -335,11 +610,9 @@ def upload(
                 typer.echo("Try again immediately, or use regular purchase (without --usePool).")
             raise typer.Exit(code=1)
         except exceptions.PaymentRequiredError as e:
-            typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
-            typer.echo("Use --x402 to enable x402 payments, or use a gateway without x402 mode.")
-            if hasattr(e, 'payment_options') and e.payment_options:
-                typer.echo(f"Payment options: {e.payment_options}")
-            raise typer.Exit(code=1)
+            _report_payment_required(e)
+        except exceptions.PaymentOutcomeUnknownError as e:
+            _report_payment_outcome(e, "the pool stamp acquisition")
         except Exception as e:
             typer.secho(f"ERROR: Failed acquiring stamp from pool: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -367,18 +640,17 @@ def upload(
                 local_amount = stamp_amount or config.DEFAULT_POSTAGE_AMOUNT
                 local_depth = stamp_depth or config.DEFAULT_POSTAGE_DEPTH
                 stamp_id = swarm_client.purchase_postage_stamp(local_bee_url, local_amount, local_depth, verbose=verbose)
+            _hold_unused_stamp(stamp_id, "bought")
             if verbose:
                 typer.echo(f"    Stamp ID Received: {stamp_id} (Length: {len(stamp_id)})")
                 typer.echo(f"    Stamp ID (lowercase for header): {stamp_id.lower()}")
             else:
-                typer.echo(f"Postage stamp purchased (ID: ...{stamp_id[-12:]})")
+                typer.echo(f"Postage stamp purchased (ID: {stamp_id})")
 
         except exceptions.PaymentRequiredError as e:
-            typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
-            typer.echo("Use --x402 to enable x402 payments, or use a gateway without x402 mode.")
-            if hasattr(e, 'payment_options') and e.payment_options:
-                typer.echo(f"Payment options: {e.payment_options}")
-            raise typer.Exit(code=1)
+            _report_payment_required(e)
+        except exceptions.PaymentOutcomeUnknownError as e:
+            _report_payment_outcome(e, "the stamp purchase")
         except exceptions.StampPurchaseError as e:
             typer.secho(f"ERROR: Failed purchasing stamp: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -496,19 +768,19 @@ def upload(
         typer.secho(f"\nERROR: Invalid document format for signing: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     except exceptions.PaymentRequiredError as e:
-        typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
-        typer.echo("Use --x402 to enable x402 payments, or use a gateway without x402 mode.")
-        if hasattr(e, 'payment_options') and e.payment_options:
-            typer.echo(f"Payment options: {e.payment_options}")
-        raise typer.Exit(code=1)
+        _report_payment_required(e)
+    except exceptions.PaymentOutcomeUnknownError as e:
+        _report_payment_outcome(e, "the upload", final_step=True)
     except Exception as e:
         typer.secho(f"ERROR: Failed uploading data: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     # 10. Display Swarm reference_hash
+    _unused_stamp.update(id=None, how=None)  # used: nothing to reuse
     typer.secho(f"\nSUCCESS! Upload complete.", fg=typer.colors.GREEN, bold=True)
     typer.echo("Swarm Reference Hash:")
     typer.secho(f"{swarm_ref_hash}", fg=typer.colors.CYAN)
+    _echo_x402_spent()
 
     # Display signature info if signing was used
     if use_signing and signed_document:
@@ -858,18 +1130,21 @@ def upload_collection(
         gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
 
         if stamp_id:
-            typer.echo(f"Using existing stamp: ...{stamp_id[-12:]}")
+            ignored = [flag for flag, value in (("--usePool", use_pool), ("--size", size),
+                                                ("--duration", duration)) if value]
+            if ignored:
+                typer.secho(f"Note: {', '.join(ignored)} ignored with --stamp-id (no stamp is bought).",
+                            fg=typer.colors.YELLOW, err=True)
+            typer.echo(f"Using existing stamp: {stamp_id}")
         elif use_pool:
             typer.echo("Acquiring stamp from pool...")
             acquire_result = gw_client.acquire_stamp_from_pool(size=size, verbose=verbose)
             stamp_id = acquire_result.batch_id
-            if verbose:
-                typer.echo(f"    Stamp ID: {stamp_id}")
-            else:
-                msg = f"Stamp acquired from pool (ID: ...{stamp_id[-12:]})"
-                if acquire_result.fallback_used:
-                    msg += " [fallback size]"
-                typer.echo(msg)
+            _hold_unused_stamp(stamp_id, "acquired from the pool")
+            msg = f"Stamp acquired from pool (ID: {stamp_id})"
+            if acquire_result.fallback_used:
+                msg += " [fallback size]"
+            typer.echo(msg)
         else:
             typer.echo("Purchasing postage stamp...")
             stamp_id = gw_client.purchase_stamp(
@@ -877,18 +1152,16 @@ def upload_collection(
                 size=size,
                 verbose=verbose,
             )
-            if verbose:
-                typer.echo(f"    Stamp ID: {stamp_id}")
-            else:
-                typer.echo(f"Postage stamp purchased (ID: ...{stamp_id[-12:]})")
+            _hold_unused_stamp(stamp_id, "bought")
+            typer.echo(f"Postage stamp purchased (ID: {stamp_id})")
 
     except exceptions.PoolNotEnabledError:
         typer.secho("ERROR: Stamp pool is not enabled on this gateway.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     except exceptions.PaymentRequiredError as e:
-        typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
-        typer.echo("Use --x402 to enable x402 payments, or use a gateway without x402 mode.")
-        raise typer.Exit(code=1)
+        _report_payment_required(e)
+    except exceptions.PaymentOutcomeUnknownError as e:
+        _report_payment_outcome(e, "getting the stamp")
     except Exception as e:
         typer.secho(f"ERROR: Failed acquiring stamp: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -904,9 +1177,10 @@ def upload_collection(
             redundancy=redundancy,
             verbose=verbose,
         )
-    except exceptions.PaymentRequiredError:
-        typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+    except exceptions.PaymentRequiredError as e:
+        _report_payment_required(e)
+    except exceptions.PaymentOutcomeUnknownError as e:
+        _report_payment_outcome(e, "the collection upload", final_step=True)
     except Exception as e:
         typer.secho(f"ERROR: Failed uploading collection: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -917,6 +1191,8 @@ def upload_collection(
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
             pass
+
+    _unused_stamp.update(id=None, how=None)  # used: nothing to reuse
 
     # Output
     if output_json:
@@ -939,6 +1215,7 @@ def upload_collection(
         for fi in file_infos:
             typer.echo(f"  {fi['path']} ({fi['size']} bytes)")
         typer.echo(f"\nTotal size: {total_size} bytes")
+        _echo_x402_spent()
         typer.echo(f"Collection hash: {collection_hash}")
         if provenance_standard:
             typer.echo(f"Provenance standard: {provenance_standard}")
@@ -949,6 +1226,11 @@ def upload_collection(
 
 
 # --- Stamps Subcommands ---
+
+def _sanitize_label(label: Optional[str]) -> str:
+    """A stamp label as printable text (labels come from the gateway)."""
+    return "".join(ch for ch in (label or "") if ch.isprintable())
+
 
 def _format_ttl(seconds: int) -> str:
     """Format TTL seconds into human readable string."""
@@ -968,10 +1250,14 @@ def _format_ttl(seconds: int) -> str:
 
 @stamps_app.command("list")
 def stamps_list(
+    full: Annotated[bool, typer.Option("--full", help="Show full stamp IDs (for --stamp-id) and labels.")] = False,
+    wallet: Annotated[Optional[str], typer.Option("--wallet", help="Only stamps bought by this wallet address, e.g. your x402 payer (needs x402 enabled on the gateway).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
 ):
     """
     List all postage stamp batches. (Gateway only)
+
+    Use --full to show complete IDs that can be passed to --stamp-id.
     """
     if _backend_config["backend"] != "gateway":
         typer.secho("ERROR: 'stamps list' requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
@@ -983,22 +1269,32 @@ def stamps_list(
 
     try:
         gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
-        result = gw_client.list_stamps(verbose=verbose)
+        result = gw_client.list_stamps(wallet=wallet, verbose=verbose)
 
         if not result.stamps:
             typer.echo("No stamps found.")
             return
 
         # Print header
-        typer.echo(f"\n{'ID':<20} {'Usable':<8} {'TTL':<12} {'Depth':<6} {'Utilization':<12}")
-        typer.echo("-" * 60)
+        id_width = 64 if full else 20
+        header = f"\n{'ID':<{id_width}} {'Usable':<8} {'TTL':<12} {'Depth':<6} {'Utilization':<12}"
+        typer.echo(header + (" Label" if full else ""))
+        typer.echo("-" * (len(header) - 1 + (6 if full else 0)))
 
         for stamp in result.stamps:
-            stamp_id_short = f"{stamp.batchID[:8]}...{stamp.batchID[-8:]}"
-            usable_str = typer.style("Yes", fg=typer.colors.GREEN) if stamp.usable else typer.style("No", fg=typer.colors.RED)
+            stamp_id_str = stamp.batchID if full else f"{stamp.batchID[:8]}...{stamp.batchID[-8:]}"
+            # Pad before styling: colour codes would count towards the width
+            usable_str = (typer.style(f"{'Yes':<8}", fg=typer.colors.GREEN) if stamp.usable
+                          else typer.style(f"{'No':<8}", fg=typer.colors.RED))
             ttl_str = _format_ttl(stamp.batchTTL)
             util_str = f"{stamp.utilization}%"
-            typer.echo(f"{stamp_id_short:<20} {usable_str:<8} {ttl_str:<12} {stamp.depth:<6} {util_str:<12}")
+            line = f"{stamp_id_str:<{id_width}} {usable_str} {ttl_str:<12} {stamp.depth:<6} {util_str:<12}"
+            if full:
+                line += f" {_sanitize_label(stamp.label)}"
+            typer.echo(line)
+
+        if not full:
+            typer.echo("\n(IDs shortened; use --full for complete IDs to pass to --stamp-id)")
 
         typer.echo(f"\nTotal: {result.total_count} stamp(s)")
 
@@ -1044,7 +1340,7 @@ def stamps_info(
             typer.echo(f"  Amount:      {stamp.amount}")
             typer.echo(f"  Utilization: {stamp.utilization}%")
             if stamp.label:
-                typer.echo(f"  Label:       {stamp.label}")
+                typer.echo(f"  Label:       {_sanitize_label(stamp.label)}")
         else:
             stamp_info = swarm_client.get_stamp_info(bee_url, stamp_id, verbose=verbose)
             if not stamp_info:
@@ -1362,7 +1658,13 @@ def x402_status(
     max_pay = _x402_config["max_auto_pay_usd"]
     auto_str = typer.style("Yes", fg=typer.colors.GREEN) if auto_pay else typer.style("No", fg=typer.colors.YELLOW)
     typer.echo(f"  Auto-pay:     {auto_str}")
-    typer.echo(f"  Max auto-pay: ${max_pay:.2f}")
+    max_pay_str = f"{max_pay:.2f}" if round(max_pay, 2) == max_pay else f"{max_pay:.6f}"
+    typer.echo(f"  Max auto-pay: ${max_pay_str}")
+    expected_pay_to = _x402_config.get("expected_pay_to")
+    typer.echo(f"  Pay-to pin:   {expected_pay_to or 'none (any recipient the gateway names)'}")
+    if expected_pay_to and not re.fullmatch(r"0x[0-9a-fA-F]{40}", expected_pay_to.strip()):
+        typer.secho("  WARNING: X402_EXPECTED_PAY_TO is not an address; every payment will be refused.",
+                    fg=typer.colors.RED)
 
     # Check for private key (don't show the actual key)
     pk_env_name = config.X402_PRIVATE_KEY_ENV
@@ -2640,12 +2942,14 @@ def main(
         help=f"Gateway URL (when backend=gateway). [default: {config.GATEWAY_URL}]"
     )] = None,
     x402: Annotated[Optional[bool], typer.Option(
-        "--x402",
-        help="Enable x402 pay-per-request payments (USDC on Base chain)."
+        "--x402/--no-x402",
+        show_default=False,
+        help="Enable x402 pay-per-request payments (USDC on Base chain). --no-x402 overrides X402_ENABLED."
     )] = None,
     auto_pay: Annotated[Optional[bool], typer.Option(
-        "--auto-pay",
-        help="Auto-pay without prompting (up to --max-pay limit)."
+        "--auto-pay/--no-auto-pay",
+        show_default=False,
+        help="Auto-pay without prompting (up to --max-pay limit). --no-auto-pay overrides X402_AUTO_PAY."
     )] = None,
     max_pay: Annotated[Optional[float], typer.Option(
         "--max-pay",
@@ -2663,9 +2967,17 @@ def main(
         "--chain-rpc",
         help="Custom RPC URL for blockchain connection."
     )] = None,
+    idempotency_key: Annotated[Optional[str], typer.Option(
+        "--idempotency-key",
+        help="Idempotency-Key for this command's paid requests. Pass the key printed by a "
+             "failed run to repeat it: a gateway that supports the key answers from the first "
+             "result instead of charging again. [default: a new random key per command]",
+        show_default=False,
+    )] = None,
     free: Annotated[Optional[bool], typer.Option(
-        "--free",
-        help="Use gateway free tier (X-Payment-Mode: free, rate-limited)."
+        "--free/--no-free",
+        show_default=False,
+        help="Use gateway free tier (X-Payment-Mode: free, rate-limited). --no-free overrides FREE_TIER."
     )] = None,
 ):
     """
@@ -2679,6 +2991,21 @@ def main(
 
     For testing/development, use --free for rate-limited free tier access.
     """
+    _x402_session.update(spent=0, payments=0, reported=False,
+                         idempotency_key=None, idempotency_key_given=False)
+    if idempotency_key is not None:
+        if not is_valid_idempotency_key(idempotency_key):
+            typer.secho("ERROR: --idempotency-key must be 1-255 printable ASCII characters.",
+                        fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        _x402_session.update(idempotency_key=idempotency_key, idempotency_key_given=True)
+    _backend_config.pop("_http_warning_shown", None)
+    _unused_stamp.update(id=None, how=None)
+    # A command that fails after paying still says what it paid, and which
+    # stamp it already holds (callbacks run in reverse order: stamp first).
+    ctx.call_on_close(lambda: _echo_x402_spent(err=True))
+    ctx.call_on_close(_echo_unused_stamp_hint)
+
     if backend:
         if backend not in ("gateway", "local"):
             typer.secho(f"ERROR: Invalid backend '{backend}'. Use 'gateway' or 'local'.", fg=typer.colors.RED, err=True)

@@ -1301,3 +1301,975 @@ class TestGatewayClientFreeTier:
         client.upload_data(data=b"test data", stamp_id=DUMMY_STAMP)
 
         assert "X-Payment-Mode" not in adapter.last_request.headers
+
+
+# --- Payment outcome after a sent X-PAYMENT (#127) ---
+
+PAYER = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
+PAY_TO = "0x1234567890AbcdEF1234567890aBcDeF12345678"
+NONCE = "0x" + "ab" * 32
+TX_HASH = "0x" + "cd" * 32
+GW = "https://test.gateway.io"
+
+
+def _signed_header():
+    """An X-PAYMENT header shaped like X402Client.sign_payment's output."""
+    import base64
+    import json
+
+    payload = {
+        "x402Version": 1,
+        "scheme": "exact",
+        "network": "base-sepolia",
+        "payload": {
+            "signature": "0x" + "ee" * 65,
+            "authorization": {
+                "from": PAYER, "to": PAY_TO, "value": "50000",
+                "validAfter": "0", "validBefore": "9999999999", "nonce": NONCE,
+            },
+        },
+    }
+    return base64.b64encode(json.dumps(payload).encode()).decode()
+
+
+@pytest.fixture
+def paying_client():
+    """A GatewayClient that answers every 402 with a signed payment, no prompt."""
+    from unittest.mock import patch
+
+    client = GatewayClient(base_url=GW, x402_enabled=True, x402_auto_pay=True)
+    with patch.object(client, "_approve_payment", return_value=(_signed_header(), "$0.050000", None)):
+        yield client
+
+
+PAYMENT_REQUIRED = {"status_code": 402, "json": {"accepts": []}}
+
+
+class TestPaidRequestOutcome:
+    """Failures after the payment was sent must not look like plain failures."""
+
+    def _assert_identifies_payment(self, err):
+        assert err.payer == PAYER
+        assert err.nonce == NONCE
+        assert err.amount == "50000"
+        assert err.amount_usd == "$0.050000"
+        assert err.pay_to == PAY_TO
+        assert err.network == "base-sepolia"
+
+    def test_read_timeout_after_payment_is_outcome_unknown(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"exc": requests.exceptions.ReadTimeout}])
+        with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+            paying_client.purchase_stamp()
+        assert not exc_info.value.settled
+        assert "may have been taken" in str(exc_info.value)
+        self._assert_identifies_payment(exc_info.value)
+
+    def test_dropped_connection_after_payment_is_outcome_unknown(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/data/", [PAYMENT_REQUIRED, {"exc": requests.exceptions.ConnectionError}])
+        with pytest.raises(PaymentOutcomeUnknownError):
+            paying_client.upload_data(b"x", DUMMY_STAMP)
+
+    def test_connect_timeout_after_payment_is_plain_failure(self, paying_client, requests_mock):
+        """Never connected, so the payment was never sent: not an unknown outcome."""
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"exc": requests.exceptions.ConnectTimeout}])
+        with pytest.raises(ConnectionError) as exc_info:
+            paying_client.purchase_stamp()
+        assert not isinstance(exc_info.value, PaymentOutcomeUnknownError)
+
+    @pytest.mark.parametrize("status", [500, 502, 504])
+    def test_5xx_after_payment_is_outcome_unknown(self, paying_client, requests_mock, status):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": status, "text": "Bad gateway"}])
+        with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+            paying_client.purchase_stamp()
+        assert exc_info.value.status_code == status
+        self._assert_identifies_payment(exc_info.value)
+
+    def test_delivery_failed_after_payment_is_settled(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 500,
+            "json": {"code": "DELIVERY_FAILED_AFTER_PAYMENT", "message": "Contact the operator.",
+                     "transaction": TX_HASH, "x402_status": "settled_not_delivered"},
+            "headers": {"X-Payment-Transaction": TX_HASH, "X-Payment-Status": "settled_not_delivered"},
+        }])
+        with pytest.raises(PaymentSettledNotDeliveredError) as exc_info:
+            paying_client.purchase_stamp()
+        err = exc_info.value
+        assert err.settled
+        assert err.transaction == TX_HASH
+        assert err.code == "DELIVERY_FAILED_AFTER_PAYMENT"
+        assert "Contact the operator." in str(err)
+        self._assert_identifies_payment(err)
+
+    def test_settled_not_delivered_header_on_4xx_is_settled(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        requests_mock.post(f"{GW}/api/v1/data/", [PAYMENT_REQUIRED, {
+            "status_code": 400, "json": {"detail": "Stamp not usable"},
+            "headers": {"X-Payment-Transaction": TX_HASH, "X-Payment-Status": "settled_not_delivered"},
+        }])
+        with pytest.raises(PaymentSettledNotDeliveredError) as exc_info:
+            paying_client.upload_data(b"x", DUMMY_STAMP)
+        assert exc_info.value.transaction == TX_HASH
+
+    def test_402_after_payment_is_rejected(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRejectedError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 402,
+            "json": {"code": "PAYMENT_SETTLEMENT_FAILED", "message": "The payment could not be settled (insufficient_funds)."},
+        }])
+        with pytest.raises(PaymentRejectedError, match="insufficient_funds"):
+            paying_client.purchase_stamp()
+
+    def test_4xx_before_settlement_is_plain_failure(self, paying_client, requests_mock):
+        """The gateway refused before collecting: an ordinary error."""
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 400, "json": {"detail": "bad depth"}}])
+        with pytest.raises(ConnectionError, match="Failed to purchase stamp"):
+            paying_client.purchase_stamp()
+
+    def test_unknown_transaction_placeholder_dropped(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 500, "json": {"code": "DELIVERY_FAILED_AFTER_PAYMENT"},
+            "headers": {"X-Payment-Transaction": "unknown"},
+        }])
+        with pytest.raises(PaymentSettledNotDeliveredError) as exc_info:
+            paying_client.purchase_stamp()
+        assert exc_info.value.transaction is None
+
+    def test_success_after_payment_returns_result(self, paying_client, requests_mock):
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 201, "json": {"batchID": DUMMY_STAMP}, "headers": {"X-Payment-Transaction": TX_HASH},
+        }])
+        assert paying_client.purchase_stamp() == DUMMY_STAMP
+
+    def test_unpaid_5xx_stays_plain_failure(self, requests_mock):
+        """No payment was sent, so a server error is just a server error."""
+        requests_mock.post(f"{GW}/api/v1/stamps/", status_code=500)
+        client = GatewayClient(base_url=GW)
+        with pytest.raises(ConnectionError, match="Failed to purchase stamp"):
+            client.purchase_stamp()
+
+
+class TestPurchasePending:
+    """202 PURCHASE_PENDING: paid, batch not confirmed yet."""
+
+    PENDING = {
+        "code": "PURCHASE_PENDING",
+        "message": "Payment received, but the Bee node did not confirm the purchase in time.",
+        "transaction": TX_HASH,
+        "label": "x402-abc123",
+        "depth": 17,
+        "amount": "1000000000",
+        "lookup": f"GET /api/v1/stamps/?wallet={PAYER} and look for this label.",
+    }
+
+    def test_202_raises_pending_without_validation_error(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import StampPurchasePendingError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 202, "json": self.PENDING}])
+        with pytest.raises(StampPurchasePendingError) as exc_info:
+            paying_client.purchase_stamp()
+        err = exc_info.value
+        assert err.settled
+        assert err.transaction == TX_HASH
+        assert err.label == "x402-abc123"
+        assert err.depth == 17
+        assert "wallet=" in err.lookup
+        assert err.nonce == NONCE
+        assert err.amount == "50000"  # the USDC payment, not the BZZ batch amount
+
+
+class TestPaidRequestTimeouts:
+    """Paid calls must wait longer than the gateway's own post-settlement work."""
+
+    def test_paid_timeout_outlasts_gateway_work(self):
+        connect, read = GatewayClient.PAID_REQUEST_TIMEOUT
+        assert read >= 180
+        assert connect <= 30  # an unreachable gateway was never paid; fail fast
+
+    def _assert_paid_timeout(self, requests_mock):
+        assert requests_mock.call_count >= 1
+        for request in requests_mock.request_history:
+            assert request.timeout == GatewayClient.PAID_REQUEST_TIMEOUT
+
+    def test_purchase_timeout(self, requests_mock):
+        requests_mock.post(f"{GW}/api/v1/stamps/", status_code=201, json={"batchID": DUMMY_STAMP})
+        GatewayClient(base_url=GW).purchase_stamp()
+        self._assert_paid_timeout(requests_mock)
+
+    def test_upload_timeout(self, requests_mock):
+        requests_mock.post(f"{GW}/api/v1/data/", json={"reference": DUMMY_SWARM_REF})
+        GatewayClient(base_url=GW).upload_data(b"x", DUMMY_STAMP)
+        self._assert_paid_timeout(requests_mock)
+
+    def test_signed_upload_timeout(self, requests_mock):
+        requests_mock.post(f"{GW}/api/v1/data/", json={"reference": DUMMY_SWARM_REF})
+        GatewayClient(base_url=GW).upload_data_with_signing(b"{}", DUMMY_STAMP)
+        self._assert_paid_timeout(requests_mock)
+
+    def test_pool_acquire_timeout(self, requests_mock):
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", json={
+            "success": True, "batch_id": DUMMY_STAMP, "depth": 17, "size_name": "small",
+            "message": "ok", "fallback_used": False,
+        })
+        GatewayClient(base_url=GW).acquire_stamp_from_pool()
+        self._assert_paid_timeout(requests_mock)
+
+    def test_manifest_timeout(self, requests_mock, tmp_path):
+        tar = tmp_path / "c.tar"
+        tar.write_bytes(b"tar")
+        requests_mock.post(f"{GW}/api/v1/data/manifest", json={"reference": DUMMY_SWARM_REF})
+        GatewayClient(base_url=GW).upload_manifest(str(tar), DUMMY_STAMP)
+        self._assert_paid_timeout(requests_mock)
+
+
+# --- Hard auto-pay cap and confirmation (#128) ---
+
+def _option(amount="50000", network="base-sepolia"):
+    from swarm_provenance_uploader.models import X402PaymentOption
+
+    return X402PaymentOption(
+        scheme="exact", network=network, maxAmountRequired=amount, resource="/api/v1/stamps/",
+        description="Stamp purchase", payTo=PAY_TO,
+        asset="0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    )
+
+
+@pytest.fixture
+def mock_x402():
+    """A stand-in X402Client offering one option; signing is recorded, never real."""
+    from unittest.mock import MagicMock
+
+    x402 = MagicMock()
+    x402.parse_402_response.return_value = MagicMock()
+    x402.select_payment_option.return_value = _option()
+    x402.format_amount_usd.side_effect = lambda a: f"${int(a) // 1_000_000}.{int(a) % 1_000_000:06d}"
+    x402.sign_payment.return_value = _signed_header()
+    return x402
+
+
+def _client_with(mock_x402, **kwargs):
+    from unittest.mock import patch
+
+    client = GatewayClient(base_url=GW, x402_enabled=True, **kwargs)
+    patcher = patch.object(client, "_get_x402_client", return_value=mock_x402)
+    patcher.start()
+    return client, patcher
+
+
+class TestAutoPayHardCap:
+    def test_above_cap_without_callback_refuses_before_signing(self, mock_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        mock_x402.select_payment_option.return_value = _option(amount="5000000")  # $5
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_max_auto_pay_usd=1.00)
+        try:
+            with pytest.raises(PaymentRequiredError, match="exceeds the auto-pay limit"):
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+        mock_x402.sign_payment.assert_not_called()
+        assert requests_mock.call_count == 1  # never retried with a payment
+
+    def test_just_above_cap_refused(self, mock_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        mock_x402.select_payment_option.return_value = _option(amount="1000001")  # $1.000001
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_max_auto_pay_usd=1.00)
+        try:
+            with pytest.raises(PaymentRequiredError):
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+        mock_x402.sign_payment.assert_not_called()
+
+    def test_at_cap_auto_pays(self, mock_x402, requests_mock):
+        mock_x402.select_payment_option.return_value = _option(amount="1000000")  # exactly $1
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_max_auto_pay_usd=1.00)
+        try:
+            assert client.purchase_stamp() == DUMMY_STAMP
+        finally:
+            patcher.stop()
+        mock_x402.sign_payment.assert_called_once()
+
+    def test_above_cap_with_callback_asks(self, mock_x402, requests_mock):
+        from unittest.mock import MagicMock
+
+        mock_x402.select_payment_option.return_value = _option(amount="5000000")
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        callback = MagicMock(return_value=True)
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_max_auto_pay_usd=1.00,
+                                       x402_payment_callback=callback)
+        try:
+            assert client.purchase_stamp() == DUMMY_STAMP
+        finally:
+            patcher.stop()
+        callback.assert_called_once()
+
+
+class TestPaymentCallbackOption:
+    def test_two_argument_callback_still_supported(self, mock_x402, requests_mock):
+        calls = []
+
+        def legacy(amount_usd, description):
+            calls.append((amount_usd, description))
+            return True
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        client, patcher = _client_with(mock_x402, x402_payment_callback=legacy)
+        try:
+            client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert calls == [("$0.050000", 'POST /api/v1/stamps/ (gateway says: "Stamp purchase")')]
+
+    def test_callback_accepting_option_receives_it(self, mock_x402, requests_mock):
+        seen = {}
+
+        def confirm(amount_usd, description, option=None):
+            seen["option"] = option
+            return True
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        client, patcher = _client_with(mock_x402, x402_payment_callback=confirm)
+        try:
+            client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert seen["option"].payTo == PAY_TO
+        assert seen["option"].network == "base-sepolia"
+
+
+class TestPaymentSentHook:
+    def test_hook_called_for_sent_payment(self, mock_x402, requests_mock):
+        sent = []
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 201, "json": {"batchID": DUMMY_STAMP}, "headers": {"X-Payment-Transaction": TX_HASH},
+        }])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_on_payment_sent=sent.append)
+        try:
+            client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert len(sent) == 1
+        assert sent[0]["amount"] == "50000"
+        assert sent[0]["transaction"] == TX_HASH
+
+    def test_hook_called_when_outcome_unknown(self, mock_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        sent = []
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"exc": requests.exceptions.ReadTimeout}])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_on_payment_sent=sent.append)
+        try:
+            with pytest.raises(PaymentOutcomeUnknownError):
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert len(sent) == 1
+
+    def test_hook_not_called_when_payment_rejected(self, mock_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRejectedError
+
+        sent = []
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, PAYMENT_REQUIRED])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_on_payment_sent=sent.append)
+        try:
+            with pytest.raises(PaymentRejectedError):
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert sent == []
+
+    def test_failing_hook_does_not_break_request(self, mock_x402, requests_mock):
+        def boom(payment):
+            raise RuntimeError("hook bug")
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_on_payment_sent=boom)
+        try:
+            assert client.purchase_stamp() == DUMMY_STAMP
+        finally:
+            patcher.stop()
+
+
+# --- Payment request presentation and transport (#129) ---
+
+class TestInsecureGatewayWarning:
+    @pytest.mark.parametrize("url", ["http://gateway.example.com", "http://10.0.0.5:8000"])
+    def test_plain_http_with_x402_warns(self, url):
+        from swarm_provenance_uploader.exceptions import InsecureGatewayWarning
+
+        with pytest.warns(InsecureGatewayWarning):
+            GatewayClient(base_url=url, x402_enabled=True)
+
+    @pytest.mark.parametrize("url,x402", [
+        ("https://gateway.example.com", True),
+        ("http://localhost:8000", True),
+        ("http://127.0.0.1:8000", True),
+        ("http://[::1]:8000", True),
+        ("http://gateway.example.com", False),
+    ])
+    def test_no_warning(self, url, x402):
+        import warnings
+        from swarm_provenance_uploader.exceptions import InsecureGatewayWarning
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", InsecureGatewayWarning)
+            GatewayClient(base_url=url, x402_enabled=x402)
+
+
+class TestPaymentDescription:
+    def test_leads_with_client_request_and_marks_gateway_text(self, mock_x402, requests_mock):
+        seen = []
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        client, patcher = _client_with(mock_x402, x402_payment_callback=lambda a, d: seen.append(d) or True)
+        try:
+            client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert seen == ['POST /api/v1/stamps/ (gateway says: "Stamp purchase")']
+
+    def test_gateway_text_sanitized_and_truncated(self):
+        from swarm_provenance_uploader.models import X402PaymentOption
+
+        option = X402PaymentOption(
+            scheme="exact", network="base-sepolia", maxAmountRequired="1", resource="/x",
+            payTo=PAY_TO, description="Free!\x1b[2K\rPay now?\n" + "x" * 200,
+        )
+        described = GatewayClient._describe_request(option)
+        assert "\x1b" not in described and "\r" not in described and "\n" not in described
+        assert described.startswith("API request to /x")
+        assert len(described) < 130
+
+    def test_no_gateway_description(self):
+        from swarm_provenance_uploader.models import X402PaymentOption
+
+        option = X402PaymentOption(scheme="exact", network="base-sepolia", maxAmountRequired="1",
+                                   resource="/x", payTo=PAY_TO)
+        assert GatewayClient._describe_request(option) == "API request to /x"
+
+
+class TestExpectedPayToPassedThrough:
+    def test_expected_pay_to_reaches_x402_client(self):
+        from unittest.mock import patch
+
+        client = GatewayClient(base_url=GW, x402_enabled=True, x402_private_key="0x" + "a" * 64,
+                               x402_expected_pay_to=PAY_TO)
+        with patch("swarm_provenance_uploader.core.x402_client.X402Client") as cls:
+            client._get_x402_client()
+        assert cls.call_args.kwargs["expected_pay_to"] == PAY_TO
+
+
+class TestPaidRequestOutcomeReviewCases:
+    """Cases from the #127 review: interrupts, unreadable success, not-charged 5xx."""
+
+    def test_keyboard_interrupt_after_payment_is_outcome_unknown(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"exc": KeyboardInterrupt}])
+        with pytest.raises(PaymentOutcomeUnknownError, match="Interrupted") as exc_info:
+            paying_client.purchase_stamp()
+        assert exc_info.value.nonce == NONCE
+
+    def test_valid_before_extracted(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"exc": requests.exceptions.ReadTimeout}])
+        with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+            paying_client.purchase_stamp()
+        assert exc_info.value.valid_before == 9999999999
+
+    @pytest.mark.parametrize("body", [{"text": "<html>proxy page</html>"}, {"json": {"unexpected": True}}])
+    def test_unreadable_success_after_payment_is_settled(self, paying_client, requests_mock, body):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, dict(status_code=201, **body)])
+        with pytest.raises(PaymentSettledNotDeliveredError, match="could not be read") as exc_info:
+            paying_client.purchase_stamp()
+        assert exc_info.value.nonce == NONCE
+
+    def test_unreadable_success_without_payment_stays_plain(self, requests_mock):
+        requests_mock.post(f"{GW}/api/v1/stamps/", status_code=201, text="<html>")
+        with pytest.raises(ConnectionError):
+            GatewayClient(base_url=GW).purchase_stamp()
+
+    def test_paid_upload_without_reference_is_settled(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        requests_mock.post(f"{GW}/api/v1/data/", [PAYMENT_REQUIRED, {"status_code": 200, "json": {"message": "ok"}}])
+        with pytest.raises(PaymentSettledNotDeliveredError):
+            paying_client.upload_data(b"x", DUMMY_STAMP)
+
+    def test_paid_signed_upload_without_reference_is_settled(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        requests_mock.post(f"{GW}/api/v1/data/", [PAYMENT_REQUIRED, {"status_code": 200, "json": {}}])
+        with pytest.raises(PaymentSettledNotDeliveredError):
+            paying_client.upload_data_with_signing(b"{}", DUMMY_STAMP)
+
+    def test_paid_manifest_without_reference_is_settled(self, paying_client, requests_mock, tmp_path):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        tar = tmp_path / "c.tar"
+        tar.write_bytes(b"tar")
+        requests_mock.post(f"{GW}/api/v1/data/manifest", [PAYMENT_REQUIRED, {"status_code": 200, "json": {}}])
+        with pytest.raises(PaymentSettledNotDeliveredError):
+            paying_client.upload_manifest(str(tar), DUMMY_STAMP)
+
+    def test_pool_acquire_timeout_after_payment_is_outcome_unknown(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", [PAYMENT_REQUIRED, {"exc": requests.exceptions.ReadTimeout}])
+        with pytest.raises(PaymentOutcomeUnknownError):
+            paying_client.acquire_stamp_from_pool()
+
+    @pytest.mark.parametrize("status,body", [
+        (503, {"detail": {"code": "PURCHASE_CAPACITY", "message": "You were not charged; retry shortly."}}),
+        (500, {"detail": "Internal server error. You were not charged."}),
+    ])
+    def test_not_charged_5xx_is_plain_failure(self, paying_client, requests_mock, status, body):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": status, "json": body}])
+        with pytest.raises(ConnectionError) as exc_info:
+            paying_client.purchase_stamp()
+        assert not isinstance(exc_info.value, PaymentOutcomeUnknownError)
+
+
+class TestHardCapReviewCases:
+    """Cases from the #128 review."""
+
+    def test_huge_amount_does_not_overflow_and_is_refused(self, mock_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        mock_x402.select_payment_option.return_value = _option(amount="9" * 400)
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_max_auto_pay_usd=1.00)
+        try:
+            with pytest.raises(PaymentRequiredError, match="exceeds the auto-pay limit"):
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+        mock_x402.sign_payment.assert_not_called()
+
+    def test_kwargs_callback_not_given_option(self, mock_x402, requests_mock):
+        seen = {}
+
+        def forwarding(amount_usd, description, **kwargs):
+            seen.update(kwargs)
+            return True
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        client, patcher = _client_with(mock_x402, x402_payment_callback=forwarding)
+        try:
+            client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert seen == {}
+
+
+class TestPresentationReviewCases:
+    """Cases from the #129 review."""
+
+    def test_description_uses_original_request_not_redirect(self, mock_x402, requests_mock):
+        seen = []
+        requests_mock.post(f"{GW}/api/v1/stamps/", [
+            {"status_code": 307, "headers": {"Location": f"{GW}/api/v1/elsewhere/"}},
+            {"status_code": 201, "json": {"batchID": DUMMY_STAMP}},
+        ])
+        requests_mock.post(f"{GW}/api/v1/elsewhere/", status_code=402, json={"accepts": []})
+        client, patcher = _client_with(mock_x402, x402_payment_callback=lambda a, d: seen.append(d) or True)
+        try:
+            client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert seen[0].startswith("POST /api/v1/stamps/ ")
+
+    def test_bidi_and_zero_width_characters_stripped(self):
+        from swarm_provenance_uploader.core.gateway_client import _sanitize_gateway_text
+
+        cleaned = _sanitize_gateway_text("abc‮evil​X⁦y﻿")
+        for ch in "‮​⁦﻿":
+            assert ch not in cleaned
+
+    @pytest.mark.parametrize("url", ["http://127.0.0.2:8000", "http://LOCALHOST:8000", "http://[::1]:8000"])
+    def test_loopback_variants_not_insecure(self, url):
+        from swarm_provenance_uploader.core.gateway_client import is_insecure_gateway_url
+
+        assert not is_insecure_gateway_url(url)
+
+    @pytest.mark.parametrize("url", ["http://localhost.evil.com", "HTTP://gateway.example.com", "http://128.0.0.1"])
+    def test_non_loopback_insecure(self, url):
+        from swarm_provenance_uploader.core.gateway_client import is_insecure_gateway_url
+
+        assert is_insecure_gateway_url(url)
+
+
+class TestListStampsWallet:
+    def test_wallet_query_param(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/stamps/", json={"stamps": [], "total_count": 0})
+        GatewayClient(base_url=GW).list_stamps(wallet=PAYER)
+        # Lowercased (the gateway matches its lowercased owners exactly) and
+        # exclusive (owned only, not shared or untracked stamps)
+        assert "wallet=" + PAYER.lower() in requests_mock.last_request.url
+        assert requests_mock.last_request.qs["exclusive"] == ["true"]
+
+    def test_no_wallet_no_param(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/stamps/", json={"stamps": [], "total_count": 0})
+        GatewayClient(base_url=GW).list_stamps()
+        assert requests_mock.last_request.qs == {}
+
+
+# --- Idempotency-Key on paid requests (#124) ---
+
+def _header_with_nonce(nonce):
+    import base64
+    import json
+
+    payload = {"x402Version": 1, "scheme": "exact", "network": "base-sepolia", "payload": {
+        "signature": "0x" + "ee" * 65,
+        "authorization": {"from": PAYER, "to": PAY_TO, "value": "50000",
+                          "validAfter": "0", "validBefore": "9999999999", "nonce": nonce},
+    }}
+    return base64.b64encode(json.dumps(payload).encode()).decode()
+
+
+NONCES = ["0x" + c * 64 for c in "123456789"]
+CREATED = {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}
+
+
+def _idem(code, status=409, **detail):
+    headers = {"Retry-After": "5"} if code == "IDEMPOTENCY_KEY_IN_PROGRESS" else {}
+    if "transaction" in detail:
+        headers["X-Payment-Transaction"] = detail["transaction"]
+    return {"status_code": status, "headers": headers,
+            "json": {"detail": {"code": code, "message": f"{code} message", **detail}}}
+
+
+@pytest.fixture
+def idem_x402(mock_x402):
+    """mock_x402 whose every signature is a new authorization (new nonce)."""
+    mock_x402.sign_payment.side_effect = [_header_with_nonce(n) for n in NONCES]
+    return mock_x402
+
+
+@pytest.fixture
+def no_sleep(mocker):
+    return mocker.patch("swarm_provenance_uploader.core.gateway_client.time.sleep")
+
+
+def _sent_payments(requests_mock):
+    """(Idempotency-Key, X-PAYMENT) of each paid request sent."""
+    return [(r.headers.get("Idempotency-Key"), r.headers["X-PAYMENT"])
+            for r in requests_mock.request_history if "X-PAYMENT" in r.headers]
+
+
+class TestIdempotencyKeyRetries:
+    def _purchase(self, idem_x402, requests_mock, responses, **client_kwargs):
+        from unittest.mock import MagicMock
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED] + responses)
+        callback = MagicMock(return_value=True)
+        client_kwargs.setdefault("x402_payment_callback", callback)
+        client, patcher = _client_with(idem_x402, **client_kwargs)
+        try:
+            return client, client.purchase_stamp(), callback
+        finally:
+            patcher.stop()
+
+    def test_in_progress_retries_resend_same_key_and_authorization(self, idem_x402, requests_mock, no_sleep):
+        """The gateway releases an authorization it answers IN_PROGRESS: resend it, sign nothing new."""
+        _, result, callback = self._purchase(idem_x402, requests_mock, [
+            _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), CREATED,
+        ])
+        assert result == DUMMY_STAMP
+        sent = _sent_payments(requests_mock)
+        assert len(sent) == 3
+        keys = {key for key, _ in sent}
+        assert len(keys) == 1 and None not in keys       # one key for every attempt
+        assert len({auth for _, auth in sent}) == 1      # no extra signatures
+        assert idem_x402.sign_payment.call_count == 1
+        callback.assert_called_once()                    # the user is asked once
+        no_sleep.assert_called_with(5)                   # Retry-After honoured
+
+    def test_retry_after_unknown_attempt_reuses_key_and_rotates_authorization(self, idem_x402, requests_mock, no_sleep):
+        """An attempt whose outcome is unknown may be in use: the next one gets a new authorization."""
+        _, result, _ = self._purchase(idem_x402, requests_mock, [
+            _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), {"exc": requests.exceptions.ReadTimeout}, CREATED,
+        ])
+        assert result == DUMMY_STAMP
+        sent = _sent_payments(requests_mock)
+        assert len({key for key, _ in sent}) == 1
+        assert sent[1][1] == sent[0][1]   # resent after IN_PROGRESS
+        assert sent[2][1] != sent[1][1]   # rotated after the timeout
+
+    def test_signatures_per_operation_capped(self, idem_x402, requests_mock, no_sleep):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        timeout = {"exc": requests.exceptions.ReadTimeout}
+        with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+            self._purchase(idem_x402, requests_mock, [_idem("IDEMPOTENCY_KEY_IN_PROGRESS")] + [timeout] * 10)
+        assert idem_x402.sign_payment.call_count == GatewayClient.MAX_SIGNATURES_PER_OPERATION
+        assert exc_info.value.nonce == NONCES[0]  # the first attempt that may have been collected
+
+    def test_retry_after_floor(self, requests_mock):
+        response = requests.Response()
+        response.headers["Retry-After"] = "0"
+        assert GatewayClient._retry_after(response) == 5
+
+    def test_already_used_402_on_resend_signs_anew(self, idem_x402, requests_mock, no_sleep):
+        used = {"status_code": 402, "json": {"detail": {
+            "error": "This payment authorization has already been used. Sign a new payment.", "accepts": []}}}
+        _, result, _ = self._purchase(idem_x402, requests_mock, [_idem("IDEMPOTENCY_KEY_IN_PROGRESS"), used, CREATED])
+        assert result == DUMMY_STAMP
+        assert idem_x402.sign_payment.call_count == 2
+
+    @pytest.mark.parametrize("answer", [
+        {"status_code": 402, "json": {"detail": {"error": "insufficient_funds", "accepts": []}}},
+        {"status_code": 502, "json": {"detail": "Payment verification failed"}},
+        {"status_code": 400, "json": {"detail": "bad request"}},
+    ])
+    def test_non_idempotency_answer_after_unknown_attempt_reports_it(self, idem_x402, requests_mock, no_sleep, answer):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        sent = []
+        with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+            self._purchase(idem_x402, requests_mock, [
+                _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), {"exc": requests.exceptions.ReadTimeout}, answer,
+            ], x402_on_payment_sent=sent.append, x402_payment_callback=lambda a, d: True)
+        assert exc_info.value.nonce == NONCES[0]          # the attempt that timed out
+        assert [p["nonce"] for p in sent] == [NONCES[0]]  # and it is counted
+
+    def test_interrupt_while_waiting_reports_outstanding(self, idem_x402, requests_mock, no_sleep):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        no_sleep.side_effect = [None, KeyboardInterrupt]  # Ctrl-C during the wait after the timeout
+        with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+            self._purchase(idem_x402, requests_mock, [
+                _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), {"exc": requests.exceptions.ReadTimeout}, CREATED,
+            ])
+        assert exc_info.value.nonce == NONCES[0]
+
+    def test_replayed_answer_drops_unused_nonce(self, idem_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        replay = {"status_code": 500, "headers": {"Idempotent-Replayed": "true", "X-Payment-Transaction": TX_HASH},
+                  "json": {"code": "DELIVERY_FAILED_AFTER_PAYMENT", "transaction": TX_HASH}}
+        with pytest.raises(PaymentSettledNotDeliveredError) as exc_info:
+            self._purchase(idem_x402, requests_mock, [replay])
+        assert exc_info.value.nonce is None
+        assert exc_info.value.transaction == TX_HASH
+
+    def test_given_key_is_used(self, idem_x402, requests_mock, no_sleep):
+        self._purchase(idem_x402, requests_mock, [CREATED], idempotency_key="my-key-1")
+        assert _sent_payments(requests_mock)[0][0] == "my-key-1"
+
+    def test_fresh_key_per_operation_without_given_key(self, idem_x402, requests_mock):
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, CREATED, PAYMENT_REQUIRED, CREATED])
+        client, patcher = _client_with(idem_x402, x402_auto_pay=True)
+        try:
+            client.purchase_stamp()
+            client.purchase_stamp()
+        finally:
+            patcher.stop()
+        first, second = _sent_payments(requests_mock)
+        assert first[0] != second[0]
+
+    def test_invalid_given_key_rejected_locally(self):
+        with pytest.raises(ValueError):
+            GatewayClient(base_url=GW, idempotency_key="bad\nkey")
+        with pytest.raises(ValueError):
+            GatewayClient(base_url=GW, idempotency_key="k" * 256)
+
+    def test_unavailable_then_success(self, idem_x402, requests_mock, no_sleep):
+        _, result, _ = self._purchase(idem_x402, requests_mock, [_idem("IDEMPOTENCY_UNAVAILABLE", 503), CREATED])
+        assert result == DUMMY_STAMP
+
+    def test_unavailable_exhausted_is_not_charged(self, idem_x402, requests_mock, no_sleep):
+        from swarm_provenance_uploader.exceptions import PaymentRejectedError
+
+        retries = GatewayClient.IDEMPOTENCY_UNAVAILABLE_RETRIES
+        with pytest.raises(PaymentRejectedError, match="Nothing was charged"):
+            self._purchase(idem_x402, requests_mock, [_idem("IDEMPOTENCY_UNAVAILABLE", 503)] * (retries + 1))
+        assert len(_sent_payments(requests_mock)) == retries + 1
+
+    def test_in_progress_past_window_is_outcome_unknown(self, idem_x402, requests_mock, no_sleep, monkeypatch):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        monkeypatch.setattr(GatewayClient, "IDEMPOTENT_RETRY_WINDOW", 0)
+        with pytest.raises(PaymentOutcomeUnknownError, match="still running") as exc_info:
+            self._purchase(idem_x402, requests_mock, [_idem("IDEMPOTENCY_KEY_IN_PROGRESS")])
+        assert exc_info.value.idempotency_key
+        assert exc_info.value.nonce is None  # no attempt of ours is the one running
+
+    def test_timeout_retried_once_gateway_proved_it_honours_key(self, idem_x402, requests_mock, no_sleep):
+        _, result, _ = self._purchase(idem_x402, requests_mock, [
+            _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), {"exc": requests.exceptions.ReadTimeout}, CREATED,
+        ])
+        assert result == DUMMY_STAMP
+        assert len({key for key, _ in _sent_payments(requests_mock)}) == 1
+
+    def test_first_timeout_not_retried_automatically(self, idem_x402, requests_mock, no_sleep):
+        """Until the gateway shows it honours the key, a retry could pay twice."""
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+            self._purchase(idem_x402, requests_mock, [{"exc": requests.exceptions.ReadTimeout}, CREATED])
+        assert len(_sent_payments(requests_mock)) == 1
+        assert exc_info.value.idempotency_key == _sent_payments(requests_mock)[0][0]
+        assert exc_info.value.nonce == NONCES[0]
+
+
+class TestIdempotencyStopCodes:
+    """Each settled answer stops the loop at once: retrying it could pay twice."""
+
+    def _stop(self, idem_x402, requests_mock, answer, error, **kwargs):
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, answer, CREATED])
+        client, patcher = _client_with(idem_x402, x402_auto_pay=True, **kwargs)
+        try:
+            with pytest.raises(error) as exc_info:
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert len(_sent_payments(requests_mock)) == 1  # no retry
+        return exc_info.value
+
+    def test_settlement_unknown_names_original_nonce(self, idem_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        original = "0x" + "f" * 64
+        err = self._stop(idem_x402, requests_mock,
+                         _idem("IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN", nonce=original), PaymentOutcomeUnknownError)
+        assert err.nonce == original
+        assert err.code == "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN"
+        assert not err.settled
+
+    def test_settled_pending_names_transaction(self, idem_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        err = self._stop(idem_x402, requests_mock,
+                         _idem("IDEMPOTENCY_KEY_SETTLED_PENDING", transaction=TX_HASH), PaymentSettledNotDeliveredError)
+        assert err.transaction == TX_HASH
+        assert err.settled
+
+    def test_delivered_not_stored_is_its_own_error(self, idem_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentDeliveredNotStoredError
+
+        err = self._stop(idem_x402, requests_mock,
+                         _idem("IDEMPOTENCY_KEY_DELIVERED_NOT_STORED", transaction=TX_HASH),
+                         PaymentDeliveredNotStoredError)
+        assert err.transaction == TX_HASH
+        assert "succeeded and was paid once" in str(err)
+
+    def test_reused_generated_key_says_client_bug(self, idem_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import IdempotencyKeyError
+
+        err = self._stop(idem_x402, requests_mock, _idem("IDEMPOTENCY_KEY_REUSED", 422), IdempotencyKeyError)
+        assert "bug" in str(err) and "not in your input" in str(err)
+        assert "Nothing was charged" in str(err)
+
+    def test_reused_key_not_chosen_by_user_says_client_bug(self, idem_x402, requests_mock):
+        """The CLI always passes its own key; that alone must not blame the user."""
+        from swarm_provenance_uploader.exceptions import IdempotencyKeyError
+
+        err = self._stop(idem_x402, requests_mock, _idem("IDEMPOTENCY_KEY_REUSED", 422), IdempotencyKeyError,
+                         idempotency_key="generated", idempotency_key_given=False)
+        assert "bug" in str(err) and "--idempotency-key" not in str(err)
+
+    def test_reused_given_key_names_the_option(self, idem_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import IdempotencyKeyError
+
+        err = self._stop(idem_x402, requests_mock, _idem("IDEMPOTENCY_KEY_REUSED", 422), IdempotencyKeyError,
+                         idempotency_key="mine")
+        assert "--idempotency-key" in str(err)
+
+    def test_invalid_key(self, idem_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import IdempotencyKeyError
+
+        err = self._stop(idem_x402, requests_mock, _idem("IDEMPOTENCY_KEY_INVALID", 400), IdempotencyKeyError)
+        assert err.code == "IDEMPOTENCY_KEY_INVALID"
+
+
+class TestIdempotencyPaymentTotal:
+    def test_replay_of_earlier_run_not_counted(self, idem_x402, requests_mock):
+        sent = []
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 201, "json": {"batchID": DUMMY_STAMP}, "headers": {"Idempotent-Replayed": "true"},
+        }])
+        client, patcher = _client_with(idem_x402, x402_auto_pay=True, x402_on_payment_sent=sent.append)
+        try:
+            client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert sent == []
+
+    def test_in_progress_then_success_counted_once(self, idem_x402, requests_mock, no_sleep):
+        sent = []
+        requests_mock.post(f"{GW}/api/v1/stamps/", [
+            PAYMENT_REQUIRED, _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), CREATED,
+        ])
+        client, patcher = _client_with(idem_x402, x402_auto_pay=True, x402_on_payment_sent=sent.append)
+        try:
+            client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert len(sent) == 1
+
+
+class TestIdempotencyVerificationCases:
+    """Cases from the verification review of the retry loop."""
+
+    def _purchase(self, idem_x402, requests_mock, responses, **kw):
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED] + responses)
+        client, patcher = _client_with(idem_x402, x402_auto_pay=True, **kw)
+        try:
+            return client.purchase_stamp()
+        finally:
+            patcher.stop()
+
+    def test_already_used_402_marks_attempt_as_possibly_collected(self, idem_x402, requests_mock, no_sleep):
+        sent = []
+        used = {"status_code": 402, "json": {"detail": {"error": "This payment authorization has already been used."}}}
+        replay = {"status_code": 201, "json": {"batchID": DUMMY_STAMP}, "headers": {"Idempotent-Replayed": "true"}}
+        assert self._purchase(idem_x402, requests_mock, [_idem("IDEMPOTENCY_KEY_IN_PROGRESS"), used, replay],
+                              x402_on_payment_sent=sent.append) == DUMMY_STAMP
+        assert [p["nonce"] for p in sent] == [NONCES[0]]  # this run paid, via the first authorization
+
+    def test_failed_payment_response_after_unknown_attempt_reports_it(self, idem_x402, requests_mock, no_sleep):
+        import base64
+        import json
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        failed = {"status_code": 200, "json": {"batchID": DUMMY_STAMP}, "headers": {
+            "x-payment-response": base64.b64encode(json.dumps({"success": False, "errorReason": "x"}).encode()).decode()}}
+        with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+            self._purchase(idem_x402, requests_mock, [
+                _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), {"exc": requests.exceptions.ReadTimeout}, failed])
+        assert exc_info.value.nonce == NONCES[0]
+
+    def test_connect_timeout_resends_without_new_signature(self, idem_x402, requests_mock, no_sleep):
+        ct = {"exc": requests.exceptions.ConnectTimeout}
+        assert self._purchase(idem_x402, requests_mock, [
+            _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), {"exc": requests.exceptions.ReadTimeout}, ct, ct, CREATED,
+        ]) == DUMMY_STAMP
+        assert idem_x402.sign_payment.call_count == 2  # the first, and one after the read timeout
+
+    def test_non_string_code_does_not_crash(self, idem_x402, requests_mock):
+        with pytest.raises(ConnectionError):
+            self._purchase(idem_x402, requests_mock, [{"status_code": 400, "json": {"code": 1}}])

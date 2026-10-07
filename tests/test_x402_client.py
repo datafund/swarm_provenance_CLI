@@ -3,6 +3,9 @@
 import base64
 import json
 import os
+import sys
+from contextlib import contextmanager
+
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -41,6 +44,26 @@ SAMPLE_402_RESPONSE = {
 }
 
 
+@contextmanager
+def _fresh_x402_deps_cache():
+    """Clear x402_client's cached eth-account/web3 so this test's mocks are used.
+
+    The module caches the lazily imported dependencies in globals. If it was
+    imported outside a sys.modules patch, the cache would otherwise keep
+    whatever mock an earlier test installed.
+    """
+    module = sys.modules.get("swarm_provenance_uploader.core.x402_client")
+    if module is None:
+        yield
+        return
+    saved = (module._eth_account, module._web3)
+    module._eth_account = module._web3 = None
+    try:
+        yield
+    finally:
+        module._eth_account, module._web3 = saved
+
+
 @pytest.fixture
 def mock_eth_deps():
     """Mock eth-account and web3 dependencies."""
@@ -72,7 +95,7 @@ def mock_eth_deps():
                 "eth_account.messages": MagicMock(encode_typed_data=MagicMock(return_value=b"typed_data")),
                 "web3": MagicMock(Web3=mock_web3_class),
             },
-        ):
+        ), _fresh_x402_deps_cache():
             yield {
                 "account": mock_account,
                 "account_class": mock_account_class,
@@ -312,7 +335,7 @@ class TestX402ClientBalance:
                     "eth_account.messages": MagicMock(encode_typed_data=MagicMock(return_value=b"typed_data")),
                     "web3": MagicMock(Web3=mock_web3_class),
                 },
-            ):
+            ), _fresh_x402_deps_cache():
                 # Force reimport to get new mocks
                 import importlib
                 import swarm_provenance_uploader.core.x402_client as x402_module
@@ -416,7 +439,7 @@ class TestX402ClientCreatePaymentHeader:
                     "eth_account.messages": MagicMock(encode_typed_data=MagicMock(return_value=b"typed_data")),
                     "web3": MagicMock(Web3=mock_web3_class),
                 },
-            ):
+            ), _fresh_x402_deps_cache():
                 # Force reimport to get new mocks
                 import swarm_provenance_uploader.core.x402_client as x402_module
                 x402_module._eth_account = None
@@ -442,26 +465,27 @@ class TestX402ClientFormatting:
 
         client = X402Client(skip_domain_validation=True)
 
-        assert client.format_amount_usd("50000") == "$0.05"
-        assert client.format_amount_usd("1000000") == "$1.00"
-        assert client.format_amount_usd("10000000") == "$10.00"
+        assert client.format_amount_usd("50000") == "$0.050000"
+        assert client.format_amount_usd("1000000") == "$1.000000"
+        assert client.format_amount_usd("10000000") == "$10.000000"
 
     def test_format_amount_usd_zero(self, mock_eth_deps):
         """Tests formatting zero amount."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
         client = X402Client(skip_domain_validation=True)
-        assert client.format_amount_usd("0") == "$0.00"
+        assert client.format_amount_usd("0") == "$0.000000"
 
     def test_format_amount_usd_small(self, mock_eth_deps):
         """Tests formatting very small amounts."""
         from swarm_provenance_uploader.core.x402_client import X402Client
 
         client = X402Client(skip_domain_validation=True)
-        # 1 smallest unit = $0.000001, rounds to $0.00
-        assert client.format_amount_usd("1") == "$0.00"
-        # 100 smallest units = $0.0001, rounds to $0.00
-        assert client.format_amount_usd("100") == "$0.00"
+        # Every smallest unit is shown: rounding to cents would hide the price (#128)
+        assert client.format_amount_usd("1") == "$0.000001"
+        assert client.format_amount_usd("100") == "$0.000100"
+        assert client.format_amount_usd("4000") == "$0.004000"
+        assert client.format_amount_usd("123456789") == "$123.456789"
 
 
 class TestX402ClientCustomRPC:
@@ -542,7 +566,7 @@ class TestX402ClientPrivateKeyFormat:
                     "eth_account.messages": MagicMock(),
                     "web3": MagicMock(Web3=mock_web3_class),
                 },
-            ):
+            ), _fresh_x402_deps_cache():
                 import swarm_provenance_uploader.core.x402_client as x402_module
                 x402_module._eth_account = None
                 x402_module._web3 = None
@@ -585,7 +609,7 @@ class TestX402ClientErrorHandling:
                     "eth_account.messages": MagicMock(),
                     "web3": MagicMock(Web3=mock_web3_class),
                 },
-            ):
+            ), _fresh_x402_deps_cache():
                 import swarm_provenance_uploader.core.x402_client as x402_module
                 x402_module._eth_account = None
                 x402_module._web3 = None
@@ -662,3 +686,248 @@ class TestX402ClientMultiplePaymentOptions:
 
         with pytest.raises(X402NetworkError):
             client.select_payment_option(requirements)
+
+
+# DOMAIN_SEPARATOR values read from the USDC contracts on 2026-10-07
+# (eth_call DOMAIN_SEPARATOR(), name(), version() on each network).
+RECORDED_DOMAIN_SEPARATORS = {
+    "base": "0x02fa7265e7c5d81118673727957699e4d68f74cd74b7db77da710fe8a2c7834f",
+    "base-sepolia": "0x71f17a3b2ff373b803d70a5a07c046c1a2bc8e89c09ef722fcb047abe94c9818",
+}
+
+
+@pytest.fixture
+def real_eth_deps(monkeypatch):
+    """Use the real web3/eth-account, not a cached mock from another test."""
+    pytest.importorskip("web3")
+    pytest.importorskip("eth_account")
+    from swarm_provenance_uploader.core import x402_client
+
+    monkeypatch.setattr(x402_client, "_eth_account", None)
+    monkeypatch.setattr(x402_client, "_web3", None)
+    return x402_client
+
+
+def _web3_returning_separator(separator_hex):
+    """A web3 stand-in whose USDC contract returns the given DOMAIN_SEPARATOR."""
+    web3 = MagicMock()
+    web3.to_checksum_address = lambda x: x
+    web3.eth.contract.return_value.functions.DOMAIN_SEPARATOR.return_value.call.return_value = (
+        bytes.fromhex(separator_hex[2:])
+    )
+    return web3
+
+
+class TestUSDCDomainSeparators:
+    """The configured EIP-712 domains must produce the on-chain DOMAIN_SEPARATOR."""
+
+    def test_base_mainnet_domain_uses_usd_coin(self):
+        from swarm_provenance_uploader.core.x402_client import USDC_PERMIT_DOMAIN
+
+        assert USDC_PERMIT_DOMAIN["base"]["name"] == "USD Coin"
+        assert USDC_PERMIT_DOMAIN["base"]["version"] == "2"
+        assert USDC_PERMIT_DOMAIN["base-sepolia"]["name"] == "USDC"
+        assert USDC_PERMIT_DOMAIN["base-sepolia"]["version"] == "2"
+
+    @pytest.mark.parametrize("network", ["base", "base-sepolia"])
+    def test_configured_domain_matches_recorded_separator(self, real_eth_deps, network):
+        domain = real_eth_deps.USDC_PERMIT_DOMAIN[network]
+        computed = real_eth_deps.compute_domain_separator(
+            domain["name"], domain["version"], domain["chainId"], domain["verifyingContract"]
+        )
+        assert "0x" + bytes(computed).hex() == RECORDED_DOMAIN_SEPARATORS[network]
+
+    @pytest.mark.parametrize("network", ["base", "base-sepolia"])
+    def test_validate_domain_passes_against_recorded_separator(self, real_eth_deps, network):
+        client = real_eth_deps.X402Client(private_key=DUMMY_PRIVATE_KEY, network=network)
+        client._web3 = _web3_returning_separator(RECORDED_DOMAIN_SEPARATORS[network])
+
+        assert client.validate_domain() is True
+
+    def test_old_base_name_is_rejected(self, real_eth_deps):
+        """'USDC' on Base mainnet is the bug from #126: it must not validate."""
+        with pytest.raises(X402ConfigurationError, match="domain mismatch on base"):
+            real_eth_deps.validate_domain_config(
+                network="base",
+                name="USDC",
+                version="2",
+                web3_instance=_web3_returning_separator(RECORDED_DOMAIN_SEPARATORS["base"]),
+            )
+
+
+class TestAdvertisedDomainCheck:
+    """A 402 `extra` naming a different EIP-712 domain is refused before signing."""
+
+    def _option(self, network, extra):
+        return X402PaymentOption(
+            scheme="exact",
+            network=network,
+            maxAmountRequired="50000",
+            resource="/test",
+            payTo=DUMMY_PAY_TO,
+            extra=extra,
+        )
+
+    def test_mismatched_extra_name_refused(self, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(network="base", skip_domain_validation=True)
+        with pytest.raises(X402ConfigurationError, match="'USDC'.*'USD Coin'"):
+            client.sign_payment(self._option("base", {"name": "USDC", "version": "2"}))
+        mock_eth_deps["account"].sign_typed_data.assert_not_called()
+
+    def test_mismatched_extra_version_refused(self, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(skip_domain_validation=True)
+        with pytest.raises(X402ConfigurationError, match="version"):
+            client.sign_payment(self._option("base-sepolia", {"name": "USDC", "version": "1"}))
+
+    def test_matching_or_absent_extra_signs(self, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(network="base", skip_domain_validation=True)
+        assert client.sign_payment(self._option("base", {"name": "USD Coin", "version": "2"}))
+        assert client.sign_payment(self._option("base", None))
+
+    def test_numeric_extra_version_accepted(self, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(network="base", skip_domain_validation=True)
+        assert client.sign_payment(self._option("base", {"name": "USD Coin", "version": 2}))
+
+    def test_advertised_mismatch_reported_before_rpc_validation(self, mock_eth_deps):
+        """A mismatch must not be masked by the on-chain check (or its RPC failure)."""
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(network="base")  # domain validation not skipped
+        with patch.object(client, "validate_domain") as validate:
+            with pytest.raises(X402ConfigurationError, match="Gateway advertises"):
+                client.sign_payment(self._option("base", {"name": "USDC", "version": "2"}))
+            validate.assert_not_called()
+
+
+# --- Validating the 402 payment request before signing (#129) ---
+
+USDC_SEPOLIA = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+
+
+def _opt(**overrides):
+    fields = dict(
+        scheme="exact", network="base-sepolia", maxAmountRequired="50000",
+        resource="/api/v1/stamps/", payTo=DUMMY_PAY_TO, asset=USDC_SEPOLIA,
+    )
+    fields.update(overrides)
+    return X402PaymentOption(**fields)
+
+
+class TestPaymentRequirementValidation:
+    def _client(self, **kwargs):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        return X402Client(skip_domain_validation=True, **kwargs)
+
+    def _refused(self, client, *options):
+        from swarm_provenance_uploader.exceptions import PaymentRequirementsError
+
+        with pytest.raises(PaymentRequirementsError) as exc_info:
+            client.select_payment_option(X402PaymentRequirements(accepts=list(options)))
+        return exc_info.value
+
+    def test_valid_option_selected(self, mock_eth_deps):
+        assert self._client().select_payment_option(X402PaymentRequirements(accepts=[_opt()])).payTo == DUMMY_PAY_TO
+
+    def test_non_exact_scheme_refused(self, mock_eth_deps):
+        err = self._refused(self._client(), _opt(scheme="upto"))
+        assert "scheme 'upto'" in str(err)
+
+    def test_exact_preferred_over_unsupported(self, mock_eth_deps):
+        chosen = self._client().select_payment_option(
+            X402PaymentRequirements(accepts=[_opt(scheme="upto", payTo="0x" + "1" * 40), _opt()])
+        )
+        assert chosen.scheme == "exact"
+        assert chosen.payTo == DUMMY_PAY_TO
+
+    def test_wrong_asset_refused(self, mock_eth_deps):
+        err = self._refused(self._client(), _opt(asset="0x" + "9" * 40))
+        assert "is not USDC on base-sepolia" in str(err)
+
+    def test_asset_compared_case_insensitively(self, mock_eth_deps):
+        assert self._client().select_payment_option(X402PaymentRequirements(accepts=[_opt(asset=USDC_SEPOLIA.lower())]))
+
+    def test_absent_asset_accepted(self, mock_eth_deps):
+        """No asset named: the signer only ever signs for its own USDC contract."""
+        assert self._client().select_payment_option(X402PaymentRequirements(accepts=[_opt(asset=None)]))
+
+    def test_mainnet_usdc_refused_on_sepolia(self, mock_eth_deps):
+        self._refused(self._client(), _opt(asset="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"))
+
+    @pytest.mark.parametrize("amount", ["-1", "1.5", "", "1e6", "0x10"])
+    def test_malformed_amount_refused(self, mock_eth_deps, amount):
+        self._refused(self._client(), _opt(maxAmountRequired=amount))
+
+    @pytest.mark.parametrize("pay_to", ["", "0x123", "not-an-address", "0x" + "g" * 40])
+    def test_malformed_pay_to_refused(self, mock_eth_deps, pay_to):
+        self._refused(self._client(), _opt(payTo=pay_to))
+
+    def test_expected_pay_to_mismatch_refused(self, mock_eth_deps):
+        err = self._refused(self._client(expected_pay_to="0x" + "2" * 40), _opt())
+        assert "X402_EXPECTED_PAY_TO" in str(err)
+
+    def test_expected_pay_to_match_case_insensitive(self, mock_eth_deps):
+        client = self._client(expected_pay_to=DUMMY_PAY_TO.lower())
+        assert client.select_payment_option(X402PaymentRequirements(accepts=[_opt()]))
+
+    def test_expected_pay_to_from_env(self, mock_eth_deps):
+        with patch.dict(os.environ, {"X402_EXPECTED_PAY_TO": "0x" + "2" * 40}):
+            client = self._client()
+        assert client.expected_pay_to == "0x" + "2" * 40
+        self._refused(client, _opt())
+
+    def test_invalid_expected_pay_to_is_config_error(self, mock_eth_deps):
+        with pytest.raises(X402ConfigurationError, match="not an address"):
+            self._client(expected_pay_to="operator.eth")
+
+    def test_sign_payment_refuses_invalid_option_directly(self, mock_eth_deps):
+        from swarm_provenance_uploader.exceptions import PaymentRequirementsError
+
+        client = self._client()
+        with pytest.raises(PaymentRequirementsError):
+            client.sign_payment(_opt(scheme="upto"))
+        mock_eth_deps["account"].sign_typed_data.assert_not_called()
+
+    def test_all_reasons_reported(self, mock_eth_deps):
+        err = self._refused(self._client(), _opt(scheme="upto"), _opt(asset="0x" + "9" * 40))
+        assert len(err.reasons) == 2
+
+
+class TestPaymentRequirementReviewCases:
+    """Cases from the #129 review."""
+
+    def _client(self, **kwargs):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        return X402Client(skip_domain_validation=True, **kwargs)
+
+    @pytest.mark.parametrize("field,value", [
+        ("maxAmountRequired", "50000\n"),
+        ("payTo", DUMMY_PAY_TO + "\n"),
+    ])
+    def test_trailing_newline_refused(self, mock_eth_deps, field, value):
+        assert self._client().refusal_reason(_opt(**{field: value}))
+
+    def test_pin_with_trailing_whitespace_is_stripped(self, mock_eth_deps):
+        assert self._client(expected_pay_to=DUMMY_PAY_TO + "\n").expected_pay_to == DUMMY_PAY_TO
+
+    def test_empty_pin_overrides_env(self, mock_eth_deps):
+        with patch.dict(os.environ, {"X402_EXPECTED_PAY_TO": "0x" + "2" * 40}):
+            assert self._client(expected_pay_to="").expected_pay_to is None
+
+    def test_zero_address_refused(self, mock_eth_deps):
+        assert "zero address" in self._client().refusal_reason(_opt(payTo="0x" + "0" * 40))
+
+    @pytest.mark.parametrize("field", ["scheme", "asset", "network"])
+    def test_gateway_strings_escaped_in_refusals(self, mock_eth_deps, field):
+        reason = self._client().refusal_reason(_opt(**{field: "\x1b[2Jevil"}))
+        assert "\x1b" not in reason
+        assert "\\x1b" in reason

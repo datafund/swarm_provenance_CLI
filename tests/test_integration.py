@@ -400,9 +400,9 @@ class TestX402Integration:
         client = X402Client(network="base-sepolia")
 
         # 1 USDC = 1_000_000 (6 decimals)
-        assert client.format_amount_usd("1000000") == "$1.00"
-        assert client.format_amount_usd("500000") == "$0.50"
-        assert client.format_amount_usd("10000000") == "$10.00"
+        assert client.format_amount_usd("1000000") == "$1.000000"
+        assert client.format_amount_usd("500000") == "$0.500000"
+        assert client.format_amount_usd("10000000") == "$10.000000"
 
     @skip_if_no_x402
     @skip_if_no_gateway

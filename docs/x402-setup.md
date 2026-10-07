@@ -150,6 +150,9 @@ X402_AUTO_PAY=false
 
 # Optional: Maximum auto-pay amount per request in USD
 X402_MAX_AUTO_PAY_USD=1.00
+
+# Optional: Only pay this recipient (the gateway operator's published pay-to address)
+X402_EXPECTED_PAY_TO=0x...
 ```
 
 ### Verify configuration
@@ -174,11 +177,16 @@ swarm-prov-upload --x402 upload --file data.txt
 
 Output:
 ```
-Payment required: $0.05 for stamp purchase
-Confirm payment? [y/N]: y
+Payment required: $0.050000 USDC
+  For:     Stamp purchase
+  Network: base-sepolia
+  Pay to:  0x1234567890AbcdEF1234567890aBcDeF12345678
+  Asset:   USDC 0x036CbD53842c5426634e7929541eC2318f3dCF7e
+Pay now? [y/N]: y
 Processing payment...
-Upload successful: abc123...
 ```
+
+The prompt shows the exact amount (all 6 USDC decimals), the network, the recipient and the token from the gateway's payment request. It defaults to **No**: pressing Enter, a newline piped into the command, or no input at all (closed stdin) declines. `upload` can ask twice (stamp, then upload); the second prompt shows what was already sent in this command, and the success message prints the total.
 
 ### Auto-pay mode
 
@@ -191,7 +199,27 @@ swarm-prov-upload --x402 --auto-pay --max-pay 1.00 upload --file data.txt
 # Or set in environment
 export X402_AUTO_PAY=true
 export X402_MAX_AUTO_PAY_USD=1.00
+
+# Turn it off for one command even if X402_AUTO_PAY=true
+swarm-prov-upload --x402 --no-auto-pay upload --file data.txt
 ```
+
+The limit is per payment. A payment above it is never signed automatically: the CLI asks instead, and library use without a confirmation callback refuses it before signing. `--no-x402` and `--no-free` likewise override `X402_ENABLED` and `FREE_TIER` for one command.
+
+### Retries and Idempotency-Key
+
+Every paid request carries an `Idempotency-Key` header: one random key per command, the same for each attempt. A gateway that supports the key charges at most one attempt; a retry is answered from the first request's result. A retry resends the same payment signature, except after an attempt that got no answer (it may be in use), when a new one is signed; at most 3 signatures are made per request.
+
+- While the first request is still running (`IDEMPOTENCY_KEY_IN_PROGRESS`) or the gateway cannot check keys for a moment (`IDEMPOTENCY_UNAVAILABLE`), the CLI waits and retries with the same key on its own.
+- It stops, and does not retry, when the gateway says the first request:
+  - may or may not have been collected: it prints the original authorization nonce to check on-chain;
+  - was paid but has no result: it prints the transaction to give the operator;
+  - succeeded but its result was too large to keep: this is reported as a success.
+- A timeout is retried automatically only after the gateway has answered with one of these codes in the same command. Before that the CLI cannot tell whether the gateway supports the key, so it reports the payment instead (see below).
+
+When a command fails with an unknown payment outcome, the error shows its key and the command line to repeat it with. `--idempotency-key` is a global option, so it goes before the command (`swarm-prov-upload --idempotency-key <key> upload ...`). That re-run repeats the same requests with the same key: on a gateway that supports it, an operation that already went through is answered from its result instead of being charged again. On a gateway without support (the header is ignored), that re-run pays again, so check the payment first as described below.
+
+Gateway support: datafund/swarm_connect has it on `dev` (staging) and not yet in production.
 
 ## Switching to Mainnet
 
@@ -232,6 +260,46 @@ swarm-prov-upload x402 balance
 ### "Payment rejected"
 
 The signed payment may have expired or been invalid. Try the request again.
+
+### "The payment may have been taken"
+
+The paid request timed out, dropped, or failed with a server error after the payment was sent. The gateway collects the payment before doing the work and finishes it even if the CLI stops waiting, so the payment may have been collected and the request may even have succeeded.
+
+**Do not re-run straight away**: a re-run signs a new payment and can pay twice. The error prints the amount, payer, pay-to address, authorization nonce and the time until which the authorization can be collected ("Valid until", about 5 minutes after signing), plus a block-explorer link for the payer. Check for a USDC transfer from the payer to the pay-to address:
+- If none has appeared by the "Valid until" time, none ever will, and re-running is safe. Before then, the gateway may still be collecting it.
+- If one did, and the command bought a stamp, look for the stamp among your wallet's stamps before buying another. Otherwise contact the gateway operator with the transaction.
+
+Pressing Ctrl-C while a paid request is in progress is reported the same way, because the gateway finishes the request regardless.
+
+### "Payment was taken, but ... failed"
+
+The gateway confirmed it collected the payment, but the request failed afterwards (or it answered success with a response the CLI could not read). Contact the gateway operator with the transaction hash shown; they can deliver the result or refund it. Re-running pays again.
+
+### "Payment received, but the stamp purchase is not confirmed yet"
+
+The payment settled, but the Swarm node did not confirm the stamp in time. The gateway keeps waiting and registers the stamp to your wallet once the node reports it. Do not buy another one: the message shows the stamp label and the command that lists your wallet's stamps (`swarm-prov-upload stamps list --wallet <payer> --full`), where it appears under that label.
+
+### An upload failed after the stamp was bought
+
+The full stamp ID is printed when the stamp is bought, and again if the command then fails. Re-run the same command with `--stamp-id <id>` to use that stamp instead of buying another.
+
+### "Refused the gateway's payment request; nothing was signed"
+
+Before signing, the CLI checks the gateway's payment request and refuses an option that:
+- uses a scheme other than `exact`;
+- names a token (`asset`) other than USDC on the configured network;
+- has a malformed amount or recipient; or
+- pays someone other than `X402_EXPECTED_PAY_TO`, when that is set.
+
+The message lists the reasons. A gateway that triggers this is misconfigured or not the one you meant to use.
+
+### "x402 payments over plain http"
+
+The gateway URL is `http://` on a host other than this machine. Anyone on the network path could rewrite the payment request, including the amount and the recipient. Use the gateway's `https://` URL.
+
+### "Gateway advertises EIP-712 name ..."
+
+The gateway's payment request names a different USDC signing domain than the token contract uses, so the payment would be rejected. Nothing was signed. The gateway's x402 configuration needs updating (on Base mainnet the USDC contract's name is `USD Coin`; on Base Sepolia it is `USDC`).
 
 ### "No matching network option"
 
