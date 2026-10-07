@@ -5212,7 +5212,28 @@ class TestIdempotencyKeyCli:
         result, _ = self._upload(mocker, purchase_stamp=err)
         assert result.exit_code == 1
         assert re.search(r"Idempotency-Key:\s+k-1", result.output)
-        assert "add --idempotency-key k-1" in result.output
+        assert "swarm-prov-upload --idempotency-key k-1 <same command and options>" in result.output
+
+    def test_rerun_line_rebuilt_from_entry_point_args(self, mocker):
+        from swarm_provenance_uploader.cli import _rerun_with_key
+
+        mocker.patch("swarm_provenance_uploader.cli.sys.argv",
+                     ["/usr/bin/swarm-prov-upload", "--x402", "--idempotency-key", "old", "upload", "--file", "my data.txt"])
+        assert _rerun_with_key("k-1") == "swarm-prov-upload --idempotency-key k-1 --x402 upload --file 'my data.txt'"
+
+    def test_reused_generated_key_through_cli_blames_cli(self, mocker):
+        """No --idempotency-key given: the CLI must tell the client it chose the key itself."""
+        constructor = mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        from swarm_provenance_uploader.cli import _get_gateway_client_with_x402
+
+        _x402_config["enabled"] = True
+        _get_gateway_client_with_x402("https://gateway.example.com")
+        assert constructor.call_args.kwargs["idempotency_key_given"] is False
+
+    def test_given_key_marked_as_given(self, mocker):
+        _, keys = self._upload(mocker, "--idempotency-key", "retry-123")
+        from swarm_provenance_uploader.cli import _x402_session
+        assert _x402_session["idempotency_key_given"] is True
 
     def test_settlement_unknown_prints_original_nonce(self, mocker):
         err = exceptions.PaymentOutcomeUnknownError(

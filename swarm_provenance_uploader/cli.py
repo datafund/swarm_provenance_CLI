@@ -285,6 +285,11 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
         if e.payer:
             typer.echo("To find it, look for the label above in:", err=True)
             typer.echo(f"  swarm-prov-upload stamps list --wallet {e.payer} --full", err=True)
+        if e.idempotency_key:
+            typer.echo("Or, once it is confirmed, re-run with the same key: a gateway that "
+                       "supports Idempotency-Key answers with the stamp, without charging again:",
+                       err=True)
+            typer.echo(f"  {_rerun_with_key(e.idempotency_key)}", err=True)
     elif e.settled:
         typer.echo("Contact the gateway operator with the transaction above for the "
                    "result or a refund. Re-running pays again.", err=True)
@@ -301,11 +306,29 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
                        err=True)
         if e.idempotency_key:
             typer.echo("A gateway that supports Idempotency-Key answers a re-run with the same "
-                       "key from the first request instead of charging again; to re-run that "
-                       f"way, add --idempotency-key {e.idempotency_key}", err=True)
+                       "key from the first request instead of charging again. To re-run that "
+                       "way, put the key before the command:", err=True)
+            typer.echo(f"  {_rerun_with_key(e.idempotency_key)}", err=True)
     if link:
         typer.echo(f"  {link}", err=True)
     raise typer.Exit(code=1)
+
+
+def _rerun_with_key(key: str) -> str:
+    """The command line that repeats this command with an Idempotency-Key.
+
+    --idempotency-key is a global option, so it goes before the subcommand.
+    """
+    args = list(sys.argv[1:])
+    if "--idempotency-key" in args:
+        i = args.index("--idempotency-key")
+        del args[i:i + 2]
+    args = [a for a in args if not a.startswith("--idempotency-key=")]
+    if args and Path(sys.argv[0]).name == "swarm-prov-upload":
+        import shlex
+        return "swarm-prov-upload --idempotency-key " + shlex.quote(key) + " " + " ".join(shlex.quote(a) for a in args)
+    # Not run from the entry point (e.g. python -m): the arguments may not be ours
+    return f"swarm-prov-upload --idempotency-key {key} <same command and options>"
 
 
 def _command_idempotency_key() -> str:
@@ -348,8 +371,9 @@ def _report_delivered_not_stored(e: exceptions.PaymentDeliveredNotStoredError, a
             typer.echo(f"  {name + ':':<17}{value}", err=True)
     if final_step:
         _unused_stamp.update(id=None, how=None)  # the upload used it
-        typer.echo("Ask the gateway operator for the result, citing the transaction above. "
-                   "Do not pay again.", err=True)
+        typer.echo("No Swarm reference is printed: the gateway could not return it. Ask the "
+                   "gateway operator for the result, citing the transaction above. Do not pay "
+                   "again.", err=True)
         raise typer.Exit(code=0)
     typer.echo("The stamp exists and is registered to your wallet. Find its ID with:", err=True)
     if e.payer:
@@ -394,6 +418,7 @@ def _get_gateway_client_with_x402(gateway_url: str, verbose: bool = False) -> Ga
                 x402_on_payment_sent=_record_x402_payment,
                 x402_expected_pay_to=_x402_config["expected_pay_to"],
                 idempotency_key=_command_idempotency_key(),
+                idempotency_key_given=_x402_session["idempotency_key_given"],
                 free_tier=_backend_config["free_tier"],
             )
     else:

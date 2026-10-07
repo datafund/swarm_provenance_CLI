@@ -1338,7 +1338,7 @@ def paying_client():
     from unittest.mock import patch
 
     client = GatewayClient(base_url=GW, x402_enabled=True, x402_auto_pay=True)
-    with patch.object(client, "_handle_402_response", return_value=(_signed_header(), "$0.050000")):
+    with patch.object(client, "_approve_payment", return_value=(_signed_header(), "$0.050000", None)):
         yield client
 
 
@@ -1993,7 +1993,8 @@ class TestIdempotencyKeyRetries:
         finally:
             patcher.stop()
 
-    def test_retry_reuses_key_and_rotates_authorization(self, idem_x402, requests_mock, no_sleep):
+    def test_in_progress_retries_resend_same_key_and_authorization(self, idem_x402, requests_mock, no_sleep):
+        """The gateway releases an authorization it answers IN_PROGRESS: resend it, sign nothing new."""
         _, result, callback = self._purchase(idem_x402, requests_mock, [
             _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), CREATED,
         ])
@@ -2002,9 +2003,78 @@ class TestIdempotencyKeyRetries:
         assert len(sent) == 3
         keys = {key for key, _ in sent}
         assert len(keys) == 1 and None not in keys       # one key for every attempt
-        assert len({auth for _, auth in sent}) == 3      # a new authorization each time
+        assert len({auth for _, auth in sent}) == 1      # no extra signatures
+        assert idem_x402.sign_payment.call_count == 1
         callback.assert_called_once()                    # the user is asked once
         no_sleep.assert_called_with(5)                   # Retry-After honoured
+
+    def test_retry_after_unknown_attempt_reuses_key_and_rotates_authorization(self, idem_x402, requests_mock, no_sleep):
+        """An attempt whose outcome is unknown may be in use: the next one gets a new authorization."""
+        _, result, _ = self._purchase(idem_x402, requests_mock, [
+            _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), {"exc": requests.exceptions.ReadTimeout}, CREATED,
+        ])
+        assert result == DUMMY_STAMP
+        sent = _sent_payments(requests_mock)
+        assert len({key for key, _ in sent}) == 1
+        assert sent[1][1] == sent[0][1]   # resent after IN_PROGRESS
+        assert sent[2][1] != sent[1][1]   # rotated after the timeout
+
+    def test_signatures_per_operation_capped(self, idem_x402, requests_mock, no_sleep):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        timeout = {"exc": requests.exceptions.ReadTimeout}
+        with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+            self._purchase(idem_x402, requests_mock, [_idem("IDEMPOTENCY_KEY_IN_PROGRESS")] + [timeout] * 10)
+        assert idem_x402.sign_payment.call_count == GatewayClient.MAX_SIGNATURES_PER_OPERATION
+        assert exc_info.value.nonce == NONCES[0]  # the first attempt that may have been collected
+
+    def test_retry_after_floor(self, requests_mock):
+        response = requests.Response()
+        response.headers["Retry-After"] = "0"
+        assert GatewayClient._retry_after(response) == 5
+
+    def test_already_used_402_on_resend_signs_anew(self, idem_x402, requests_mock, no_sleep):
+        used = {"status_code": 402, "json": {"detail": {
+            "error": "This payment authorization has already been used. Sign a new payment.", "accepts": []}}}
+        _, result, _ = self._purchase(idem_x402, requests_mock, [_idem("IDEMPOTENCY_KEY_IN_PROGRESS"), used, CREATED])
+        assert result == DUMMY_STAMP
+        assert idem_x402.sign_payment.call_count == 2
+
+    @pytest.mark.parametrize("answer", [
+        {"status_code": 402, "json": {"detail": {"error": "insufficient_funds", "accepts": []}}},
+        {"status_code": 502, "json": {"detail": "Payment verification failed"}},
+        {"status_code": 400, "json": {"detail": "bad request"}},
+    ])
+    def test_non_idempotency_answer_after_unknown_attempt_reports_it(self, idem_x402, requests_mock, no_sleep, answer):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        sent = []
+        with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+            self._purchase(idem_x402, requests_mock, [
+                _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), {"exc": requests.exceptions.ReadTimeout}, answer,
+            ], x402_on_payment_sent=sent.append, x402_payment_callback=lambda a, d: True)
+        assert exc_info.value.nonce == NONCES[0]          # the attempt that timed out
+        assert [p["nonce"] for p in sent] == [NONCES[0]]  # and it is counted
+
+    def test_interrupt_while_waiting_reports_outstanding(self, idem_x402, requests_mock, no_sleep):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        no_sleep.side_effect = [None, KeyboardInterrupt]  # Ctrl-C during the wait after the timeout
+        with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+            self._purchase(idem_x402, requests_mock, [
+                _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), {"exc": requests.exceptions.ReadTimeout}, CREATED,
+            ])
+        assert exc_info.value.nonce == NONCES[0]
+
+    def test_replayed_answer_drops_unused_nonce(self, idem_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        replay = {"status_code": 500, "headers": {"Idempotent-Replayed": "true", "X-Payment-Transaction": TX_HASH},
+                  "json": {"code": "DELIVERY_FAILED_AFTER_PAYMENT", "transaction": TX_HASH}}
+        with pytest.raises(PaymentSettledNotDeliveredError) as exc_info:
+            self._purchase(idem_x402, requests_mock, [replay])
+        assert exc_info.value.nonce is None
+        assert exc_info.value.transaction == TX_HASH
 
     def test_given_key_is_used(self, idem_x402, requests_mock, no_sleep):
         self._purchase(idem_x402, requests_mock, [CREATED], idempotency_key="my-key-1")
@@ -2113,6 +2183,14 @@ class TestIdempotencyStopCodes:
         err = self._stop(idem_x402, requests_mock, _idem("IDEMPOTENCY_KEY_REUSED", 422), IdempotencyKeyError)
         assert "bug" in str(err) and "not in your input" in str(err)
         assert "Nothing was charged" in str(err)
+
+    def test_reused_key_not_chosen_by_user_says_client_bug(self, idem_x402, requests_mock):
+        """The CLI always passes its own key; that alone must not blame the user."""
+        from swarm_provenance_uploader.exceptions import IdempotencyKeyError
+
+        err = self._stop(idem_x402, requests_mock, _idem("IDEMPOTENCY_KEY_REUSED", 422), IdempotencyKeyError,
+                         idempotency_key="generated", idempotency_key_given=False)
+        assert "bug" in str(err) and "--idempotency-key" not in str(err)
 
     def test_reused_given_key_names_the_option(self, idem_x402, requests_mock):
         from swarm_provenance_uploader.exceptions import IdempotencyKeyError

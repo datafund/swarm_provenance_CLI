@@ -208,7 +208,7 @@ The limit is per payment. A payment above it is never signed automatically: the 
 
 ### Retries and Idempotency-Key
 
-Every paid request carries an `Idempotency-Key` header: one random key per command, the same for each attempt, with a new payment signature each time. A gateway that supports the key charges at most one attempt; a retry is answered from the first request's result.
+Every paid request carries an `Idempotency-Key` header: one random key per command, the same for each attempt. A gateway that supports the key charges at most one attempt; a retry is answered from the first request's result. A retry resends the same payment signature, except after an attempt that got no answer (it may be in use), when a new one is signed; at most 3 signatures are made per request.
 
 - While the first request is still running (`IDEMPOTENCY_KEY_IN_PROGRESS`) or the gateway cannot check keys for a moment (`IDEMPOTENCY_UNAVAILABLE`), the CLI waits and retries with the same key on its own.
 - It stops, and does not retry, when the gateway says the first request:
@@ -217,7 +217,7 @@ Every paid request carries an `Idempotency-Key` header: one random key per comma
   - succeeded but its result was too large to keep: this is reported as a success.
 - A timeout is retried automatically only after the gateway has answered with one of these codes in the same command. Before that the CLI cannot tell whether the gateway supports the key, so it reports the payment instead (see below).
 
-When a command fails with an unknown payment outcome, the error shows its key. Re-running with `--idempotency-key <key>` repeats the same requests with the same key: on a gateway that supports it, an operation that already went through is answered from its result instead of being charged again. On a gateway without support (the header is ignored), that re-run pays again, so check the payment first as described below.
+When a command fails with an unknown payment outcome, the error shows its key and the command line to repeat it with. `--idempotency-key` is a global option, so it goes before the command (`swarm-prov-upload --idempotency-key <key> upload ...`). That re-run repeats the same requests with the same key: on a gateway that supports it, an operation that already went through is answered from its result instead of being charged again. On a gateway without support (the header is ignored), that re-run pays again, so check the payment first as described below.
 
 Gateway support: datafund/swarm_connect has it on `dev` (staging) and not yet in production.
 
