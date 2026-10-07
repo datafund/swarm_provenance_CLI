@@ -30,6 +30,10 @@ All sub-branches merge into `feature/x402-support`, which only merges to `main` 
 - `feature/` - New features (e.g., `feature/add-stamp-purchase-command`)
 - `docs/` - Documentation only (e.g., `docs/update-readme`)
 
+### Secrets
+- Never commit keys, `.env*` files or per-developer editor settings (`.claude/settings.local.json` is ignored). CI's secret scan (gitleaks, `.gitleaks.toml`) fails the build on a finding.
+- A false positive (e.g. a variable *named* like a key) is allowed with a trailing `# gitleaks:allow` comment on that line, never by weakening the rules.
+
 ### Commit Messages
 
 **CRITICAL: NEVER mention "Claude", "AI", "Generated with", "Co-Authored-By: Claude", or any AI attribution in commits, PRs, or issues. This is a strict requirement - no exceptions.**

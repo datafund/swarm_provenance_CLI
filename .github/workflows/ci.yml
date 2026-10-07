@@ -34,15 +34,64 @@ jobs:
       - name: Run unit tests
         run: pytest tests/ --ignore=tests/test_integration.py -m "not integration" -v
 
+  # Fails the build on a committed secret (#131). gitleaks is the open-source
+  # binary, pinned and checksum-verified (its GitHub Action needs a license
+  # for organisation repos).
+  secret-scan:
+    runs-on: ubuntu-latest
+    name: Secret scan
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar xzf gitleaks.tgz gitleaks
+
+      # Everything in the commit as checked out
+      - name: Scan the files
+        run: '"$RUNNER_TEMP/gitleaks" dir . --config .gitleaks.toml --redact --no-banner'
+
+      # The commits this push or pull request adds: a secret committed and
+      # removed again in the same change is still exposed. Earlier history
+      # holds keys that are rotated and worthless (see #131), so it is not
+      # rescanned.
+      - name: Scan the new commits
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            range="$PR_BASE..$PR_HEAD"
+          elif [ "$EVENT" = "push" ] && [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            range="$BEFORE..$AFTER"
+          else
+            range="-1 $AFTER"
+          fi
+          "$RUNNER_TEMP/gitleaks" git . --config .gitleaks.toml --redact --no-banner --log-opts="$range"
+
   # One stable check name to require on protected branches, whatever the matrix.
   ci-passed:
     if: always()
-    needs: [test]
+    needs: [test, secret-scan]
     runs-on: ubuntu-latest
     name: CI passed
     steps:
-      - name: All test jobs succeeded
-        run: test "${{ needs.test.result }}" = "success"
+      - name: All test jobs and the secret scan succeeded
+        run: |
+          test "${{ needs.test.result }}" = "success"
+          test "${{ needs.secret-scan.result }}" = "success"
 
   integration:
     runs-on: ubuntu-latest

@@ -1,0 +1,12 @@
+# Secret scan configuration (#131). CI runs gitleaks with this file on every
+# push and pull request; a finding fails the build.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "ethereum-private-key"
+description = "A raw Ethereum private key (32 bytes of hex) next to a key-like name"
+regex = '''(?i)(?:priv(?:ate)?[_-]?key|wallet[_-]?key|signer[_-]?key|_KEY)["']?\s*[:=]\s*["']?(?:0x)?([0-9a-f]{64})\b'''
+secretGroup = 1
+keywords = ["key"]

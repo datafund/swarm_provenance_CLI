@@ -198,7 +198,7 @@ class GatewayClient:
 
         # x402 configuration
         self.x402_enabled = x402_enabled
-        self._x402_private_key = x402_private_key
+        self._x402_private_key = x402_private_key  # gitleaks:allow (a variable name, not a key)
         self._x402_network = x402_network
         self._x402_auto_pay = x402_auto_pay
         self._x402_max_auto_pay_usd = x402_max_auto_pay_usd
