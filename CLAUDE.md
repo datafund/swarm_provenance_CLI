@@ -129,7 +129,7 @@ swarm-prov-upload upload --file /path/to/data.txt --usePool
 # Upload with local Bee backend (uses legacy amount)
 swarm-prov-upload --backend local upload --file /path/to/data.txt --amount 1000000000
 
-# Download and verify data
+# Download data (checks content hash and notary signature, not the reference: #134)
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads
 
 # Stamp management (gateway only)

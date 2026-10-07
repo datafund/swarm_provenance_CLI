@@ -1109,9 +1109,12 @@ def download(
                 typer.echo("The data is signed by the pinned notary.")
             elif signature_source:
                 typer.echo(f"The data is signed by the notary of the gateway it came from ({signature_source}).")
-            typer.echo("Note: the content is not checked against the Swarm reference itself; the gateway "
-                       "that served it is trusted for that." + ("" if signature_source == "pinned" else
-                       " A notary signature checked against --notary-address does not depend on it."))
+            served_by = "the gateway that served it" if use_gateway else "your Bee node"
+            # A notary signature covers the data only: the notary signs what
+            # any uploader sends, so it does not tie data to this reference.
+            typer.echo(f"Note: the content is not checked against the Swarm reference itself; {served_by} "
+                       "is trusted for that. A notary signature, even a pinned one, shows only that the "
+                       "notary signed this data, not that it is the content of this reference.")
         except Exception as e:
             typer.secho(f"ERROR: Failed to save decoded data file: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
