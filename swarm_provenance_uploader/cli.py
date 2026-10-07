@@ -347,6 +347,18 @@ def _command_idempotency_key() -> str:
     return _x402_session["idempotency_key"]
 
 
+def _validated_stamp_id(stamp_id: Optional[str]) -> Optional[str]:
+    """--stamp-id as 64 hex characters (a 0x prefix is dropped), or exit 1."""
+    if stamp_id is None:
+        return None
+    stamp_id = file_utils.strip_hex_prefix(stamp_id)
+    if not file_utils.is_stamp_id(stamp_id):
+        typer.secho(f"ERROR: --stamp-id is not a stamp ID (64 hex characters): {stamp_id!r}",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    return stamp_id
+
+
 def _report_payment_required(e: exceptions.PaymentRequiredError):
     """
     Explain a payment that was not made (declined, over the limit, or x402 off), then exit.
@@ -472,6 +484,8 @@ def upload(
     Use --usePool to acquire from pool (faster, gateway only).
     Use --sign notary to add a notary signature (gateway only).
     """
+    stamp_id = _validated_stamp_id(stamp_id)
+
     # Determine which backend to use
     use_gateway = _backend_config["backend"] == "gateway"
     gateway_url = _backend_config["gateway_url"]
@@ -837,7 +851,9 @@ def download(
     verify = not no_verify
 
     # The reference names the output files and goes into the URL path: a value
-    # such as "../x" would write outside --output-dir (#132).
+    # such as "../x" would write outside --output-dir (#132). Chain output
+    # prints hashes with 0x, so that prefix is accepted and dropped.
+    swarm_hash = file_utils.strip_hex_prefix(swarm_hash)
     if not file_utils.is_swarm_reference(swarm_hash):
         typer.secho(f"ERROR: Not a Swarm reference (64 or 128 hex characters): {swarm_hash!r}",
                     fg=typer.colors.RED, err=True)
@@ -1065,6 +1081,8 @@ def upload_collection(
     Gateway only — local Bee backend is not supported for manifest uploads.
     """
     import tempfile
+
+    stamp_id = _validated_stamp_id(stamp_id)
 
     # Gateway-only check
     if _backend_config["backend"] != "gateway":

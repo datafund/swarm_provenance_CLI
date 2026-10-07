@@ -2069,6 +2069,20 @@ class TestRPCFallback:
             provider.health_check()
         assert web3.is_connected.call_count <= 2 * len(provider._rpc_urls)
 
+    def test_dead_fallback_probed_once_per_call(self, mock_chain_deps):
+        """A fallback that does not connect is not probed again in the same call."""
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+        from swarm_provenance_uploader.chain.exceptions import ChainConnectionError
+
+        web3 = mock_chain_deps["web3_instance"]
+        web3.is_connected.side_effect = None
+        web3.is_connected.return_value = False  # every endpoint is down
+        provider = ChainProvider(chain="base-sepolia")
+        with pytest.raises(ChainConnectionError):
+            provider.health_check()
+        # once for the primary check, once per fallback probe
+        assert web3.is_connected.call_count == len(provider._rpc_urls)
+
     def test_get_block_number_terminates_when_every_endpoint_fails(self, mock_chain_deps):
         from unittest.mock import PropertyMock
         from swarm_provenance_uploader.chain.provider import ChainProvider

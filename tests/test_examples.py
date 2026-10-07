@@ -1352,7 +1352,8 @@ def _can_upload_to_gateway():
     """
     try:
         import requests
-        url = os.getenv("PROVENANCE_GATEWAY_URL", "https://provenance-gateway.datafund.io")
+        # `or`: an unset CI secret arrives as "" and must not mean "no gateway"
+        url = os.getenv("PROVENANCE_GATEWAY_URL") or "https://provenance-gateway.datafund.io"
         resp = requests.get(f"{url}/", timeout=5)
         if resp.status_code != 200:
             return False
@@ -1375,6 +1376,12 @@ def _can_upload_to_gateway():
         return "--usePool" in result.stdout
     except Exception:
         return False
+
+
+def _venv_python():
+    """The repo .venv's interpreter if there is one (local runs), else this one (CI)."""
+    venv_python = Path(__file__).parent.parent / ".venv" / "bin" / "python3"
+    return str(venv_python) if venv_python.exists() else sys.executable
 
 
 def _venv_cli_path():
@@ -1414,7 +1421,7 @@ class TestDemoIntegration:
     def test_python_demo_e2e(self):
         """Run run_demo.py end-to-end against the live gateway."""
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         # Ensure the venv CLI is first on PATH
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
@@ -1457,7 +1464,7 @@ class TestAuditTrailIntegration:
     @skip_if_no_gateway_upload
     def test_python_demo_e2e(self):
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
 
@@ -1498,7 +1505,7 @@ class TestScientificDataIntegration:
     @skip_if_no_gateway_upload
     def test_python_demo_e2e(self):
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
 
@@ -1539,7 +1546,7 @@ class TestEncryptedDataIntegration:
     @skip_if_no_gateway_upload
     def test_python_demo_e2e(self):
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
 
@@ -1580,7 +1587,7 @@ class TestMarketMemoryIntegration:
     @skip_if_no_gateway_upload
     def test_python_demo_e2e(self):
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
 
@@ -2638,7 +2645,7 @@ class TestBatchProcessingIntegration:
     @skip_if_no_gateway_upload
     def test_python_demo_e2e(self):
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
 
@@ -2679,7 +2686,7 @@ class TestStampManagementIntegration:
     @skip_if_no_gateway_upload
     def test_python_demo_e2e(self):
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
 
@@ -2720,7 +2727,7 @@ class TestCiCdIntegration:
     @skip_if_no_gateway_upload
     def test_python_demo_e2e(self):
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
 
@@ -2761,7 +2768,7 @@ class TestVerificationIntegration:
     @skip_if_no_gateway_upload
     def test_python_demo_e2e(self):
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
 

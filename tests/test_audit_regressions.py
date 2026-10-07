@@ -103,6 +103,15 @@ class TestDownloadPathHandling:
     def test_references_accepted(self, reference):
         assert file_utils.is_swarm_reference(reference)
 
+    def test_cli_accepts_0x_prefixed_reference(self, mocker, tmp_path):
+        """Chain commands print hashes with 0x; download takes them as pasted."""
+        client = MagicMock()
+        client.download_data.return_value = json.dumps(_metadata(b"hi")).encode()
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=client)
+        result = runner.invoke(app, ["download", "0x" + REFERENCE, "--output-dir", str(tmp_path), "--no-verify"])
+        assert result.exit_code == 0, result.output
+        assert client.download_data.call_args.args[0] == REFERENCE
+
     @pytest.mark.parametrize("reference", ["../x", "a" * 64 + "\n", "0x" + "a" * 64, "a" * 96])
     def test_gateway_download_refuses_bad_reference(self, requests_mock, reference):
         with pytest.raises(ValueError, match="Not a Swarm reference"):
@@ -262,3 +271,40 @@ class TestPinnedSignerVector:
     def test_signature_is_pinned(self, signed):
         _, payload = signed
         assert payload["payload"]["signature"] == PINNED_SIGNATURE
+
+
+class TestStampIdValidation:
+    @pytest.mark.parametrize("method,args", [
+        ("get_stamp", ()), ("extend_stamp", (1000,)), ("check_stamp_health", ()),
+    ])
+    @pytest.mark.parametrize("stamp_id", ["../../wallet", "a" * 63, "x" * 64])
+    def test_gateway_refuses_bad_stamp_id(self, requests_mock, method, args, stamp_id):
+        with pytest.raises(ValueError, match="Not a stamp ID"):
+            getattr(GatewayClient(base_url="https://gw.test"), method)(stamp_id, *args)
+        assert requests_mock.call_count == 0
+
+    @pytest.mark.parametrize("command", [["upload", "--file", "f.txt"], ["upload-collection", "d"]])
+    def test_cli_refuses_bad_stamp_id_up_front(self, mocker, tmp_path, monkeypatch, command):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "f.txt").write_text("x")
+        (tmp_path / "d").mkdir()
+        (tmp_path / "d" / "a.txt").write_text("a")
+        constructor = mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        result = runner.invoke(app, [*command, "--stamp-id", "../../x"])
+        assert result.exit_code == 1
+        assert "not a stamp ID" in result.output
+        constructor.assert_not_called()
+
+    def test_cli_accepts_0x_prefixed_stamp_id(self, mocker, tmp_path, monkeypatch):
+        from swarm_provenance_uploader.models import StampDetails
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "f.txt").write_text("x")
+        client = MagicMock()
+        client.get_stamp.return_value = StampDetails(batchID=STAMP, usable=True, depth=17, amount="1",
+                                                     bucketDepth=16, immutableFlag=False, batchTTL=3600)
+        client.upload_data.return_value = REFERENCE
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=client)
+        result = runner.invoke(app, ["upload", "--file", "f.txt", "--stamp-id", "0x" + STAMP])
+        assert result.exit_code == 0, result.output
+        assert client.get_stamp.call_args.args[0] == STAMP

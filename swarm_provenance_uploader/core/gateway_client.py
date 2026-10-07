@@ -1029,6 +1029,9 @@ class GatewayClient:
         Returns:
             StampDetails if found, None if stamp doesn't exist.
         """
+        from .file_utils import is_stamp_id
+        if not is_stamp_id(stamp_id):
+            raise ValueError(f"Not a stamp ID (64 hex characters): {stamp_id!r}")
         url = self._make_url(f"/api/v1/stamps/{stamp_id.lower()}")
         if verbose:
             print(f"--- DEBUG: Get Stamp ---")
@@ -1062,6 +1065,9 @@ class GatewayClient:
         Returns:
             The batch ID of the extended stamp.
         """
+        from .file_utils import is_stamp_id
+        if not is_stamp_id(stamp_id):
+            raise ValueError(f"Not a stamp ID (64 hex characters): {stamp_id!r}")
         url = self._make_url(f"/api/v1/stamps/{stamp_id.lower()}/extend")
         payload = {"amount": amount}
 
@@ -1454,6 +1460,9 @@ class GatewayClient:
         Raises:
             StampNotFoundError: If the stamp does not exist
         """
+        from .file_utils import is_stamp_id
+        if not is_stamp_id(stamp_id):
+            raise ValueError(f"Not a stamp ID (64 hex characters): {stamp_id!r}")
         url = self._make_url(f"/api/v1/stamps/{stamp_id.lower()}/check")
         if verbose:
             print(f"--- DEBUG: Check Stamp Health ---")

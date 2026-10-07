@@ -173,19 +173,23 @@ class ChainProvider:
         first success.
 
         Args:
-            tried: URLs already tried by the caller in this attempt. Without
-                it, two endpoints that connect but fail the caller's check
-                would be switched between forever.
+            tried: URLs already tried by the caller in this attempt. Every
+                candidate probed here is added to it, so a dead endpoint is
+                probed once per call, and two endpoints that connect but fail
+                the caller's check are not switched between forever.
 
         Returns:
             True if a working fallback was found and switched to.
         """
         Web3 = _import_web3()
-        skip = set(tried or ()) | {self.rpc_url}
+        if tried is None:
+            tried = set()
+        tried.add(self.rpc_url)
 
         for url in self._rpc_urls:
-            if url in skip:
+            if url in tried:
                 continue
+            tried.add(url)
             try:
                 candidate = Web3(
                     Web3.HTTPProvider(

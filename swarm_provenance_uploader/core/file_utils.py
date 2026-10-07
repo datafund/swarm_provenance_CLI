@@ -18,6 +18,23 @@ def is_swarm_reference(value: str) -> bool:
     return isinstance(value, str) and _SWARM_REFERENCE_RE.fullmatch(value) is not None
 
 
+_STAMP_ID_RE = re.compile(r"[0-9a-fA-F]{64}")
+
+
+def is_stamp_id(value: str) -> bool:
+    """True for a postage stamp batch ID (64 hex characters).
+
+    Stamp IDs go into URL paths (/stamps/{id}), so anything else is refused
+    rather than sent.
+    """
+    return isinstance(value, str) and _STAMP_ID_RE.fullmatch(value) is not None
+
+
+def strip_hex_prefix(value: str) -> str:
+    """Drop a leading 0x, as chain tools print hashes and IDs."""
+    return value[2:] if isinstance(value, str) and value[:2] in ("0x", "0X") else value
+
+
 def read_file_content(file_path: Path) -> bytes:
     """Reads a file and returns its raw byte content."""
     with file_path.open("rb") as f:
