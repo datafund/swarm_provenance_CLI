@@ -2054,6 +2054,37 @@ class TestRPCFallback:
         result = provider.health_check()
         assert result is True
 
+    def test_health_check_terminates_when_every_endpoint_fails_the_check(self, mock_chain_deps):
+        """Endpoints that connect but report the wrong chain used to be switched between forever (#132)."""
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+        from swarm_provenance_uploader.chain.exceptions import ChainConnectionError
+
+        web3 = mock_chain_deps["web3_instance"]
+        web3.is_connected.side_effect = None
+        web3.is_connected.return_value = True
+        web3.eth.chain_id = 1  # not Base Sepolia, on every endpoint
+
+        provider = ChainProvider(chain="base-sepolia")
+        with pytest.raises(ChainConnectionError, match="Chain ID mismatch"):
+            provider.health_check()
+        assert web3.is_connected.call_count <= 2 * len(provider._rpc_urls)
+
+    def test_get_block_number_terminates_when_every_endpoint_fails(self, mock_chain_deps):
+        from unittest.mock import PropertyMock
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+        from swarm_provenance_uploader.chain.exceptions import ChainConnectionError
+
+        web3 = mock_chain_deps["web3_instance"]
+        web3.is_connected.side_effect = None
+        web3.is_connected.return_value = True
+        calls = PropertyMock(side_effect=RuntimeError("rpc down"))
+        type(web3.eth).block_number = calls
+
+        provider = ChainProvider(chain="base-sepolia")
+        with pytest.raises(ChainConnectionError, match="Failed to get block number"):
+            provider.get_block_number()
+        assert calls.call_count == len(provider._rpc_urls)
+
     def test_fallback_urls_from_preset(self, mock_chain_deps):
         """Tests that preset fallback URLs are populated."""
         from swarm_provenance_uploader.chain.provider import ChainProvider

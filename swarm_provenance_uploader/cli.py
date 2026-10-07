@@ -835,6 +835,13 @@ def download(
     Use --no-verify to skip verification, --strict to fail on invalid signatures.
     """
     verify = not no_verify
+
+    # The reference names the output files and goes into the URL path: a value
+    # such as "../x" would write outside --output-dir (#132).
+    if not file_utils.is_swarm_reference(swarm_hash):
+        typer.secho(f"ERROR: Not a Swarm reference (64 or 128 hex characters): {swarm_hash!r}",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
     # Determine which backend to use
     use_gateway = _backend_config["backend"] == "gateway"
     gateway_url = _backend_config["gateway_url"]

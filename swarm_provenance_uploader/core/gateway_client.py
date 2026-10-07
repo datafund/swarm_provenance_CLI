@@ -1159,7 +1159,14 @@ class GatewayClient:
 
         Returns:
             The raw bytes of the content.
+
+        Raises:
+            ValueError: If reference is not a Swarm reference (64 or 128 hex
+                characters); it is placed in the URL path.
         """
+        from .file_utils import is_swarm_reference
+        if not is_swarm_reference(reference):
+            raise ValueError(f"Not a Swarm reference (64 or 128 hex characters): {reference!r}")
         url = self._make_url(f"/api/v1/data/{reference.lower()}")
         if verbose:
             print(f"--- DEBUG: Download Data ---")

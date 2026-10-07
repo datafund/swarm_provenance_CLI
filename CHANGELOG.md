@@ -31,7 +31,14 @@ Payment safety (epic #145).
 - A warning (`InsecureGatewayWarning` in library use) when x402 is enabled against a plain-http gateway that is not on loopback (#129)
 - A 402 option whose `extra` advertises a different EIP-712 `name` or `version` than the USDC contract uses is refused before signing, with a message naming the mismatch (#126)
 
+- `download` refuses a reference that is not 64 or 128 hex characters before using it as a file name or URL path; `../x` wrote outside `--output-dir` (#132)
+- `ChainProvider.health_check` and `get_block_number` try each RPC URL at most once; two endpoints that connect but fail the check (e.g. wrong chain) were switched between until the recursion limit (#132)
+
 ### Changed
+- CI runs on `main` and `development`, installs the `x402` and `blockchain` extras, runs unit tests only (`-m "not integration"`), and reports one `CI passed` check to require on protected branches (#132)
+- The example demos in `tests/test_examples.py` that upload to a live gateway run only with `RUN_LIVE_TESTS=1`; CI's unit job uploaded to the production gateway (#132)
+- `typer` is pinned below 0.23 (0.23+ needs click 8.2, which the click pin excludes, and newer versions broke the CLI tests) (#132)
+- The `x402` extra no longer installs the unused `x402` SDK package; it needs Python 3.10+, which made the extra uninstallable on 3.9 (#132)
 - Library users: after a payment was sent, timeouts, 5xx answers and a second 402 now raise `X402Error` subclasses (`PaymentOutcomeUnknownError`, `PaymentSettledNotDeliveredError`, `PaymentRejectedError`), no longer the builtin `ConnectionError`. Code catching `ConnectionError` around paid `GatewayClient` calls should also catch `X402Error` (#127)
 
 ## [0.8.3] - 2026-03-03

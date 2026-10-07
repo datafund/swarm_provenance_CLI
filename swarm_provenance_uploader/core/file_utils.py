@@ -1,8 +1,22 @@
 import hashlib
 import base64
+import re
 import tarfile
 from pathlib import Path
 from typing import List, Tuple
+
+# A Swarm reference: 32 bytes, or 64 for an encrypted reference, as hex.
+_SWARM_REFERENCE_RE = re.compile(r"[0-9a-fA-F]{64}(?:[0-9a-fA-F]{64})?")
+
+
+def is_swarm_reference(value: str) -> bool:
+    """True for a Swarm reference (64 or 128 hex characters).
+
+    References become file names and URL path segments, so anything else
+    (e.g. "../x") must be refused before it is used as either.
+    """
+    return isinstance(value, str) and _SWARM_REFERENCE_RE.fullmatch(value) is not None
+
 
 def read_file_content(file_path: Path) -> bytes:
     """Reads a file and returns its raw byte content."""

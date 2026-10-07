@@ -13,8 +13,9 @@ Unit tests verify:
 - 08-ci-cd-integration: CI/CD artifact archival with CI-ARTIFACT-V1
 - 09-verification: tamper detection and integrity verification
 
-Integration tests (marked @pytest.mark.gateway) run actual demos
-against a live gateway — skipped when gateway is unavailable.
+Integration tests (marked @pytest.mark.integration and gateway) run actual
+demos against a live gateway. They upload real data, so they run only with
+RUN_LIVE_TESTS=1 (and are skipped when the gateway is unavailable).
 """
 
 import csv
@@ -1386,9 +1387,14 @@ def _venv_cli_path():
     return cli
 
 
+# Live demos upload real data to a gateway (production by default), so they
+# run only when asked for: RUN_LIVE_TESTS=1. Checked first, so collecting the
+# tests does not touch the network either (#132).
+_LIVE_TESTS = os.getenv("RUN_LIVE_TESTS") == "1"
+
 skip_if_no_gateway_upload = pytest.mark.skipif(
-    not _can_upload_to_gateway(),
-    reason="Gateway not available or CLI not installed with --usePool support"
+    not (_LIVE_TESTS and _can_upload_to_gateway()),
+    reason="Live demos need RUN_LIVE_TESTS=1, a reachable gateway and a CLI with --usePool"
 )
 
 
