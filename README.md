@@ -17,9 +17,10 @@ and upload them to the Swarm decentralized storage network.
 # Install
 pip install -e .
 
-# Or, without cloning, from a release tag (the package is not on PyPI:
-# never `pip install swarm-provenance-uploader` from the index)
-pip install "swarm-provenance-uploader[x402] @ git+https://github.com/datafund/swarm_provenance_CLI@v0.8.0"
+# Or, without cloning, from a release tag (v0.11.0 or later; older tags do not
+# build) or a commit SHA. The package is not on PyPI, so
+# never `pip install swarm-provenance-uploader` from the index.
+pip install "swarm-provenance-uploader[x402] @ git+https://github.com/datafund/swarm_provenance_CLI@<release-tag>"
 
 # Check version
 swarm-prov-upload --version

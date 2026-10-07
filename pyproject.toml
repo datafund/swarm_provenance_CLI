@@ -45,13 +45,15 @@ testing = [
 # installed (it also needs Python 3.10+, which made this extra uninstallable
 # on 3.9).
 x402 = [
-    "eth-account>=0.8.0",
-    "web3>=6.0.0",
+    "eth-account>=0.13.5",
+    "web3>=7.0.0",
 ]
 # Blockchain anchoring (DataProvenance contract on Base)
+# Floors are what the code uses (eth-account 0.13.5: sign_typed_data; web3 7
+# accepts it). Keep in sync with swarm_provenance_uploader/_requirements.py.
 blockchain = [
-    "web3>=6.0.0",
-    "eth-account>=0.10.0",
+    "web3>=7.0.0",
+    "eth-account>=0.13.5",
 ]
 
 [tool.setuptools.dynamic]

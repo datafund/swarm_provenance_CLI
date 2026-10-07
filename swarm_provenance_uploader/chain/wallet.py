@@ -11,6 +11,7 @@ import os
 from typing import Optional
 
 from .exceptions import ChainConfigurationError
+from .._requirements import INSTALL_SIGNING_DEPS
 
 
 # Lazy eth-account import
@@ -27,7 +28,7 @@ def _import_eth_account():
         except ImportError as e:
             raise ChainConfigurationError(
                 "Blockchain dependencies not installed. "
-                'Run: pip install "web3>=6.0.0" "eth-account>=0.10.0"'
+                f"Run: {INSTALL_SIGNING_DEPS}"
             ) from e
     return _Account
 

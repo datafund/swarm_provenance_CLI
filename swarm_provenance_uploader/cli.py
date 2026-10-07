@@ -11,6 +11,7 @@ import uuid
 import warnings
 
 from . import config, __version__
+from ._requirements import INSTALL_ETH_ACCOUNT, INSTALL_SIGNING_DEPS
 from .core import file_utils, swarm_client, metadata_builder
 from .core.gateway_client import GatewayClient, is_insecure_gateway_url, is_valid_idempotency_key
 from .models import ProvenanceMetadata, ValidationError
@@ -109,7 +110,7 @@ def _get_chain_client(verbose: bool = False):
             "ERROR: Blockchain dependencies not installed.",
             fg=typer.colors.RED, err=True,
         )
-        typer.echo('Install with: pip install "web3>=6.0.0" "eth-account>=0.10.0"')
+        typer.echo(f"Install with: {INSTALL_SIGNING_DEPS}")
         raise typer.Exit(code=1)
 
     try:
@@ -862,7 +863,7 @@ def _verify_download_signature(raw_document: dict, gateway_url: Optional[str],
         import eth_account  # noqa: F401
     except ImportError:
         fail("Cannot verify the notary signature: eth-account is not installed.",
-             'Install it with: pip install "eth-account>=0.10.0" (or use --no-verify to skip).')
+             f"Install it with: {INSTALL_ETH_ACCOUNT} (or use --no-verify to skip).")
 
     if notary_address:
         notary_address = notary_address.strip()
