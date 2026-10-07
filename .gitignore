@@ -48,6 +48,8 @@ ENV/
 .coverage
 htmlcov/
 .env.local
+.env.*
+!.env.example
 
 # Local per-developer editor settings (may contain credentials)
 .claude/settings.local.json
