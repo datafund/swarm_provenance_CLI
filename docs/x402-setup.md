@@ -206,6 +206,21 @@ swarm-prov-upload --x402 --no-auto-pay upload --file data.txt
 
 The limit is per payment. A payment above it is never signed automatically: the CLI asks instead, and library use without a confirmation callback refuses it before signing. `--no-x402` and `--no-free` likewise override `X402_ENABLED` and `FREE_TIER` for one command.
 
+### Retries and Idempotency-Key
+
+Every paid request carries an `Idempotency-Key` header: one random key per command, the same for each attempt, with a new payment signature each time. A gateway that supports the key charges at most one attempt; a retry is answered from the first request's result.
+
+- While the first request is still running (`IDEMPOTENCY_KEY_IN_PROGRESS`) or the gateway cannot check keys for a moment (`IDEMPOTENCY_UNAVAILABLE`), the CLI waits and retries with the same key on its own.
+- It stops, and does not retry, when the gateway says the first request:
+  - may or may not have been collected: it prints the original authorization nonce to check on-chain;
+  - was paid but has no result: it prints the transaction to give the operator;
+  - succeeded but its result was too large to keep: this is reported as a success.
+- A timeout is retried automatically only after the gateway has answered with one of these codes in the same command. Before that the CLI cannot tell whether the gateway supports the key, so it reports the payment instead (see below).
+
+When a command fails with an unknown payment outcome, the error shows its key. Re-running with `--idempotency-key <key>` repeats the same requests with the same key: on a gateway that supports it, an operation that already went through is answered from its result instead of being charged again. On a gateway without support (the header is ignored), that re-run pays again, so check the payment first as described below.
+
+Gateway support: datafund/swarm_connect has it on `dev` (staging) and not yet in production.
+
 ## Switching to Mainnet
 
 When ready for production:

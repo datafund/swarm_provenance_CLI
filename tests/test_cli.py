@@ -1,4 +1,5 @@
 import json
+import re
 import pytest
 import typer
 from typer.testing import CliRunner
@@ -4824,7 +4825,8 @@ class TestPaymentFlagOverrides:
 
         _x402_session.update(spent=123, payments=2, reported=True)
         runner.invoke(app, ["x402", "status"])
-        assert _x402_session == {"spent": 0, "payments": 0, "reported": False}
+        assert _x402_session == {"spent": 0, "payments": 0, "reported": False,
+                                 "idempotency_key": None, "idempotency_key_given": False}
 
 
 class TestUploadPaymentTotal:
@@ -4915,7 +4917,7 @@ class TestPaymentOutcomeExpiry:
                 f.write("d")
             result = runner.invoke(app, ["upload", "--file", "d.txt"])
         assert result.exit_code == 1
-        assert "Valid until: 2030-03-17 17:46:40 UTC" in result.output
+        assert re.search(r"Valid until:\s+2030-03-17 17:46:40 UTC", result.output)
         assert "If no such transfer has appeared by then" in result.output
 
     def test_pool_acquire_unknown_outcome(self, mocker):
@@ -5126,3 +5128,95 @@ class TestStampsListFull:
     def test_label_control_characters_dropped(self, mocker):
         _, result = self._list(mocker, "--full", label="evil\x1b[2Jlabel")
         assert "\x1b" not in result.output
+
+
+# --- Idempotency-Key in the CLI (#124) ---
+
+class TestIdempotencyKeyCli:
+    def _upload(self, mocker, *global_args, **behaviour):
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.return_value = DUMMY_STAMP
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=DUMMY_STAMP, usable=True, exists=True, depth=17, amount="1",
+            bucketDepth=16, immutableFlag=False, batchTTL=3600,
+        )
+        mock_client.upload_data.return_value = DUMMY_SWARM_REF
+        for name, effect in behaviour.items():
+            getattr(mock_client, name).side_effect = effect
+        constructor = mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--x402", *global_args, "upload", "--file", "d.txt"])
+        keys = [c.kwargs.get("idempotency_key") for c in constructor.call_args_list]
+        return result, keys
+
+    def test_one_key_for_all_paid_steps_of_a_command(self, mocker):
+        result, keys = self._upload(mocker)
+        assert result.exit_code == 0, result.output
+        assert len(keys) >= 2 and len(set(keys)) == 1 and keys[0]
+
+    def test_new_key_per_command(self, mocker):
+        _, first = self._upload(mocker)
+        _, second = self._upload(mocker)
+        assert first[0] != second[0]
+
+    def test_given_key_used(self, mocker):
+        _, keys = self._upload(mocker, "--idempotency-key", "retry-123")
+        assert set(keys) == {"retry-123"}
+
+    def test_invalid_given_key_rejected(self, mocker):
+        result, _ = self._upload(mocker, "--idempotency-key", "k" * 300)
+        assert result.exit_code == 1
+        assert "--idempotency-key must be" in result.output
+
+    def test_unknown_outcome_offers_key_rerun(self, mocker):
+        err = exceptions.PaymentOutcomeUnknownError(
+            "timed out", nonce="0x" + "ab" * 32, network="base-sepolia", idempotency_key="k-1",
+        )
+        result, _ = self._upload(mocker, purchase_stamp=err)
+        assert result.exit_code == 1
+        assert re.search(r"Idempotency-Key:\s+k-1", result.output)
+        assert "add --idempotency-key k-1" in result.output
+
+    def test_settlement_unknown_prints_original_nonce(self, mocker):
+        err = exceptions.PaymentOutcomeUnknownError(
+            "The first request with this Idempotency-Key was sent for settlement and no answer came back.",
+            nonce="0x" + "f" * 64, network="base-sepolia", code="IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN",
+        )
+        result, _ = self._upload(mocker, purchase_stamp=err)
+        assert result.exit_code == 1
+        assert "0x" + "f" * 64 in result.output
+        assert "Check whether the authorization above was used" in result.output
+
+    def test_settled_pending_prints_transaction_and_operator(self, mocker):
+        err = exceptions.PaymentSettledNotDeliveredError(
+            "The first request with this Idempotency-Key was paid, but its result is not available.",
+            transaction="0x" + "cd" * 32, code="IDEMPOTENCY_KEY_SETTLED_PENDING", network="base-sepolia",
+        )
+        result, _ = self._upload(mocker, upload_data=err)
+        assert result.exit_code == 1
+        assert "0x" + "cd" * 32 in result.output
+        assert "Contact the gateway operator" in result.output
+
+    def test_delivered_not_stored_on_upload_exits_zero(self, mocker):
+        err = exceptions.PaymentDeliveredNotStoredError(
+            "succeeded and was paid once", transaction="0x" + "cd" * 32, code="IDEMPOTENCY_KEY_DELIVERED_NOT_STORED",
+        )
+        result, _ = self._upload(mocker, upload_data=err)
+        assert result.exit_code == 0, result.output
+        assert "The upload succeeded and was paid once" in result.output
+        assert "0x" + "cd" * 32 in result.output
+        assert "ERROR" not in result.output
+        assert "can be reused" not in result.output  # the stamp was used by the upload
+
+    def test_delivered_not_stored_on_stamp_step_points_to_stamp(self, mocker):
+        err = exceptions.PaymentDeliveredNotStoredError(
+            "succeeded and was paid once", transaction="0x" + "cd" * 32,
+            payer="0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00",
+        )
+        result, _ = self._upload(mocker, purchase_stamp=err)
+        assert result.exit_code == 1  # the upload itself has not happened
+        assert "The stamp purchase succeeded and was paid once" in result.output
+        assert "stamps list --wallet" in result.output
+        assert "--stamp-id" in result.output

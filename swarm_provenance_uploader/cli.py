@@ -7,11 +7,12 @@ import sys
 import time
 import json
 import re
+import uuid
 import warnings
 
 from . import config, __version__
 from .core import file_utils, swarm_client, metadata_builder
-from .core.gateway_client import GatewayClient, is_insecure_gateway_url
+from .core.gateway_client import GatewayClient, is_insecure_gateway_url, is_valid_idempotency_key
 from .models import ProvenanceMetadata, ValidationError
 from . import exceptions
 
@@ -66,7 +67,10 @@ _x402_config = {
 }
 
 # Payments sent during this command (reset per invocation in main())
-_x402_session = {"spent": 0, "payments": 0, "reported": False}
+_x402_session = {"spent": 0, "payments": 0, "reported": False,
+                 # One Idempotency-Key per command (#124): sent with every paid
+                 # request, so a retry is answered from the first result.
+                 "idempotency_key": None, "idempotency_key_given": False}
 
 # A stamp this command bought or took from the pool and has not used yet.
 # If the command fails before the upload completes, its ID is repeated with a
@@ -214,7 +218,8 @@ _X402_EXPLORERS = {
 }
 
 
-def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: str):
+def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: str,
+                            final_step: bool = False):
     """
     Explain a paid request whose payment may have been taken, then exit.
 
@@ -225,10 +230,15 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
     Args:
         e: The payment outcome error raised by the gateway client.
         action: What was being paid for, e.g. "the stamp purchase".
+        final_step: The paid request is the command's last step, so its
+            success (IDEMPOTENCY_KEY_DELIVERED_NOT_STORED) is the command's.
 
     Raises:
-        typer.Exit: Always, with code 1.
+        typer.Exit: Always; code 0 when the final step is known to have
+            succeeded, 1 otherwise.
     """
+    if isinstance(e, exceptions.PaymentDeliveredNotStoredError):
+        _report_delivered_not_stored(e, action, final_step)
     if isinstance(e, exceptions.StampPurchasePendingError):
         headline = f"Payment received, but {action} is not confirmed yet."
     elif e.settled:
@@ -251,12 +261,13 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
         ("Nonce", e.nonce),
         ("Valid until", None if e.settled else valid_until),
         ("Transaction", e.transaction),
+        ("Idempotency-Key", e.idempotency_key),
     ]
     if isinstance(e, exceptions.StampPurchasePendingError):
         fields += [("Stamp label", e.label), ("Depth", e.depth)]
     for name, value in fields:
         if value is not None:
-            typer.echo(f"  {name + ':':<13}{value}", err=True)
+            typer.echo(f"  {name + ':':<17}{value}", err=True)
 
     explorer = _X402_EXPLORERS.get(e.network or "")
     link = None
@@ -285,9 +296,20 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
             typer.echo(f"The authorization can be collected until {valid_until}. If no such "
                        "transfer has appeared by then, it never will, and re-running is safe.",
                        err=True)
+        if e.idempotency_key:
+            typer.echo("A gateway that supports Idempotency-Key answers a re-run with the same "
+                       "key from the first request instead of charging again; to re-run that "
+                       f"way, add --idempotency-key {e.idempotency_key}", err=True)
     if link:
         typer.echo(f"  {link}", err=True)
     raise typer.Exit(code=1)
+
+
+def _command_idempotency_key() -> str:
+    """This command's Idempotency-Key: --idempotency-key, or one random key per command."""
+    if not _x402_session["idempotency_key"]:
+        _x402_session["idempotency_key"] = str(uuid.uuid4())
+    return _x402_session["idempotency_key"]
 
 
 def _report_payment_required(e: exceptions.PaymentRequiredError):
@@ -304,6 +326,32 @@ def _report_payment_required(e: exceptions.PaymentRequiredError):
     else:
         typer.secho("\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
         typer.echo("Use --x402 to enable x402 payments, or --free for the free tier.", err=True)
+    raise typer.Exit(code=1)
+
+
+def _report_delivered_not_stored(e: exceptions.PaymentDeliveredNotStoredError, action: str,
+                                 final_step: bool):
+    """
+    The paid request succeeded and was paid once, but its result cannot be returned.
+
+    Not a failure (#124): exits 0 when it was the command's last step.
+    """
+    typer.secho(f"\n{action[0].upper() + action[1:]} succeeded and was paid once, but the gateway "
+                "could not return its result (it was too large to keep for a retry).",
+                fg=typer.colors.YELLOW, err=True)
+    for name, value in (("Transaction", e.transaction), ("Payer", e.payer),
+                        ("Idempotency-Key", e.idempotency_key)):
+        if value:
+            typer.echo(f"  {name + ':':<17}{value}", err=True)
+    if final_step:
+        _unused_stamp.update(id=None, how=None)  # the upload used it
+        typer.echo("Ask the gateway operator for the result, citing the transaction above. "
+                   "Do not pay again.", err=True)
+        raise typer.Exit(code=0)
+    typer.echo("The stamp exists and is registered to your wallet. Find its ID with:", err=True)
+    if e.payer:
+        typer.echo(f"  swarm-prov-upload stamps list --wallet {e.payer} --full", err=True)
+    typer.echo("then run the command again with --stamp-id <id> instead of buying another.", err=True)
     raise typer.Exit(code=1)
 
 
@@ -342,6 +390,7 @@ def _get_gateway_client_with_x402(gateway_url: str, verbose: bool = False) -> Ga
                 x402_payment_callback=_x402_payment_callback,
                 x402_on_payment_sent=_record_x402_payment,
                 x402_expected_pay_to=_x402_config["expected_pay_to"],
+                idempotency_key=_command_idempotency_key(),
                 free_tier=_backend_config["free_tier"],
             )
     else:
@@ -679,7 +728,7 @@ def upload(
     except exceptions.PaymentRequiredError as e:
         _report_payment_required(e)
     except exceptions.PaymentOutcomeUnknownError as e:
-        _report_payment_outcome(e, "the upload")
+        _report_payment_outcome(e, "the upload", final_step=True)
     except Exception as e:
         typer.secho(f"ERROR: Failed uploading data: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -1084,7 +1133,7 @@ def upload_collection(
     except exceptions.PaymentRequiredError as e:
         _report_payment_required(e)
     except exceptions.PaymentOutcomeUnknownError as e:
-        _report_payment_outcome(e, "the collection upload")
+        _report_payment_outcome(e, "the collection upload", final_step=True)
     except Exception as e:
         typer.secho(f"ERROR: Failed uploading collection: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -2869,6 +2918,13 @@ def main(
         "--chain-rpc",
         help="Custom RPC URL for blockchain connection."
     )] = None,
+    idempotency_key: Annotated[Optional[str], typer.Option(
+        "--idempotency-key",
+        help="Idempotency-Key for this command's paid requests. Pass the key printed by a "
+             "failed run to repeat it: a gateway that supports the key answers from the first "
+             "result instead of charging again. [default: a new random key per command]",
+        show_default=False,
+    )] = None,
     free: Annotated[Optional[bool], typer.Option(
         "--free/--no-free",
         show_default=False,
@@ -2886,7 +2942,14 @@ def main(
 
     For testing/development, use --free for rate-limited free tier access.
     """
-    _x402_session.update(spent=0, payments=0, reported=False)
+    _x402_session.update(spent=0, payments=0, reported=False,
+                         idempotency_key=None, idempotency_key_given=False)
+    if idempotency_key is not None:
+        if not is_valid_idempotency_key(idempotency_key):
+            typer.secho("ERROR: --idempotency-key must be 1-255 printable ASCII characters.",
+                        fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        _x402_session.update(idempotency_key=idempotency_key, idempotency_key_given=True)
     _backend_config.pop("_http_warning_shown", None)
     _unused_stamp.update(id=None, how=None)
     # A command that fails after paying still says what it paid, and which

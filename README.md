@@ -191,6 +191,7 @@ swarm-prov-upload x402 info
 | `--auto-pay` / `--no-auto-pay` | Enable/disable auto-pay |
 | `--max-pay FLOAT` | Maximum auto-pay amount in USD |
 | `--x402-network TEXT` | Network: `base-sepolia` or `base` |
+| `--idempotency-key TEXT` | Idempotency-Key for this command's paid requests; pass the key printed by a failed run to repeat it without paying twice (on a gateway that supports it) |
 
 ### Testnet Setup
 

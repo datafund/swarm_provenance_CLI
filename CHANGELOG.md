@@ -22,6 +22,7 @@ Payment safety (epic #145).
 - The full stamp ID is printed after a purchase or pool acquisition (it was cut to the last 12 characters without `-v`), and if the command then fails (stamp never usable, upload error, unknown payment outcome), the ID is repeated with a `--stamp-id` hint so a retry does not buy another stamp (#130)
 
 ### Added
+- `Idempotency-Key` on paid requests (#124): one key per command (`GatewayClient(idempotency_key=...)`; a fresh key per paid operation otherwise), the same on every attempt with a new authorization each time. The CLI waits and retries on `IDEMPOTENCY_KEY_IN_PROGRESS` (honouring `Retry-After`) and `IDEMPOTENCY_UNAVAILABLE`, and stops on `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` (prints the original nonce), `IDEMPOTENCY_KEY_SETTLED_PENDING` (prints the transaction) and `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` (reported as a success, exit 0 when it is the last step). `IDEMPOTENCY_KEY_REUSED` / `INVALID` say the key handling is at fault, not the input. New `--idempotency-key` repeats a failed run with its key. Needs a gateway with datafund/swarm_connect#422 (on `dev`; harmless but without effect elsewhere)
 - `stamps list --full` shows complete stamp IDs and labels; `stamps list --wallet <address>` lists the stamps registered to one wallet (#130)
 - `--no-x402`, `--no-auto-pay` and `--no-free` flags, which override `X402_ENABLED`, `X402_AUTO_PAY` and `FREE_TIER` for one command (#128)
 - A running total of payments sent during a command, shown at the second prompt and at the end of the command, also when it fails (#128)

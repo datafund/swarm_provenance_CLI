@@ -14,7 +14,9 @@ import json
 import requests
 import os
 import re
+import time
 import unicodedata
+import uuid
 import warnings
 from contextlib import contextmanager
 from decimal import Decimal
@@ -22,7 +24,9 @@ from typing import Callable, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 from ..exceptions import (
+    IdempotencyKeyError,
     InsecureGatewayWarning,
+    PaymentDeliveredNotStoredError,
     PaymentOutcomeUnknownError,
     PaymentRejectedError,
     PaymentRequiredError,
@@ -56,6 +60,14 @@ from ..models import (
     ManifestUploadResponse,
     ManifestUploadTiming,
 )
+
+
+IDEMPOTENCY_HEADER = "Idempotency-Key"
+
+
+def is_valid_idempotency_key(key: str) -> bool:
+    """The gateway's rule: 1-255 printable ASCII characters."""
+    return 0 < len(key) <= 255 and key.isascii() and key.isprintable()
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -109,6 +121,13 @@ class GatewayClient:
     # timeout stays short: a gateway that cannot be reached was never paid.
     PAID_REQUEST_TIMEOUT = (10, 240)
 
+    # How long to keep retrying a paid request the gateway answers with
+    # IDEMPOTENCY_KEY_IN_PROGRESS (the first request with the key is still
+    # running) or IDEMPOTENCY_UNAVAILABLE. Each retry carries the same key and a
+    # new authorization, and the gateway settles at most one of them.
+    IDEMPOTENT_RETRY_WINDOW = 300
+    IDEMPOTENCY_UNAVAILABLE_RETRIES = 3
+
     def __init__(
         self,
         base_url: Optional[str] = None,
@@ -122,6 +141,7 @@ class GatewayClient:
         free_tier: bool = False,
         x402_on_payment_sent: Optional[Callable[[dict], None]] = None,
         x402_expected_pay_to: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ):
         """
         Initialize the gateway client.
@@ -149,6 +169,13 @@ class GatewayClient:
                                   been sent and not refused.
             x402_expected_pay_to: Only sign payments to this address (falls back
                                   to the X402_EXPECTED_PAY_TO env var).
+            idempotency_key: Idempotency-Key sent with every paid request. The
+                             gateway scopes it to (payer, method, path), so one
+                             key can serve one command's stamp purchase and
+                             upload. Pass the key of an earlier run to have a
+                             retry answered from that run's result instead of
+                             charged again. If None, each paid operation gets
+                             a fresh random key.
 
         Warns:
             InsecureGatewayWarning: If x402 is enabled and the gateway URL is
@@ -168,6 +195,10 @@ class GatewayClient:
         self._x402_on_payment_sent = x402_on_payment_sent
         self._x402_expected_pay_to = x402_expected_pay_to
         self._x402_client = None  # Lazy initialization
+        self._approved_option = None  # the payment option last approved, re-signed on retries
+        if idempotency_key is not None and not is_valid_idempotency_key(idempotency_key):
+            raise ValueError("Idempotency-Key must be 1-255 printable ASCII characters")
+        self.idempotency_key = idempotency_key
 
         if self.x402_enabled and is_insecure_gateway_url(self.base_url):
             warnings.warn(
@@ -297,6 +328,7 @@ class GatewayClient:
 
         # Sign and create payment header
         payment_header = x402_client.sign_payment(option)
+        self._approved_option = option
 
         if verbose:
             print(f"DEBUG: Payment signed, header length: {len(payment_header)}")
@@ -406,43 +438,55 @@ class GatewayClient:
         """
         response = requests.request(method, url, **kwargs)
         response.x402_payment = None
+        if response.status_code != 402:
+            return response
 
-        if response.status_code == 402:
-            payment_header, amount_usd = self._handle_402_response(response, verbose, method=method, url=url)
+        payment_header, amount_usd = self._handle_402_response(response, verbose, method=method, url=url)
+        # One key for every attempt of this paid operation (#124): each attempt
+        # carries a new authorization, and the gateway charges at most one.
+        key = self.idempotency_key or str(uuid.uuid4())
+        base_headers = dict(kwargs.get("headers") or {})
+        deadline = time.monotonic() + self.IDEMPOTENT_RETRY_WINDOW
+        unavailable_left = self.IDEMPOTENCY_UNAVAILABLE_RETRIES
+        # Proven once the gateway answers with an IDEMPOTENCY_* code. Until
+        # then a gateway may ignore the key, and an automatic retry could pay
+        # a second time.
+        gateway_honours_key = False
+        # The first attempt whose outcome is not known (it reached the gateway
+        # and got no answer): the one that may have been collected.
+        outstanding = None
+
+        while True:
             payment = self._describe_payment(payment_header, amount_usd)
-
-            # Add payment header and retry
-            headers = kwargs.get("headers", {}).copy()
-            headers["X-PAYMENT"] = payment_header
-            kwargs["headers"] = headers
+            payment["idempotency_key"] = key
+            kwargs["headers"] = {**base_headers, "X-PAYMENT": payment_header, IDEMPOTENCY_HEADER: key}
 
             if verbose:
-                print(f"DEBUG: Retrying request with X-PAYMENT header ({amount_usd})")
+                print(f"DEBUG: Sending paid request ({amount_usd}, {IDEMPOTENCY_HEADER}: {key})")
 
             # From here on the signed authorization has left the client. Any
             # failure that does not prove it was not collected is reported as
             # an unknown outcome, never as a plain connection error.
             try:
                 response = requests.request(method, url, **kwargs)
-            except requests.exceptions.ConnectTimeout:
-                # The connection was never established, so the payment was
-                # never sent: an ordinary failure, nothing was charged.
-                raise
-            except requests.exceptions.RequestException as e:
-                self._notify_payment_sent(payment)
+            except (requests.exceptions.RequestException, KeyboardInterrupt) as e:
+                # ConnectTimeout: never connected, so this attempt was never sent.
+                never_sent = isinstance(e, requests.exceptions.ConnectTimeout)
+                if never_sent and outstanding is None:
+                    raise  # an ordinary failure: nothing was charged
+                if not never_sent and outstanding is None:
+                    outstanding = payment
+                interrupted = isinstance(e, KeyboardInterrupt)
+                if gateway_honours_key and not interrupted and time.monotonic() < deadline:
+                    # The gateway answers a retry with this key from the first request.
+                    self._wait_before_retry(5, deadline, verbose)
+                    payment_header = self._sign_retry()
+                    continue
+                self._notify_payment_sent(outstanding)
+                reason = ("Interrupted while waiting for the paid request." if interrupted
+                          else f"The paid request did not complete ({type(e).__name__}).")
                 raise PaymentOutcomeUnknownError(
-                    f"The paid request did not complete ({type(e).__name__}). "
-                    "The payment may have been taken.",
-                    **payment,
-                ) from e
-            except KeyboardInterrupt as e:
-                # Ctrl-C during the long paid wait: the gateway carries on, so
-                # this is an unknown outcome too, and the identifiers matter.
-                self._notify_payment_sent(payment)
-                raise PaymentOutcomeUnknownError(
-                    "Interrupted while waiting for the paid request. "
-                    "The payment may have been taken.",
-                    **payment,
+                    f"{reason} The payment may have been taken.", **outstanding,
                 ) from e
 
             if verbose:
@@ -472,11 +516,68 @@ class GatewayClient:
 
             payment["transaction"] = self._payment_transaction(response, payment_result)
             response.x402_payment = payment
-            if response.status_code != 402:  # a second 402 means it was not accepted
-                self._notify_payment_sent(payment)
-            self._raise_for_paid_failure(response, payment)
 
-        return response
+            code = self._error_body(response).get("code") if response.status_code in (409, 503) else None
+            if code in ("IDEMPOTENCY_KEY_IN_PROGRESS", "IDEMPOTENCY_UNAVAILABLE"):
+                # This attempt was not charged; try again with the same key.
+                gateway_honours_key = True
+                retry = time.monotonic() < deadline
+                if code == "IDEMPOTENCY_UNAVAILABLE":
+                    retry = retry and unavailable_left > 0
+                    wait = 5 * 2 ** (self.IDEMPOTENCY_UNAVAILABLE_RETRIES - unavailable_left)
+                    unavailable_left -= 1
+                else:
+                    wait = self._retry_after(response)
+                if retry:
+                    self._wait_before_retry(wait, deadline, verbose)
+                    payment_header = self._sign_retry()
+                    continue
+
+            if self._charged_by_this_operation(response, code, outstanding):
+                self._notify_payment_sent(outstanding or payment)
+            self._raise_for_paid_failure(response, payment, outstanding)
+            return response
+
+    def _sign_retry(self) -> str:
+        """A new authorization for the payment option already approved (no new prompt)."""
+        if self._approved_option is None:
+            raise PaymentRejectedError("Cannot sign a retry: no approved payment option.")
+        return self._get_x402_client().sign_payment(self._approved_option)
+
+    @staticmethod
+    def _retry_after(response: requests.Response) -> int:
+        """Seconds from Retry-After (default 5, at most 30)."""
+        try:
+            return max(1, min(30, int(response.headers.get("Retry-After", 5))))
+        except (TypeError, ValueError):
+            return 5
+
+    @staticmethod
+    def _wait_before_retry(seconds: float, deadline: float, verbose: bool = False) -> None:
+        wait = max(0.0, min(seconds, deadline - time.monotonic()))
+        if verbose:
+            print(f"DEBUG: Retrying with the same {IDEMPOTENCY_HEADER} in {wait:.0f}s")
+        time.sleep(wait)
+
+    @staticmethod
+    def _charged_by_this_operation(response: requests.Response, code: Optional[str],
+                                   outstanding: Optional[dict]) -> bool:
+        """
+        Whether this paid operation is what paid, for the payments-sent total.
+
+        A second 402 was not accepted. The IDEMPOTENCY_* answers and a replayed
+        result refer to the first request with the key: this operation paid
+        only if one of its own attempts is the one that may have been collected
+        (otherwise it was an earlier run, already counted there).
+        """
+        if response.status_code == 402:
+            return False
+        if (code or "").startswith("IDEMPOTENCY") or response.headers.get("Idempotent-Replayed"):
+            return outstanding is not None
+        body_code = GatewayClient._error_body(response).get("code") or ""
+        if body_code.startswith("IDEMPOTENCY"):
+            return outstanding is not None
+        return True
 
     @staticmethod
     def _describe_payment(payment_header: str, amount_usd: str) -> dict:
@@ -562,7 +663,82 @@ class GatewayClient:
                 status_code=response.status_code, **payment,
             ) from e
 
-    def _raise_for_paid_failure(self, response: requests.Response, payment: dict) -> None:
+    def _raise_for_idempotency_answer(self, response: requests.Response, code: str, body: dict,
+                                      payment: dict, outstanding: Optional[dict]) -> None:
+        """
+        Raise for the gateway's IDEMPOTENCY_* answers (the retry itself was never charged).
+
+        The settled cases describe the FIRST request with this key: its nonce
+        or transaction, which is what the user needs, not this retry's.
+        """
+        status_code = response.status_code
+        key = payment.get("idempotency_key")
+        first = dict(outstanding or payment)
+        first["idempotency_key"] = key
+        transaction = body.get("transaction") or response.headers.get("X-Payment-Transaction")
+        transaction = transaction if transaction and transaction != "unknown" else None
+
+        if code == "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN":
+            first.update(nonce=body.get("nonce") or first.get("nonce"), transaction=None,
+                         valid_before=first.get("valid_before") if outstanding else None)
+            raise PaymentOutcomeUnknownError(
+                "The first request with this Idempotency-Key was sent for settlement and no "
+                "answer came back, so it may or may not have been collected. This retry was "
+                "not charged.",
+                status_code=status_code, code=code, **first,
+            )
+        if code == "IDEMPOTENCY_KEY_SETTLED_PENDING":
+            first["transaction"] = transaction
+            raise PaymentSettledNotDeliveredError(
+                "The first request with this Idempotency-Key was paid, but its result is not "
+                "available. This retry was not charged.",
+                status_code=status_code, code=code, **first,
+            )
+        if code == "IDEMPOTENCY_KEY_DELIVERED_NOT_STORED":
+            first["transaction"] = transaction
+            raise PaymentDeliveredNotStoredError(
+                "The first request with this Idempotency-Key succeeded and was paid once, but "
+                "its response was too large to keep, so it cannot be returned again. This "
+                "retry was not charged.",
+                status_code=status_code, code=code, **first,
+            )
+        if code in ("IDEMPOTENCY_KEY_REUSED", "IDEMPOTENCY_KEY_INVALID"):
+            what = ("was already used for a different request" if code == "IDEMPOTENCY_KEY_REUSED"
+                    else "is not a valid key")
+            if self.idempotency_key:
+                hint = ("The key given with --idempotency-key (or idempotency_key=) " + what
+                        + ". Use the key only to repeat the same command, or leave it out.")
+            else:
+                hint = ("The key was generated by the client, so this is a bug in its "
+                        "Idempotency-Key handling, not in your input. Please report it.")
+            raise IdempotencyKeyError(
+                f"The gateway refused the Idempotency-Key ({code}). {hint} Nothing was charged.",
+                code=code, idempotency_key=key,
+            )
+        if code == "IDEMPOTENCY_KEY_IN_PROGRESS":
+            if outstanding is None:
+                first.update(nonce=None, valid_before=None)
+            raise PaymentOutcomeUnknownError(
+                f"A request with this Idempotency-Key is still running after "
+                f"{self.IDEMPOTENT_RETRY_WINDOW} s; its outcome is not known yet. A retry "
+                "with the same key returns its result once it finishes.",
+                status_code=status_code, code=code, **first,
+            )
+        if code == "IDEMPOTENCY_UNAVAILABLE":
+            if outstanding is not None:
+                raise PaymentOutcomeUnknownError(
+                    "The gateway cannot check Idempotency-Keys right now, and an earlier "
+                    "attempt got no answer. The payment may have been taken.",
+                    status_code=status_code, code=code, **first,
+                )
+            raise PaymentRejectedError(
+                "The gateway cannot check Idempotency-Keys right now (IDEMPOTENCY_UNAVAILABLE). "
+                "Nothing was charged; try again later.",
+                reason=code,
+            )
+
+    def _raise_for_paid_failure(self, response: requests.Response, payment: dict,
+                                outstanding: Optional[dict] = None) -> None:
         """
         Turn a failed paid response into an error that says what happened to the money.
 
@@ -579,6 +755,9 @@ class GatewayClient:
         body = self._error_body(response)
         code = body.get("code")
         gateway_message = body.get("message")
+
+        if code and code.startswith("IDEMPOTENCY"):
+            self._raise_for_idempotency_answer(response, code, body, payment, outstanding)
 
         if (response.headers.get("X-Payment-Status") == "settled_not_delivered"
                 or code == "DELIVERY_FAILED_AFTER_PAYMENT"):

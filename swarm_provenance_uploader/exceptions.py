@@ -164,6 +164,7 @@ class PaymentOutcomeUnknownError(X402Error):
         status_code: int = None,
         code: str = None,
         valid_before: int = None,
+        idempotency_key: str = None,
     ):
         super().__init__(message)
         self.payer = payer
@@ -176,6 +177,7 @@ class PaymentOutcomeUnknownError(X402Error):
         self.status_code = status_code
         self.code = code
         self.valid_before = valid_before
+        self.idempotency_key = idempotency_key
 
     # Whether the gateway confirmed the payment was collected.
     settled = False
@@ -190,6 +192,29 @@ class PaymentSettledNotDeliveredError(PaymentOutcomeUnknownError):
     """
 
     settled = True
+
+
+class PaymentDeliveredNotStoredError(PaymentSettledNotDeliveredError):
+    """The first request with this Idempotency-Key succeeded and was paid once.
+
+    The gateway answers a retry with IDEMPOTENCY_KEY_DELIVERED_NOT_STORED when
+    the first response was too large to keep. The operation worked; only its
+    result cannot be returned again, so it must be looked up through the
+    resource itself. This is not a failure.
+    """
+
+
+class IdempotencyKeyError(X402Error):
+    """The gateway refused the Idempotency-Key itself; nothing was charged.
+
+    `code` is IDEMPOTENCY_KEY_REUSED (the key was used for a different
+    request) or IDEMPOTENCY_KEY_INVALID (malformed key).
+    """
+
+    def __init__(self, message: str, code: str = None, idempotency_key: str = None):
+        super().__init__(message)
+        self.code = code
+        self.idempotency_key = idempotency_key
 
 
 class StampPurchasePendingError(PaymentSettledNotDeliveredError):
