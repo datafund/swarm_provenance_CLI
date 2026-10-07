@@ -42,10 +42,8 @@ All sub-branches merge into `feature/x402-support`, which only merges to `main` 
 **IMPORTANT**: Increment the version number with each change that modifies functionality.
 
 ### Version Location
-- Primary: `swarm_provenance_uploader/__init__.py` (`__version__`)
-- Mirror: `pyproject.toml` (`version` field)
-
-Both files MUST be kept in sync.
+- Single source: `__version_base__` in `swarm_provenance_uploader/__init__.py`
+- `pyproject.toml` reads it (`dynamic = ["version"]`, `[tool.setuptools.dynamic]`); do not add a `version` field there
 
 ### Version Format
 Uses semantic versioning with optional git hash: `MAJOR.MINOR.PATCH[+git.SHORT_HASH]`
@@ -59,8 +57,8 @@ Uses semantic versioning with optional git hash: `MAJOR.MINOR.PATCH[+git.SHORT_H
 - **MAJOR** (X.0.0): Breaking changes, incompatible API changes
 
 ### How to Update Version
-1. Update `__version__` in `swarm_provenance_uploader/__init__.py`
-2. Update `version` in `pyproject.toml`
+1. Update `__version_base__` in `swarm_provenance_uploader/__init__.py`
+2. Add the release to `CHANGELOG.md`
 3. The git hash suffix is added automatically at runtime (see below)
 
 ## Project Overview

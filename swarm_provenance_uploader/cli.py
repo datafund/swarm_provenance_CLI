@@ -109,7 +109,7 @@ def _get_chain_client(verbose: bool = False):
             "ERROR: Blockchain dependencies not installed.",
             fg=typer.colors.RED, err=True,
         )
-        typer.echo("Install with: pip install swarm-provenance-uploader[blockchain]")
+        typer.echo('Install with: pip install "web3>=6.0.0" "eth-account>=0.10.0"')
         raise typer.Exit(code=1)
 
     try:

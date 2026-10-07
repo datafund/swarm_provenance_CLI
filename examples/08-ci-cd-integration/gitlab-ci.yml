@@ -8,6 +8,11 @@
 #
 # Usage:
 #   Copy relevant sections to your .gitlab-ci.yml file.
+#
+# The CLI is installed from this GitHub repository at a pinned release tag.
+# It is not published on PyPI: a `pip install swarm-provenance-uploader`
+# would fetch whatever package someone registers under that name, inside a
+# job that holds your secrets. Update the tag when a new release is out.
 
 stages:
   - build
@@ -31,7 +36,7 @@ archive-to-swarm:
   needs:
     - build
   script:
-    - pip install swarm-provenance-uploader
+    - pip install "swarm-provenance-uploader @ git+https://github.com/datafund/swarm_provenance_CLI@v0.8.0"
     - swarm-prov-upload health
     - swarm-prov-upload upload
         --file dist/build_info.json

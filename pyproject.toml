@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarm-provenance-uploader"
-version = "0.11.0"
+# The version is read from swarm_provenance_uploader/__init__.py (one source)
+dynamic = ["version"]
 description = "A CLI toolkit for wrapping data and uploading to Swarm."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -14,7 +15,9 @@ classifiers = [
      "Operating System :: OS Independent",
 ]
 dependencies = [
-    "typer[all]>=0.9.0,<0.23",  # 0.23+ needs click 8.2+ and breaks CliRunner-based tests (#132)
+    # 0.12+ bundles rich and shellingham (the old [all] extra, now gone);
+    # 0.23+ needs click 8.2+ and breaks CliRunner-based tests (#132)
+    "typer>=0.12,<0.23",
     "click>=8.1.0,<8.2.0", # Pin click to a compatible range
     "pydantic>=2.5.0",
     "python-dotenv>=1.0.0",
@@ -50,6 +53,9 @@ blockchain = [
     "web3>=6.0.0",
     "eth-account>=0.10.0",
 ]
+
+[tool.setuptools.dynamic]
+version = {attr = "swarm_provenance_uploader.__version_base__"}
 
 [tool.pytest.ini_options]
 markers = [

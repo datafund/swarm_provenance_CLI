@@ -39,6 +39,9 @@ Payment safety (epic #145).
 - The example demos in `tests/test_examples.py` that upload to a live gateway run only with `RUN_LIVE_TESTS=1`; CI's unit job uploaded to the production gateway (#132)
 - `typer` is pinned below 0.23 (0.23+ needs click 8.2, which the click pin excludes, and newer versions broke the CLI tests) (#132)
 - The `x402` extra no longer installs the unused `x402` SDK package; it needs Python 3.10+, which made the extra uninstallable on 3.9 (#132)
+- Install instructions no longer name a PyPI package: the package is not published there, so `pip install swarm-provenance-uploader` would install whatever someone registers under that name. The CI templates in `examples/08-ci-cd-integration/` install from this repository at a pinned tag, and the "dependencies not installed" messages name the dependencies to install (#133)
+- One version source: `pyproject.toml` reads the version from `__version_base__` in `swarm_provenance_uploader/__init__.py` (#133)
+- `typer>=0.12,<0.23` instead of `typer[all]`: the `all` extra no longer exists; 0.12+ includes what it added (#133)
 - Library users: `GatewayClient.download_data` and `swarm_client.download_data_from_swarm` raise `ValueError` for a reference that is not 64/128 hex characters (including a `0x` prefix), and `get_stamp` / `extend_stamp` / `check_stamp_health` for a stamp ID that is not 64 hex (#132)
 - Library users: after a payment was sent, timeouts, 5xx answers and a second 402 now raise `X402Error` subclasses (`PaymentOutcomeUnknownError`, `PaymentSettledNotDeliveredError`, `PaymentRejectedError`), no longer the builtin `ConnectionError`. Code catching `ConnectionError` around paid `GatewayClient` calls should also catch `X402Error` (#127)
 

@@ -4,7 +4,7 @@ DataProvenance smart contract wrapper.
 Provides typed Python methods for all DataProvenance contract functions.
 Build methods return transaction dicts; read methods call directly.
 
-Requires optional dependencies: pip install swarm-provenance-uploader[blockchain]
+Requires optional dependencies (the `blockchain` extra): web3 and eth-account.
 """
 
 import json

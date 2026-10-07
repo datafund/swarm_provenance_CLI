@@ -4,7 +4,7 @@ Chain wallet for signing transactions.
 Manages private key loading, address derivation, transaction signing,
 and ETH balance queries for on-chain operations.
 
-Requires optional dependencies: pip install swarm-provenance-uploader[blockchain]
+Requires optional dependencies (the `blockchain` extra): web3 and eth-account.
 """
 
 import os
@@ -27,7 +27,7 @@ def _import_eth_account():
         except ImportError as e:
             raise ChainConfigurationError(
                 "Blockchain dependencies not installed. "
-                "Run: pip install swarm-provenance-uploader[blockchain]"
+                'Run: pip install "web3>=6.0.0" "eth-account>=0.10.0"'
             ) from e
     return _Account
 
