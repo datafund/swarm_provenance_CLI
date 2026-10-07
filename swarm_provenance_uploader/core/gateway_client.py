@@ -15,7 +15,7 @@ import os
 import re
 import warnings
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Callable, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
@@ -128,9 +128,9 @@ class GatewayClient:
             x402_payment_callback: Optional callback for payment confirmation,
                                    asked for any amount not auto-paid.
                                    Called with (amount_usd, description) -> bool;
-                                   a callback that also accepts an `option`
-                                   keyword gets the X402PaymentOption (network,
-                                   payTo, asset) as well.
+                                   a callback with a parameter named `option`
+                                   gets the X402PaymentOption (network, payTo,
+                                   asset) as well, as a keyword argument.
             free_tier: Send X-Payment-Mode: free header (rate-limited)
             x402_on_payment_sent: Optional hook called with the payment's details
                                   (payer, nonce, amount, amount_usd, pay_to,
@@ -191,9 +191,9 @@ class GatewayClient:
         """Construct full URL from path."""
         return urljoin(self.base_url + "/", path.lstrip("/"))
 
-    def _should_auto_pay(self, amount_usd: float) -> bool:
-        """Check if amount is within auto-pay limit."""
-        return self._x402_auto_pay and amount_usd <= self._x402_max_auto_pay_usd
+    def _should_auto_pay(self, amount_usd) -> bool:
+        """Check if amount (USD, float or Decimal) is within auto-pay limit."""
+        return bool(self._x402_auto_pay and amount_usd <= self._x402_max_auto_pay_usd)
 
     def _handle_402_response(
         self,
@@ -250,7 +250,8 @@ class GatewayClient:
         requirements = x402_client.parse_402_response(body)
         option = x402_client.select_payment_option(requirements)
         amount_usd = x402_client.format_amount_usd(option.maxAmountRequired)
-        amount_float = int(option.maxAmountRequired) / 1_000_000
+        # Exact, and no float overflow for an absurdly long amount
+        amount_float = Decimal(int(option.maxAmountRequired)).scaleb(-6)
 
         if verbose:
             print(f"DEBUG: Selected payment option: {amount_usd} on {option.network}")
@@ -314,8 +315,10 @@ class GatewayClient:
         description = self._describe_request(option, response)
         try:
             params = inspect.signature(callback).parameters.values()
+            # Only a callback that names an `option` parameter gets it; one with
+            # **kwargs may forward them somewhere that does not expect it.
             takes_option = any(
-                p.name == "option" or p.kind == inspect.Parameter.VAR_KEYWORD for p in params
+                p.name == "option" and p.kind != inspect.Parameter.POSITIONAL_ONLY for p in params
             )
         except (TypeError, ValueError):
             takes_option = False

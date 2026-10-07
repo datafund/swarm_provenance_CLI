@@ -180,13 +180,13 @@ Output:
 Payment required: $0.050000 USDC
   For:     Stamp purchase
   Network: base-sepolia
-  Pay to:  0x1234...5678
+  Pay to:  0x1234567890AbcdEF1234567890aBcDeF12345678
   Asset:   USDC 0x036CbD53842c5426634e7929541eC2318f3dCF7e
 Pay now? [y/N]: y
 Processing payment...
 ```
 
-The prompt shows the exact amount (all 6 USDC decimals), the network, the recipient and the token from the gateway's payment request. It defaults to **No**: pressing Enter, or a newline piped into the command, declines. `upload` can ask twice (stamp, then upload); the second prompt shows what was already sent in this command, and the success message prints the total.
+The prompt shows the exact amount (all 6 USDC decimals), the network, the recipient and the token from the gateway's payment request. It defaults to **No**: pressing Enter, a newline piped into the command, or no input at all (closed stdin) declines. `upload` can ask twice (stamp, then upload); the second prompt shows what was already sent in this command, and the success message prints the total.
 
 ### Auto-pay mode
 

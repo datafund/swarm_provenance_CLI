@@ -1850,3 +1850,35 @@ class TestPaidRequestOutcomeReviewCases:
         with pytest.raises(ConnectionError) as exc_info:
             paying_client.purchase_stamp()
         assert not isinstance(exc_info.value, PaymentOutcomeUnknownError)
+
+
+class TestHardCapReviewCases:
+    """Cases from the #128 review."""
+
+    def test_huge_amount_does_not_overflow_and_is_refused(self, mock_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        mock_x402.select_payment_option.return_value = _option(amount="9" * 400)
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_max_auto_pay_usd=1.00)
+        try:
+            with pytest.raises(PaymentRequiredError, match="exceeds the auto-pay limit"):
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+        mock_x402.sign_payment.assert_not_called()
+
+    def test_kwargs_callback_not_given_option(self, mock_x402, requests_mock):
+        seen = {}
+
+        def forwarding(amount_usd, description, **kwargs):
+            seen.update(kwargs)
+            return True
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        client, patcher = _client_with(mock_x402, x402_payment_callback=forwarding)
+        try:
+            client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert seen == {}

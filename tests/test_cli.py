@@ -4789,12 +4789,12 @@ class TestPaymentPrompt:
     def test_shows_running_total(self):
         from swarm_provenance_uploader.cli import _record_x402_payment, _x402_session
 
-        _x402_session.update(spent=0, payments=0)
+        _x402_session.update(spent=0, payments=0, reported=False)
         _record_x402_payment({"amount": "50000"})
         try:
             result = _invoke_prompt("n\n", option=_payment_option())
         finally:
-            _x402_session.update(spent=0, payments=0)
+            _x402_session.update(spent=0, payments=0, reported=False)
         assert "Already sent in this command: $0.050000 USDC (1 payment(s))" in result.output
 
 
@@ -4822,9 +4822,9 @@ class TestPaymentFlagOverrides:
     def test_session_total_reset_per_command(self):
         from swarm_provenance_uploader.cli import _x402_session
 
-        _x402_session.update(spent=123, payments=2)
+        _x402_session.update(spent=123, payments=2, reported=True)
         runner.invoke(app, ["x402", "status"])
-        assert _x402_session == {"spent": 0, "payments": 0}
+        assert _x402_session == {"spent": 0, "payments": 0, "reported": False}
 
 
 class TestUploadPaymentTotal:
@@ -4932,3 +4932,68 @@ class TestPaymentOutcomeExpiry:
         assert result.exit_code == 1
         assert "the pool stamp acquisition did not complete" in result.output
         assert "0x" + "ab" * 32 in result.output
+
+
+class TestPaymentPromptReviewCases:
+    """Cases from the #128 review."""
+
+    def test_no_stdin_declines_with_message(self, mocker):
+        import click
+
+        # A closed stdin makes click's confirm raise Abort (CliRunner feeds "" instead)
+        mocker.patch("swarm_provenance_uploader.cli.typer.confirm", side_effect=click.exceptions.Abort())
+        result = _invoke_prompt("", option=_payment_option())
+        assert result.exit_code == 3
+        assert "no input" in result.output
+
+    def test_decline_message_when_x402_enabled(self, mocker):
+        _x402_config["enabled"] = True
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.side_effect = exceptions.PaymentRequiredError("Payment of $0.050000 declined by user")
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["upload", "--file", "d.txt"])
+        assert result.exit_code == 1
+        assert "Payment not made: Payment of $0.050000 declined by user" in result.output
+        assert "Use --x402 to enable" not in result.output
+
+    def test_total_printed_when_command_fails_after_paying(self, mocker):
+        from swarm_provenance_uploader.cli import _record_x402_payment
+
+        def purchase(**kwargs):
+            _record_x402_payment({"amount": "50000"})
+            return DUMMY_STAMP
+
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.side_effect = purchase
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=DUMMY_STAMP, usable=True, exists=True, depth=17, amount="1",
+            bucketDepth=16, immutableFlag=False, batchTTL=3600,
+        )
+        mock_client.upload_data.side_effect = exceptions.PaymentRequiredError("declined")
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["upload", "--file", "d.txt"])
+        assert result.exit_code == 1
+        assert result.output.count("Payments sent: $0.050000 USDC (1 payment(s))") == 1
+
+    def test_flags_absent_keep_env_values(self):
+        _x402_config.update(enabled=True, auto_pay=True)
+        _backend_config["free_tier"] = True
+        assert runner.invoke(app, ["x402", "status"]).exit_code == 0
+        assert _x402_config["enabled"] is True
+        assert _x402_config["auto_pay"] is True
+        assert _backend_config["free_tier"] is True
+
+    def test_help_does_not_claim_flag_defaults(self):
+        result = runner.invoke(app, ["--help"])
+        assert "default: no-auto-pay" not in result.output
+        assert "default: no-x402" not in result.output
+
+    def test_status_shows_exact_cap(self):
+        _x402_config["max_auto_pay_usd"] = 0.004
+        assert "Max auto-pay: $0.004000" in runner.invoke(app, ["x402", "status"]).output

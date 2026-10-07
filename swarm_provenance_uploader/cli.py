@@ -1,3 +1,4 @@
+import click
 import typer
 from typing import List, Optional
 from typing_extensions import Annotated
@@ -64,7 +65,7 @@ _x402_config = {
 }
 
 # Payments sent during this command (reset per invocation in main())
-_x402_session = {"spent": 0, "payments": 0}
+_x402_session = {"spent": 0, "payments": 0, "reported": False}
 
 # Global state for chain / blockchain configuration
 _chain_config = {
@@ -154,7 +155,12 @@ def _x402_payment_callback(amount_usd: str, description: str, option=None) -> bo
         )
 
     # Prompt for confirmation
-    confirm = typer.confirm("Pay now?", default=False)
+    try:
+        confirm = typer.confirm("Pay now?", default=False)
+    except click.exceptions.Abort:
+        # No input (stdin closed, e.g. a script or an agent): never pay.
+        typer.echo("\nNo answer (no input): payment not confirmed.", err=True)
+        return False
     if confirm:
         typer.echo("Processing payment...")
     return confirm
@@ -169,13 +175,15 @@ def _record_x402_payment(payment: dict):
     _x402_session["payments"] += 1
 
 
-def _echo_x402_spent():
-    """Print the total sent in this command, if anything was paid."""
-    if _x402_session["payments"]:
+def _echo_x402_spent(err: bool = False):
+    """Print the total sent in this command, if anything was paid (once per command)."""
+    if _x402_session["payments"] and not _x402_session["reported"]:
         typer.echo(
             f"Payments sent: {_format_usdc(_x402_session['spent'])} USDC "
-            f"({_x402_session['payments']} payment(s))"
+            f"({_x402_session['payments']} payment(s))",
+            err=err,
         )
+        _x402_session["reported"] = True
 
 
 _X402_EXPLORERS = {
@@ -252,6 +260,23 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
         typer.echo(f"  {explorer}/tx/{e.transaction}", err=True)
     elif explorer and e.payer:
         typer.echo(f"  {explorer}/address/{e.payer}#tokentxns", err=True)
+    raise typer.Exit(code=1)
+
+
+def _report_payment_required(e: exceptions.PaymentRequiredError):
+    """
+    Explain a payment that was not made (declined, over the limit, or x402 off), then exit.
+
+    Raises:
+        typer.Exit: Always, with code 1.
+    """
+    if _x402_config["enabled"]:
+        typer.secho(f"\nERROR: Payment not made: {e}", fg=typer.colors.RED, err=True)
+        typer.echo("Nothing was signed or paid. For non-interactive use, pass --auto-pay "
+                   "with a --max-pay limit that covers the amount.", err=True)
+    else:
+        typer.secho("\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
+        typer.echo("Use --x402 to enable x402 payments, or --free for the free tier.", err=True)
     raise typer.Exit(code=1)
 
 
@@ -468,11 +493,7 @@ def upload(
                 typer.echo("Try again immediately, or use regular purchase (without --usePool).")
             raise typer.Exit(code=1)
         except exceptions.PaymentRequiredError as e:
-            typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
-            typer.echo("Use --x402 to enable x402 payments, or use a gateway without x402 mode.")
-            if hasattr(e, 'payment_options') and e.payment_options:
-                typer.echo(f"Payment options: {e.payment_options}")
-            raise typer.Exit(code=1)
+            _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
             _report_payment_outcome(e, "the pool stamp acquisition")
         except Exception as e:
@@ -509,11 +530,7 @@ def upload(
                 typer.echo(f"Postage stamp purchased (ID: ...{stamp_id[-12:]})")
 
         except exceptions.PaymentRequiredError as e:
-            typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
-            typer.echo("Use --x402 to enable x402 payments, or use a gateway without x402 mode.")
-            if hasattr(e, 'payment_options') and e.payment_options:
-                typer.echo(f"Payment options: {e.payment_options}")
-            raise typer.Exit(code=1)
+            _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
             _report_payment_outcome(e, "the stamp purchase")
         except exceptions.StampPurchaseError as e:
@@ -633,11 +650,7 @@ def upload(
         typer.secho(f"\nERROR: Invalid document format for signing: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     except exceptions.PaymentRequiredError as e:
-        typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
-        typer.echo("Use --x402 to enable x402 payments, or use a gateway without x402 mode.")
-        if hasattr(e, 'payment_options') and e.payment_options:
-            typer.echo(f"Payment options: {e.payment_options}")
-        raise typer.Exit(code=1)
+        _report_payment_required(e)
     except exceptions.PaymentOutcomeUnknownError as e:
         _report_payment_outcome(e, "the upload")
     except Exception as e:
@@ -1026,9 +1039,7 @@ def upload_collection(
         typer.secho("ERROR: Stamp pool is not enabled on this gateway.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     except exceptions.PaymentRequiredError as e:
-        typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
-        typer.echo("Use --x402 to enable x402 payments, or use a gateway without x402 mode.")
-        raise typer.Exit(code=1)
+        _report_payment_required(e)
     except exceptions.PaymentOutcomeUnknownError as e:
         _report_payment_outcome(e, "getting the stamp")
     except Exception as e:
@@ -1046,9 +1057,8 @@ def upload_collection(
             redundancy=redundancy,
             verbose=verbose,
         )
-    except exceptions.PaymentRequiredError:
-        typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+    except exceptions.PaymentRequiredError as e:
+        _report_payment_required(e)
     except exceptions.PaymentOutcomeUnknownError as e:
         _report_payment_outcome(e, "the collection upload")
     except Exception as e:
@@ -1507,7 +1517,8 @@ def x402_status(
     max_pay = _x402_config["max_auto_pay_usd"]
     auto_str = typer.style("Yes", fg=typer.colors.GREEN) if auto_pay else typer.style("No", fg=typer.colors.YELLOW)
     typer.echo(f"  Auto-pay:     {auto_str}")
-    typer.echo(f"  Max auto-pay: ${max_pay:.2f}")
+    max_pay_str = f"{max_pay:.2f}" if round(max_pay, 2) == max_pay else f"{max_pay:.6f}"
+    typer.echo(f"  Max auto-pay: ${max_pay_str}")
     expected_pay_to = _x402_config.get("expected_pay_to")
     typer.echo(f"  Pay-to pin:   {expected_pay_to or 'none (any recipient the gateway names)'}")
 
@@ -2788,10 +2799,12 @@ def main(
     )] = None,
     x402: Annotated[Optional[bool], typer.Option(
         "--x402/--no-x402",
+        show_default=False,
         help="Enable x402 pay-per-request payments (USDC on Base chain). --no-x402 overrides X402_ENABLED."
     )] = None,
     auto_pay: Annotated[Optional[bool], typer.Option(
         "--auto-pay/--no-auto-pay",
+        show_default=False,
         help="Auto-pay without prompting (up to --max-pay limit). --no-auto-pay overrides X402_AUTO_PAY."
     )] = None,
     max_pay: Annotated[Optional[float], typer.Option(
@@ -2812,6 +2825,7 @@ def main(
     )] = None,
     free: Annotated[Optional[bool], typer.Option(
         "--free/--no-free",
+        show_default=False,
         help="Use gateway free tier (X-Payment-Mode: free, rate-limited). --no-free overrides FREE_TIER."
     )] = None,
 ):
@@ -2826,8 +2840,10 @@ def main(
 
     For testing/development, use --free for rate-limited free tier access.
     """
-    _x402_session.update(spent=0, payments=0)
+    _x402_session.update(spent=0, payments=0, reported=False)
     _backend_config.pop("_http_warning_shown", None)
+    # A command that fails after paying still says what it paid.
+    ctx.call_on_close(lambda: _echo_x402_spent(err=True))
 
     if backend:
         if backend not in ("gateway", "local"):
