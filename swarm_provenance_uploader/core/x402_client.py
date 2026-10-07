@@ -185,17 +185,19 @@ def validate_domain_config(
 
 # EIP-712 domain for USDC permit
 # IMPORTANT: The domain name MUST match what the USDC contract uses for EIP-712 signing.
-# These values were verified against on-chain DOMAIN_SEPARATOR values.
+# The two networks differ: the Base Sepolia contract's name() is "USDC", the Base
+# mainnet contract's name() is "USD Coin". Both values were read from the contracts
+# and checked against their on-chain DOMAIN_SEPARATOR (pinned in tests).
 # Use validate_domain_config() to verify at runtime before signing payments.
 USDC_PERMIT_DOMAIN = {
     "base-sepolia": {
-        "name": "USDC",  # Verified 2026-01-20: matches contract's DOMAIN_SEPARATOR
+        "name": "USDC",  # Verified 2026-10-07: DOMAIN_SEPARATOR 0x71f17a3b...94c9818
         "version": "2",
         "chainId": 84532,
         "verifyingContract": USDC_CONTRACTS["base-sepolia"],
     },
     "base": {
-        "name": "USDC",  # Verified 2026-01-20: matches contract's DOMAIN_SEPARATOR
+        "name": "USD Coin",  # Verified 2026-10-07: DOMAIN_SEPARATOR 0x02fa7265...2c7834f
         "version": "2",
         "chainId": 8453,
         "verifyingContract": USDC_CONTRACTS["base"],
@@ -439,6 +441,30 @@ class X402Client:
             )
         return True
 
+    def _check_advertised_domain(self, payment_option: X402PaymentOption) -> None:
+        """
+        Compare the EIP-712 domain advertised in the 402 `extra` with ours.
+
+        Facilitators build the verification domain from `extra`, so a gateway
+        advertising a different name or version would reject a signature made
+        against the contract's real domain. Fail before signing with a message
+        that names the mismatch instead of a generic rejection after it.
+
+        Raises:
+            X402ConfigurationError: If `extra` names a different domain.
+        """
+        extra = payment_option.extra or {}
+        domain = USDC_PERMIT_DOMAIN.get(self.network, {})
+        for field in ("name", "version"):
+            advertised = extra.get(field)
+            if advertised is not None and advertised != domain.get(field):
+                raise X402ConfigurationError(
+                    f"Gateway advertises EIP-712 {field} '{advertised}' for {self.network}, "
+                    f"but the USDC contract uses '{domain.get(field)}'. The payment would be "
+                    "rejected at verification; nothing was signed. The gateway's x402 "
+                    "configuration needs updating."
+                )
+
     def _generate_nonce(self) -> bytes:
         """Generate a random 32-byte nonce for payment authorization."""
         return secrets.token_bytes(32)
@@ -465,6 +491,7 @@ class X402Client:
         # Validate domain configuration against on-chain contract BEFORE signing
         # This prevents signing with an incorrect domain that would fail on-chain
         self.validate_domain()
+        self._check_advertised_domain(payment_option)
 
         try:
             # Generate authorization data

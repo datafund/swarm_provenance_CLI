@@ -662,3 +662,106 @@ class TestX402ClientMultiplePaymentOptions:
 
         with pytest.raises(X402NetworkError):
             client.select_payment_option(requirements)
+
+
+# DOMAIN_SEPARATOR values read from the USDC contracts on 2026-10-07
+# (eth_call DOMAIN_SEPARATOR(), name(), version() on each network).
+RECORDED_DOMAIN_SEPARATORS = {
+    "base": "0x02fa7265e7c5d81118673727957699e4d68f74cd74b7db77da710fe8a2c7834f",
+    "base-sepolia": "0x71f17a3b2ff373b803d70a5a07c046c1a2bc8e89c09ef722fcb047abe94c9818",
+}
+
+
+@pytest.fixture
+def real_eth_deps(monkeypatch):
+    """Use the real web3/eth-account, not a cached mock from another test."""
+    pytest.importorskip("web3")
+    pytest.importorskip("eth_account")
+    from swarm_provenance_uploader.core import x402_client
+
+    monkeypatch.setattr(x402_client, "_eth_account", None)
+    monkeypatch.setattr(x402_client, "_web3", None)
+    return x402_client
+
+
+def _web3_returning_separator(separator_hex):
+    """A web3 stand-in whose USDC contract returns the given DOMAIN_SEPARATOR."""
+    web3 = MagicMock()
+    web3.to_checksum_address = lambda x: x
+    web3.eth.contract.return_value.functions.DOMAIN_SEPARATOR.return_value.call.return_value = (
+        bytes.fromhex(separator_hex[2:])
+    )
+    return web3
+
+
+class TestUSDCDomainSeparators:
+    """The configured EIP-712 domains must produce the on-chain DOMAIN_SEPARATOR."""
+
+    def test_base_mainnet_domain_uses_usd_coin(self):
+        from swarm_provenance_uploader.core.x402_client import USDC_PERMIT_DOMAIN
+
+        assert USDC_PERMIT_DOMAIN["base"]["name"] == "USD Coin"
+        assert USDC_PERMIT_DOMAIN["base"]["version"] == "2"
+        assert USDC_PERMIT_DOMAIN["base-sepolia"]["name"] == "USDC"
+        assert USDC_PERMIT_DOMAIN["base-sepolia"]["version"] == "2"
+
+    @pytest.mark.parametrize("network", ["base", "base-sepolia"])
+    def test_configured_domain_matches_recorded_separator(self, real_eth_deps, network):
+        domain = real_eth_deps.USDC_PERMIT_DOMAIN[network]
+        computed = real_eth_deps.compute_domain_separator(
+            domain["name"], domain["version"], domain["chainId"], domain["verifyingContract"]
+        )
+        assert "0x" + bytes(computed).hex() == RECORDED_DOMAIN_SEPARATORS[network]
+
+    @pytest.mark.parametrize("network", ["base", "base-sepolia"])
+    def test_validate_domain_passes_against_recorded_separator(self, real_eth_deps, network):
+        client = real_eth_deps.X402Client(private_key=DUMMY_PRIVATE_KEY, network=network)
+        client._web3 = _web3_returning_separator(RECORDED_DOMAIN_SEPARATORS[network])
+
+        assert client.validate_domain() is True
+
+    def test_old_base_name_is_rejected(self, real_eth_deps):
+        """'USDC' on Base mainnet is the bug from #126: it must not validate."""
+        with pytest.raises(X402ConfigurationError, match="domain mismatch on base"):
+            real_eth_deps.validate_domain_config(
+                network="base",
+                name="USDC",
+                version="2",
+                web3_instance=_web3_returning_separator(RECORDED_DOMAIN_SEPARATORS["base"]),
+            )
+
+
+class TestAdvertisedDomainCheck:
+    """A 402 `extra` naming a different EIP-712 domain is refused before signing."""
+
+    def _option(self, network, extra):
+        return X402PaymentOption(
+            scheme="exact",
+            network=network,
+            maxAmountRequired="50000",
+            resource="/test",
+            payTo=DUMMY_PAY_TO,
+            extra=extra,
+        )
+
+    def test_mismatched_extra_name_refused(self, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(network="base", skip_domain_validation=True)
+        with pytest.raises(X402ConfigurationError, match="'USDC'.*'USD Coin'"):
+            client.sign_payment(self._option("base", {"name": "USDC", "version": "2"}))
+        mock_eth_deps["account"].sign_typed_data.assert_not_called()
+
+    def test_mismatched_extra_version_refused(self, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(skip_domain_validation=True)
+        with pytest.raises(X402ConfigurationError, match="version"):
+            client.sign_payment(self._option("base-sepolia", {"name": "USDC", "version": "1"}))
+
+    def test_matching_or_absent_extra_signs(self, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(network="base", skip_domain_validation=True)
+        assert client.sign_payment(self._option("base", {"name": "USD Coin", "version": "2"}))
+        assert client.sign_payment(self._option("base", None))

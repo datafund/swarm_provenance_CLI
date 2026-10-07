@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.0] - Unreleased
+
+Payment safety (epic #145).
+
+### Fixed
+- Base mainnet USDC payments can now be signed: the EIP-712 domain name for `base` is `"USD Coin"` (the contract's `name()`), not `"USDC"`, which is correct only on Base Sepolia. Tests pin both networks' `DOMAIN_SEPARATOR` to the on-chain values (#126). Must ship together with the gateway fix datafund/swarm_connect#467.
+
+### Added
+- A 402 option whose `extra` advertises a different EIP-712 `name` or `version` than the USDC contract uses is refused before signing, with a message naming the mismatch (#126)
+
 ## [0.8.3] - 2026-03-03
 
 ### Added
