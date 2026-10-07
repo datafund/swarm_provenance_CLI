@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import time
 import json
+import re
 import warnings
 
 from . import config, __version__
@@ -1521,6 +1522,9 @@ def x402_status(
     typer.echo(f"  Max auto-pay: ${max_pay_str}")
     expected_pay_to = _x402_config.get("expected_pay_to")
     typer.echo(f"  Pay-to pin:   {expected_pay_to or 'none (any recipient the gateway names)'}")
+    if expected_pay_to and not re.fullmatch(r"0x[0-9a-fA-F]{40}", expected_pay_to.strip()):
+        typer.secho("  WARNING: X402_EXPECTED_PAY_TO is not an address; every payment will be refused.",
+                    fg=typer.colors.RED)
 
     # Check for private key (don't show the actual key)
     pk_env_name = config.X402_PRIVATE_KEY_ENV

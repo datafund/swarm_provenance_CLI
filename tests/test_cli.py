@@ -4997,3 +4997,10 @@ class TestPaymentPromptReviewCases:
     def test_status_shows_exact_cap(self):
         _x402_config["max_auto_pay_usd"] = 0.004
         assert "Max auto-pay: $0.004000" in runner.invoke(app, ["x402", "status"]).output
+
+
+class TestPayToPinStatus:
+    def test_status_warns_on_invalid_pin(self):
+        _x402_config["expected_pay_to"] = "operator.eth"
+        result = runner.invoke(app, ["x402", "status"])
+        assert "is not an address" in result.output

@@ -9,10 +9,12 @@ Supports x402 pay-per-request payments when enabled.
 
 import base64
 import inspect
+import ipaddress
 import json
 import requests
 import os
 import re
+import unicodedata
 import warnings
 from contextlib import contextmanager
 from decimal import Decimal
@@ -56,24 +58,33 @@ from ..models import (
 )
 
 
-_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+def _is_loopback_host(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def is_insecure_gateway_url(url: str) -> bool:
     """True for a plain-http URL that is not on this machine (loopback)."""
     parsed = urlparse(url)
-    return parsed.scheme == "http" and (parsed.hostname or "") not in _LOOPBACK_HOSTS
+    return parsed.scheme == "http" and not _is_loopback_host(parsed.hostname or "")
 
 
 def _sanitize_gateway_text(text: Optional[str], limit: int = 80) -> Optional[str]:
     """Gateway-authored text made safe to show next to a payment prompt.
 
-    Control characters (which could redraw the terminal) are dropped,
+    Control characters (which could redraw the terminal) and invisible
+    formatting characters (bidi overrides, zero-width) are dropped,
     whitespace is collapsed and the result is truncated.
     """
     if not text:
         return None
-    text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(text))
+    text = "".join(
+        " " if unicodedata.category(ch) in ("Cc", "Cf") else ch for ch in str(text)
+    )
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) > limit:
         text = text[: limit - 1] + "…"
@@ -199,6 +210,8 @@ class GatewayClient:
         self,
         response: requests.Response,
         verbose: bool = False,
+        method: Optional[str] = None,
+        url: Optional[str] = None,
     ) -> Tuple[str, str]:
         """
         Handle a 402 Payment Required response.
@@ -206,6 +219,8 @@ class GatewayClient:
         Args:
             response: The 402 response from the server
             verbose: Enable debug output
+            method: Method of the request being paid for (shown to the user)
+            url: URL of the request being paid for, before any redirect
 
         Returns:
             Tuple of (payment_header, amount_usd_formatted)
@@ -259,7 +274,7 @@ class GatewayClient:
         # Check if we should auto-pay or need confirmation
         if not self._should_auto_pay(amount_float):
             if self._x402_payment_callback:
-                if not self._confirm_payment(amount_usd, option, response):
+                if not self._confirm_payment(amount_usd, option, method, url):
                     raise PaymentRequiredError(
                         f"Payment of {amount_usd} declined by user",
                         payment_options=[option.model_dump()],
@@ -289,17 +304,15 @@ class GatewayClient:
         return payment_header, amount_usd
 
     @staticmethod
-    def _describe_request(option, response: Optional[requests.Response] = None) -> str:
+    def _describe_request(option, method: Optional[str] = None, url: Optional[str] = None) -> str:
         """
         What a payment is for, as shown to the user.
 
-        Led by the request this client made (method and path), which the
-        gateway cannot change. The gateway's own description follows, cleaned
-        and marked as the gateway's words, so it cannot pose as the prompt.
+        Led by the request this client is paying for (method and path, as the
+        client sends it, not where a redirect ended up), which the gateway
+        cannot change. The gateway's own description follows, cleaned and
+        marked as the gateway's words, so it cannot pose as the prompt.
         """
-        request = getattr(response, "request", None)
-        method = getattr(request, "method", None)
-        url = getattr(response, "url", None)
         if isinstance(method, str) and isinstance(url, str):
             described = f"{method} {urlparse(url).path or '/'}"
         else:
@@ -309,10 +322,11 @@ class GatewayClient:
             described += f' (gateway says: "{note}")'
         return described
 
-    def _confirm_payment(self, amount_usd: str, option, response: Optional[requests.Response] = None) -> bool:
+    def _confirm_payment(self, amount_usd: str, option, method: Optional[str] = None,
+                         url: Optional[str] = None) -> bool:
         """Ask the payment callback, passing the option if it accepts one."""
         callback = self._x402_payment_callback
-        description = self._describe_request(option, response)
+        description = self._describe_request(option, method, url)
         try:
             params = inspect.signature(callback).parameters.values()
             # Only a callback that names an `option` parameter gets it; one with
@@ -394,7 +408,7 @@ class GatewayClient:
         response.x402_payment = None
 
         if response.status_code == 402:
-            payment_header, amount_usd = self._handle_402_response(response, verbose)
+            payment_header, amount_usd = self._handle_402_response(response, verbose, method=method, url=url)
             payment = self._describe_payment(payment_header, amount_usd)
 
             # Add payment header and retry

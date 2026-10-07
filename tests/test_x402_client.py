@@ -899,3 +899,35 @@ class TestPaymentRequirementValidation:
     def test_all_reasons_reported(self, mock_eth_deps):
         err = self._refused(self._client(), _opt(scheme="upto"), _opt(asset="0x" + "9" * 40))
         assert len(err.reasons) == 2
+
+
+class TestPaymentRequirementReviewCases:
+    """Cases from the #129 review."""
+
+    def _client(self, **kwargs):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        return X402Client(skip_domain_validation=True, **kwargs)
+
+    @pytest.mark.parametrize("field,value", [
+        ("maxAmountRequired", "50000\n"),
+        ("payTo", DUMMY_PAY_TO + "\n"),
+    ])
+    def test_trailing_newline_refused(self, mock_eth_deps, field, value):
+        assert self._client().refusal_reason(_opt(**{field: value}))
+
+    def test_pin_with_trailing_whitespace_is_stripped(self, mock_eth_deps):
+        assert self._client(expected_pay_to=DUMMY_PAY_TO + "\n").expected_pay_to == DUMMY_PAY_TO
+
+    def test_empty_pin_overrides_env(self, mock_eth_deps):
+        with patch.dict(os.environ, {"X402_EXPECTED_PAY_TO": "0x" + "2" * 40}):
+            assert self._client(expected_pay_to="").expected_pay_to is None
+
+    def test_zero_address_refused(self, mock_eth_deps):
+        assert "zero address" in self._client().refusal_reason(_opt(payTo="0x" + "0" * 40))
+
+    @pytest.mark.parametrize("field", ["scheme", "asset", "network"])
+    def test_gateway_strings_escaped_in_refusals(self, mock_eth_deps, field):
+        reason = self._client().refusal_reason(_opt(**{field: "\x1b[2Jevil"}))
+        assert "\x1b" not in reason
+        assert "\\x1b" in reason

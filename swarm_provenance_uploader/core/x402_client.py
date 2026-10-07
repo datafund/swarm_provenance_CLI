@@ -63,8 +63,10 @@ RPC_ENDPOINTS = {
     "base": "https://mainnet.base.org",
 }
 
-_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
-_AMOUNT_RE = re.compile(r"^[0-9]+$")
+# Used with fullmatch(): "$" alone would also accept a trailing newline.
+_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
+_AMOUNT_RE = re.compile(r"[0-9]+")
+_ZERO_ADDRESS = "0x" + "0" * 40
 
 # Chain IDs for supported networks
 CHAIN_IDS = {
@@ -286,8 +288,10 @@ class X402Client:
         self._usdc_address = USDC_CONTRACTS.get(network)
 
         # Optional pinned recipient
-        self.expected_pay_to = expected_pay_to or os.getenv("X402_EXPECTED_PAY_TO") or None
-        if self.expected_pay_to and not _ADDRESS_RE.match(self.expected_pay_to):
+        if expected_pay_to is None:
+            expected_pay_to = os.getenv("X402_EXPECTED_PAY_TO")
+        self.expected_pay_to = (expected_pay_to or "").strip() or None  # "" turns the pin off
+        if self.expected_pay_to and not _ADDRESS_RE.fullmatch(self.expected_pay_to):
             raise X402ConfigurationError(
                 f"X402_EXPECTED_PAY_TO is not an address: {self.expected_pay_to!r}"
             )
@@ -415,16 +419,20 @@ class X402Client:
         scheme), so anything else the gateway asks for is refused rather than
         signed as if it were that.
         """
+        # Gateway values in these messages are repr()'d: the CLI prints them, and
+        # repr escapes control and formatting characters (terminal escapes).
         if option.network != self.network:
-            return f"network '{option.network}' is not the configured '{self.network}'"
+            return f"network {option.network!r} is not the configured '{self.network}'"
         if option.scheme != "exact":
-            return f"scheme '{option.scheme}' is not supported (only 'exact')"
+            return f"scheme {option.scheme!r} is not supported (only 'exact')"
         if option.asset and option.asset.lower() != self._usdc_address.lower():
-            return f"asset {option.asset} is not USDC on {self.network} ({self._usdc_address})"
-        if not _AMOUNT_RE.match(option.maxAmountRequired or ""):
+            return f"asset {option.asset!r} is not USDC on {self.network} ({self._usdc_address})"
+        if not _AMOUNT_RE.fullmatch(option.maxAmountRequired or ""):
             return f"amount {option.maxAmountRequired!r} is not a whole number of USDC units"
-        if not _ADDRESS_RE.match(option.payTo or ""):
+        if not _ADDRESS_RE.fullmatch(option.payTo or ""):
             return f"payTo {option.payTo!r} is not an address"
+        if option.payTo == _ZERO_ADDRESS:
+            return "payTo is the zero address (the gateway has no pay-to address configured)"
         if self.expected_pay_to and option.payTo.lower() != self.expected_pay_to.lower():
             return (f"payTo {option.payTo} is not the expected recipient "
                     f"{self.expected_pay_to} (X402_EXPECTED_PAY_TO)")

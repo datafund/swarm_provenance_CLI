@@ -1882,3 +1882,40 @@ class TestHardCapReviewCases:
         finally:
             patcher.stop()
         assert seen == {}
+
+
+class TestPresentationReviewCases:
+    """Cases from the #129 review."""
+
+    def test_description_uses_original_request_not_redirect(self, mock_x402, requests_mock):
+        seen = []
+        requests_mock.post(f"{GW}/api/v1/stamps/", [
+            {"status_code": 307, "headers": {"Location": f"{GW}/api/v1/elsewhere/"}},
+            {"status_code": 201, "json": {"batchID": DUMMY_STAMP}},
+        ])
+        requests_mock.post(f"{GW}/api/v1/elsewhere/", status_code=402, json={"accepts": []})
+        client, patcher = _client_with(mock_x402, x402_payment_callback=lambda a, d: seen.append(d) or True)
+        try:
+            client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert seen[0].startswith("POST /api/v1/stamps/ ")
+
+    def test_bidi_and_zero_width_characters_stripped(self):
+        from swarm_provenance_uploader.core.gateway_client import _sanitize_gateway_text
+
+        cleaned = _sanitize_gateway_text("abc‮evil​X⁦y﻿")
+        for ch in "‮​⁦﻿":
+            assert ch not in cleaned
+
+    @pytest.mark.parametrize("url", ["http://127.0.0.2:8000", "http://LOCALHOST:8000", "http://[::1]:8000"])
+    def test_loopback_variants_not_insecure(self, url):
+        from swarm_provenance_uploader.core.gateway_client import is_insecure_gateway_url
+
+        assert not is_insecure_gateway_url(url)
+
+    @pytest.mark.parametrize("url", ["http://localhost.evil.com", "HTTP://gateway.example.com", "http://128.0.0.1"])
+    def test_non_loopback_insecure(self, url):
+        from swarm_provenance_uploader.core.gateway_client import is_insecure_gateway_url
+
+        assert is_insecure_gateway_url(url)
