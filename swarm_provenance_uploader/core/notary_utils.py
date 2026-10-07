@@ -74,7 +74,7 @@ def verify_notary_signature(
         from eth_account import Account
         from eth_account.messages import encode_defunct
     except ImportError:
-        return False, "eth_account not installed (pip install swarm-provenance-uploader[blockchain])"
+        return False, 'eth_account not installed (pip install "eth-account>=0.10.0")'
 
     signable = encode_defunct(text=message)
     signature = notary_sig.get("signature", "")

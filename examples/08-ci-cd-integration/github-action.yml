@@ -8,6 +8,11 @@
 #
 # Usage:
 #   Copy this file to .github/workflows/swarm-archive.yml in your repository.
+#
+# The CLI is installed from this GitHub repository at a pinned release tag.
+# It is not published on PyPI: a `pip install swarm-provenance-uploader`
+# would fetch whatever package someone registers under that name, inside a
+# job that holds your secrets. Update the tag when a new release is out.
 
 name: Archive Build Artifacts to Swarm
 
@@ -31,7 +36,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Swarm Provenance CLI
-        run: pip install swarm-provenance-uploader
+        run: pip install "swarm-provenance-uploader @ git+https://github.com/datafund/swarm_provenance_CLI@v0.8.0"
 
       - name: Build project
         run: |

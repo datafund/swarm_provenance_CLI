@@ -4,7 +4,7 @@ Chain provider for connecting to EVM-compatible networks.
 Manages Web3 connections to Base Sepolia (testnet) and Base (mainnet)
 for interacting with the DataProvenance smart contract.
 
-Requires optional dependencies: pip install swarm-provenance-uploader[blockchain]
+Requires optional dependencies (the `blockchain` extra): web3 and eth-account.
 """
 
 import logging
@@ -28,7 +28,7 @@ def _import_web3():
         except ImportError as e:
             raise ChainConfigurationError(
                 "Blockchain dependencies not installed. "
-                "Run: pip install swarm-provenance-uploader[blockchain]"
+                'Run: pip install "web3>=6.0.0" "eth-account>=0.10.0"'
             ) from e
     return _Web3
 
