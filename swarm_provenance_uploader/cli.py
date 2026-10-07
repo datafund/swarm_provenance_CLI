@@ -841,7 +841,9 @@ def _verify_download_signature(raw_document: dict, gateway_url: Optional[str],
         typer.Exit: With code 1 when the signature is missing (and required),
             cannot be checked, or does not verify.
     """
-    from .core.notary_utils import extract_notary_signature, verify_notary_signature
+    from .core.notary_utils import (
+        extract_notary_signature, malformed_signatures_reason, verify_notary_signature,
+    )
 
     def fail(message: str, hint: Optional[str] = None):
         typer.secho(f"ERROR: {message}", fg=typer.colors.RED, err=True)
@@ -849,7 +851,19 @@ def _verify_download_signature(raw_document: dict, gateway_url: Optional[str],
             typer.echo(hint, err=True)
         raise typer.Exit(code=1)
 
-    notary_sig = extract_notary_signature(raw_document) if isinstance(raw_document, dict) else None
+    # A pin is checked even for an unsigned document: a typo must not wait
+    # for the first signed one to show up.
+    if notary_address:
+        notary_address = notary_address.strip()
+        if not _ETH_ADDRESS_RE.fullmatch(notary_address):
+            fail(f"--notary-address / NOTARY_ADDRESS is not an address: {notary_address!r}")
+
+    malformed = malformed_signatures_reason(raw_document)
+    if malformed:
+        fail(f"The document's signatures cannot be checked: {malformed}.",
+             "Use --no-verify to download without checking the signature.")
+
+    notary_sig = extract_notary_signature(raw_document)
     if notary_sig is None:
         if require_signature:
             fail("The document has no notary signature (--require-signature).")
@@ -866,9 +880,6 @@ def _verify_download_signature(raw_document: dict, gateway_url: Optional[str],
              f"Install it with: {INSTALL_ETH_ACCOUNT} (or use --no-verify to skip).")
 
     if notary_address:
-        notary_address = notary_address.strip()
-        if not _ETH_ADDRESS_RE.fullmatch(notary_address):
-            fail(f"--notary-address / NOTARY_ADDRESS is not an address: {notary_address!r}")
         expected_address, source = notary_address, "pinned"
     elif gateway_url:
         try:
@@ -939,6 +950,10 @@ def download(
     --no-verify to skip verification.
     """
     verify = not no_verify
+    if no_verify and (require_signature or strict):
+        typer.secho("ERROR: --no-verify cannot be combined with --require-signature or --strict.",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
 
     # The reference names the output files and goes into the URL path: a value
     # such as "../x" would write outside --output-dir (#132). Chain output
@@ -1016,10 +1031,8 @@ def download(
     #    Pydantic model already ensures 'data' and 'content_hash' exist if parsing succeeds.
 
     # 4.5 Verify the notary signature. A failed check fails the download (#135).
-    try:
-        raw_document = json.loads(metadata_str)
-    except json.JSONDecodeError:
-        raw_document = {}
+    # (The model has already parsed this string, so it is valid JSON.)
+    raw_document = json.loads(metadata_str)
     if verify:
         _verify_download_signature(
             raw_document,
@@ -1063,8 +1076,7 @@ def download(
         # Save the document as downloaded (pretty-printed), so fields the model
         # does not know, such as `signatures`, are kept and can be
         # re-verified later with `notary verify` (#135)
-        saved = (json.dumps(raw_document, indent=2) if raw_document
-                 else provenance_metadata_obj.model_dump_json(indent=2))
+        saved = json.dumps(raw_document, indent=2)
         file_utils.save_bytes_to_file(metadata_filepath, saved.encode('utf-8'))
         typer.echo(f"Provenance metadata saved to: {metadata_filepath}")
     except Exception as e:
@@ -1940,7 +1952,7 @@ def notary_verify(
         resolve_path=True,
     )],
     address: Annotated[Optional[str], typer.Option(
-        "--address", "-a",
+        "--address", "-a", envvar="NOTARY_ADDRESS", show_envvar=True,
         help="Expected signer address (fetched from gateway if not provided)."
     )] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False

@@ -1935,8 +1935,8 @@ class TestDownloadWithVerify:
         # No signatures → nothing to fail on → succeeds
         assert result.exit_code == 1 and "no notary signature" in result.stdout
 
-    def test_download_no_verify_overrides_strict(self, mocker, tmp_path):
-        """Tests --no-verify takes precedence over --strict."""
+    def test_download_no_verify_conflicts_with_strict(self, mocker, tmp_path):
+        """--no-verify must not silently cancel --strict / --require-signature (#135)."""
         import json
         import base64
         import hashlib
@@ -1974,9 +1974,9 @@ class TestDownloadWithVerify:
             ["download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--no-verify", "--strict"]
         )
 
-        # --no-verify bypasses all verification, --strict never evaluated
-        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
-        assert "Signature" not in result.stdout
+        assert result.exit_code == 2
+        assert "cannot be combined" in result.output
+        assert not any(tmp_path.iterdir())
 
     def test_download_strict_local_backend_cannot_verify(self, mocker, tmp_path):
         """--strict on local backend without a pinned address cannot verify: exit 1 (#135)."""

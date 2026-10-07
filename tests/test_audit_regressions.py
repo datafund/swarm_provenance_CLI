@@ -396,3 +396,58 @@ class TestNotaryEnforcement:
         saved = json.loads((tmp_path / f"{REFERENCE}.meta.json").read_text())
         assert saved["signatures"] == document["signatures"]
         assert verify_notary_signature(saved, self._address(NOTARY_KEY)) == (True, None)
+
+
+class TestNotaryReviewCases:
+    """Cases from the review of #135 (no eth-account needed unless stated)."""
+
+    def _plain_download(self, mocker, tmp_path, document, *args):
+        client = MagicMock()
+        client.download_data.return_value = json.dumps(document).encode()
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=client)
+        return runner.invoke(app, ["download", REFERENCE, "--output-dir", str(tmp_path), *args])
+
+    @pytest.mark.parametrize("signatures", [
+        "abc", {"type": "notary"}, [1], None,
+        [{"type": "notary", "signer": 123, "signature": "0x00", "data_hash": "x", "timestamp": "t"}],
+        [{"type": "notary", "signer": "0x" + "1" * 40, "signature": 5, "data_hash": "x", "timestamp": "t"}],
+    ])
+    def test_malformed_signatures_fail_cleanly(self, mocker, tmp_path, signatures):
+        document = _metadata(b"x")
+        document["signatures"] = signatures
+        result = self._plain_download(mocker, tmp_path, document)
+        assert result.exit_code == 1
+        assert "cannot be checked" in result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert not any(tmp_path.iterdir())
+
+    @pytest.mark.parametrize("flag", ["--require-signature", "--strict"])
+    def test_no_verify_conflicts_with_required_signature(self, mocker, tmp_path, flag):
+        result = self._plain_download(mocker, tmp_path, _metadata(b"x"), "--no-verify", flag)
+        assert result.exit_code == 2
+        assert not any(tmp_path.iterdir())
+
+    def test_bad_pin_rejected_even_for_unsigned_document(self, mocker, tmp_path):
+        result = self._plain_download(mocker, tmp_path, _metadata(b"x"), "--notary-address", "notary.eth")
+        assert result.exit_code == 1
+        assert "is not an address" in result.output
+
+    def test_unsigned_document_downloads_without_eth_account(self, mocker, tmp_path):
+        """Verification is on, but an unsigned document needs no crypto."""
+        result = self._plain_download(mocker, tmp_path, _metadata(b"plain"))
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / f"{REFERENCE}.data").read_bytes() == b"plain"
+
+    def test_notary_verify_reads_pin_from_environment(self, mocker, tmp_path, monkeypatch):
+        pytest.importorskip("eth_account")
+        from eth_account import Account
+
+        document = _metadata(b"genuine")
+        document["signatures"] = [_notary_signature(document, NOTARY_KEY)]
+        path = tmp_path / "doc.json"
+        path.write_text(json.dumps(document))
+        gateway = mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        monkeypatch.setenv("NOTARY_ADDRESS", Account.from_key(NOTARY_KEY).address)
+        result = runner.invoke(app, ["notary", "verify", "--file", str(path)])
+        assert result.exit_code == 0, result.output
+        gateway.return_value.get_notary_info.assert_not_called()
