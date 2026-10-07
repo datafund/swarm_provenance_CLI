@@ -7,6 +7,17 @@ useDefault = true
 [[rules]]
 id = "ethereum-private-key"
 description = "A raw Ethereum private key (32 bytes of hex) next to a key-like name"
-regex = '''(?i)(?:priv(?:ate)?[_-]?key|wallet[_-]?key|signer[_-]?key|_KEY)["']?\s*[:=]\s*["']?(?:0x)?([0-9a-f]{64})\b'''
+# `name = value`, `"name": "value"`, and `--private-key value` forms; names
+# ending in _key/-key or _pk. A bare 64-hex string with no name cannot be
+# told apart from a hash and is not flagged.
+regex = '''(?i)(?:priv(?:ate)?[_-]?key|wallet[_-]?key|signer[_-]?key|_KEY|[_-]pk)["']?(?:\s*[:=]\s*|\s+)["']?(?:0x)?([0-9a-f]{64})\b'''
 secretGroup = 1
-keywords = ["key"]
+keywords = ["key", "pk"]
+
+# The leak from #131 (.claude/settings.local.json in the "Sync: 2026-06-04"
+# commit). Its keys are rotated and the old wallets emptied, and history was
+# deliberately not rewritten; without this, merging main into a branch that
+# lacks the commit would fail the scan.
+[[allowlists]]
+description = "Rotated testnet keys from #131 (history not rewritten)"
+commits = ["760dc0ef0de5cb93e18380ad5dc06abd7014137f"]
