@@ -208,12 +208,18 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
     typer.secho(f"\nERROR: {headline}", fg=typer.colors.RED, err=True)
     typer.echo(f"  {e}", err=True)
 
+    valid_until = None
+    if e.valid_before:
+        from datetime import datetime, timezone
+        valid_until = datetime.fromtimestamp(e.valid_before, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
     fields = [
         ("Amount", f"{e.amount_usd} USDC" if e.amount_usd else None),
         ("Network", e.network),
         ("Payer", e.payer),
         ("Pay to", e.pay_to),
         ("Nonce", e.nonce),
+        ("Valid until", None if e.settled else valid_until),
         ("Transaction", e.transaction),
     ]
     if isinstance(e, exceptions.StampPurchasePendingError):
@@ -227,8 +233,10 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
     if isinstance(e, exceptions.StampPurchasePendingError):
         typer.echo("The stamp is registered to your wallet once the node reports it. "
                    "Do not buy another one.", err=True)
-        if e.lookup:
-            typer.echo(f"To find it: {e.lookup}", err=True)
+        if e.payer:
+            gateway_url = _backend_config["gateway_url"].rstrip("/")
+            typer.echo(f"To find it, look for the label above in "
+                       f"{gateway_url}/api/v1/stamps/?wallet={e.payer}", err=True)
     elif e.settled:
         typer.echo("Contact the gateway operator with the transaction above for the "
                    "result or a refund. Re-running pays again.", err=True)
@@ -236,6 +244,10 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
         typer.echo("Do not re-run yet: a re-run signs a new payment and can pay twice.", err=True)
         typer.echo("Check whether the authorization above was used (a USDC transfer "
                    "from the payer to the pay-to address with this nonce):", err=True)
+        if valid_until:
+            typer.echo(f"The authorization can be collected until {valid_until}. If no such "
+                       "transfer has appeared by then, it never will, and re-running is safe.",
+                       err=True)
     if explorer and e.transaction:
         typer.echo(f"  {explorer}/tx/{e.transaction}", err=True)
     elif explorer and e.payer:

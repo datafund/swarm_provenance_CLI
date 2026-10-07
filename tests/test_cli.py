@@ -4691,6 +4691,7 @@ class TestPaymentOutcomeReporting:
         assert "$0.050000 USDC" in result.output
         assert "Do not re-run" in result.output
         assert f"sepolia.basescan.org/address/{self.PAYMENT['payer']}" in result.output
+        assert "Valid until" not in result.output  # no validBefore known in this test
         assert "Failed purchasing stamp" not in result.output
 
     def test_settled_not_delivered_on_upload_shows_transaction(self, mocker):
@@ -4709,7 +4710,8 @@ class TestPaymentOutcomeReporting:
     def test_purchase_pending(self, mocker):
         err = exceptions.StampPurchasePendingError(
             "Payment received, but the Bee node did not confirm the purchase in time.",
-            label="x402-abc", depth=17, lookup="GET /api/v1/stamps/?wallet=0x742d",
+            label="x402-abc", depth=17,
+            lookup="GET /api/v1/stamps/?wallet=0x742d. Retrying with the same Idempotency-Key returns the batch.",
             transaction=self.TX, **self.PAYMENT,
         )
         result = self._upload(mocker, purchase_stamp=err)
@@ -4718,7 +4720,8 @@ class TestPaymentOutcomeReporting:
         assert "not confirmed yet" in result.output
         assert "x402-abc" in result.output
         assert "Do not buy another one" in result.output
-        assert "GET /api/v1/stamps/?wallet=0x742d" in result.output
+        assert f"/api/v1/stamps/?wallet={self.PAYMENT['payer']}" in result.output
+        assert "Idempotency-Key" not in result.output  # the gateway's hint does not apply to the CLI
 
     def test_upload_collection_unknown_outcome(self, mocker, tmp_path):
         (tmp_path / "a.txt").write_text("a")
@@ -4896,3 +4899,36 @@ class TestPaymentRequestPresentation:
         _x402_config["expected_pay_to"] = "0x" + "2" * 40
         result = runner.invoke(app, ["x402", "status"])
         assert "Pay-to pin:   0x" + "2" * 40 in result.output
+
+
+class TestPaymentOutcomeExpiry:
+    def test_unknown_outcome_shows_authorization_expiry(self, mocker):
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.side_effect = exceptions.PaymentOutcomeUnknownError(
+            "The paid request did not complete (ReadTimeout).",
+            payer="0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00", nonce="0x" + "ab" * 32,
+            network="base-sepolia", valid_before=1_900_000_000,
+        )
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["upload", "--file", "d.txt"])
+        assert result.exit_code == 1
+        assert "Valid until: 2030-03-17 17:46:40 UTC" in result.output
+        assert "If no such transfer has appeared by then" in result.output
+
+    def test_pool_acquire_unknown_outcome(self, mocker):
+        mock_client = mocker.MagicMock()
+        mock_client.get_pool_available_count.return_value = 3
+        mock_client.acquire_stamp_from_pool.side_effect = exceptions.PaymentOutcomeUnknownError(
+            "The paid request failed with HTTP 502.", nonce="0x" + "ab" * 32, network="base-sepolia",
+        )
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["upload", "--file", "d.txt", "--usePool"])
+        assert result.exit_code == 1
+        assert "the pool stamp acquisition did not complete" in result.output
+        assert "0x" + "ab" * 32 in result.output

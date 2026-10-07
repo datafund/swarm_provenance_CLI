@@ -12,7 +12,11 @@ Payment safety (epic #145).
 - A paid request that times out, drops or fails with a server error after the payment was sent is no longer reported as a plain failure. It raises `PaymentOutcomeUnknownError`; when the gateway confirms it collected the payment (`X-Payment-Status: settled_not_delivered` or `DELIVERY_FAILED_AFTER_PAYMENT`), `PaymentSettledNotDeliveredError`. The CLI prints the amount, payer, pay-to address, authorization nonce and any `X-Payment-Transaction`, without `-v`, and tells the user not to re-run (#127)
 - A 202 `PURCHASE_PENDING` answer to a paid stamp purchase raises `StampPurchasePendingError` with the transaction, stamp label and lookup, instead of a model validation error (#127)
 - A second 402 after paying raises `PaymentRejectedError` with the gateway's reason (#127)
-- Paid calls (stamp purchase, upload, signed upload, pool acquire, manifest upload) wait 180 s instead of 30–120 s, longer than the gateway's own work after settling (#127)
+- Ctrl-C during a paid request, and a paid success response the CLI cannot read, are reported the same way, with the payment's identifiers; the unknown-outcome report says until when the authorization can still be collected (#127)
+- Paid calls (stamp purchase, upload, signed upload, pool acquire, manifest upload) use a 10 s connect / 240 s read timeout instead of 30–120 s, longer than the gateway's own work after settling (#127)
+
+### Changed
+- Library users: after a payment was sent, timeouts, 5xx answers and a second 402 now raise `X402Error` subclasses (`PaymentOutcomeUnknownError`, `PaymentSettledNotDeliveredError`, `PaymentRejectedError`), no longer the builtin `ConnectionError`. Code catching `ConnectionError` around paid `GatewayClient` calls should also catch `X402Error` (#127)
 
 - The auto-pay limit is a hard cap: with auto-pay on and no confirmation callback, a payment above `x402_max_auto_pay_usd` is refused before signing (it was signed) (#128)
 - The payment prompt defaults to No (`[y/N]`), so Enter or a piped newline no longer pays (#128)

@@ -1494,8 +1494,10 @@ class TestPurchasePending:
 class TestPaidRequestTimeouts:
     """Paid calls must wait longer than the gateway's own post-settlement work."""
 
-    def test_paid_timeout_at_least_180s(self):
-        assert GatewayClient.PAID_REQUEST_TIMEOUT >= 180
+    def test_paid_timeout_outlasts_gateway_work(self):
+        connect, read = GatewayClient.PAID_REQUEST_TIMEOUT
+        assert read >= 180
+        assert connect <= 30  # an unreachable gateway was never paid; fail fast
 
     def _assert_paid_timeout(self, requests_mock):
         assert requests_mock.call_count >= 1
@@ -1772,3 +1774,79 @@ class TestExpectedPayToPassedThrough:
         with patch("swarm_provenance_uploader.core.x402_client.X402Client") as cls:
             client._get_x402_client()
         assert cls.call_args.kwargs["expected_pay_to"] == PAY_TO
+
+
+class TestPaidRequestOutcomeReviewCases:
+    """Cases from the #127 review: interrupts, unreadable success, not-charged 5xx."""
+
+    def test_keyboard_interrupt_after_payment_is_outcome_unknown(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"exc": KeyboardInterrupt}])
+        with pytest.raises(PaymentOutcomeUnknownError, match="Interrupted") as exc_info:
+            paying_client.purchase_stamp()
+        assert exc_info.value.nonce == NONCE
+
+    def test_valid_before_extracted(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"exc": requests.exceptions.ReadTimeout}])
+        with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+            paying_client.purchase_stamp()
+        assert exc_info.value.valid_before == 9999999999
+
+    @pytest.mark.parametrize("body", [{"text": "<html>proxy page</html>"}, {"json": {"unexpected": True}}])
+    def test_unreadable_success_after_payment_is_settled(self, paying_client, requests_mock, body):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, dict(status_code=201, **body)])
+        with pytest.raises(PaymentSettledNotDeliveredError, match="could not be read") as exc_info:
+            paying_client.purchase_stamp()
+        assert exc_info.value.nonce == NONCE
+
+    def test_unreadable_success_without_payment_stays_plain(self, requests_mock):
+        requests_mock.post(f"{GW}/api/v1/stamps/", status_code=201, text="<html>")
+        with pytest.raises(ConnectionError):
+            GatewayClient(base_url=GW).purchase_stamp()
+
+    def test_paid_upload_without_reference_is_settled(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        requests_mock.post(f"{GW}/api/v1/data/", [PAYMENT_REQUIRED, {"status_code": 200, "json": {"message": "ok"}}])
+        with pytest.raises(PaymentSettledNotDeliveredError):
+            paying_client.upload_data(b"x", DUMMY_STAMP)
+
+    def test_paid_signed_upload_without_reference_is_settled(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        requests_mock.post(f"{GW}/api/v1/data/", [PAYMENT_REQUIRED, {"status_code": 200, "json": {}}])
+        with pytest.raises(PaymentSettledNotDeliveredError):
+            paying_client.upload_data_with_signing(b"{}", DUMMY_STAMP)
+
+    def test_paid_manifest_without_reference_is_settled(self, paying_client, requests_mock, tmp_path):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        tar = tmp_path / "c.tar"
+        tar.write_bytes(b"tar")
+        requests_mock.post(f"{GW}/api/v1/data/manifest", [PAYMENT_REQUIRED, {"status_code": 200, "json": {}}])
+        with pytest.raises(PaymentSettledNotDeliveredError):
+            paying_client.upload_manifest(str(tar), DUMMY_STAMP)
+
+    def test_pool_acquire_timeout_after_payment_is_outcome_unknown(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", [PAYMENT_REQUIRED, {"exc": requests.exceptions.ReadTimeout}])
+        with pytest.raises(PaymentOutcomeUnknownError):
+            paying_client.acquire_stamp_from_pool()
+
+    @pytest.mark.parametrize("status,body", [
+        (503, {"detail": {"code": "PURCHASE_CAPACITY", "message": "You were not charged; retry shortly."}}),
+        (500, {"detail": "Internal server error. You were not charged."}),
+    ])
+    def test_not_charged_5xx_is_plain_failure(self, paying_client, requests_mock, status, body):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": status, "json": body}])
+        with pytest.raises(ConnectionError) as exc_info:
+            paying_client.purchase_stamp()
+        assert not isinstance(exc_info.value, PaymentOutcomeUnknownError)

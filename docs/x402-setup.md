@@ -250,17 +250,19 @@ The signed payment may have expired or been invalid. Try the request again.
 
 The paid request timed out, dropped, or failed with a server error after the payment was sent. The gateway collects the payment before doing the work and finishes it even if the CLI stops waiting, so the payment may have been collected and the request may even have succeeded.
 
-**Do not re-run straight away**: a re-run signs a new payment and can pay twice. The error prints the amount, payer, pay-to address and authorization nonce, and a block-explorer link for the payer. Check whether a USDC transfer from the payer to the pay-to address happened at that time:
-- If it did not, re-running is safe.
-- If it did, and the command bought a stamp, look for the stamp with `swarm-prov-upload stamps list` before buying another. Otherwise contact the gateway operator with the transaction.
+**Do not re-run straight away**: a re-run signs a new payment and can pay twice. The error prints the amount, payer, pay-to address, authorization nonce and the time until which the authorization can be collected ("Valid until", about 5 minutes after signing), plus a block-explorer link for the payer. Check for a USDC transfer from the payer to the pay-to address:
+- If none has appeared by the "Valid until" time, none ever will, and re-running is safe. Before then, the gateway may still be collecting it.
+- If one did, and the command bought a stamp, look for the stamp among your wallet's stamps before buying another. Otherwise contact the gateway operator with the transaction.
+
+Pressing Ctrl-C while a paid request is in progress is reported the same way, because the gateway finishes the request regardless.
 
 ### "Payment was taken, but ... failed"
 
-The gateway confirmed it collected the payment, but the request failed afterwards. Contact the gateway operator with the transaction hash shown; they can deliver the result or refund it. Re-running pays again.
+The gateway confirmed it collected the payment, but the request failed afterwards (or it answered success with a response the CLI could not read). Contact the gateway operator with the transaction hash shown; they can deliver the result or refund it. Re-running pays again.
 
 ### "Payment received, but the stamp purchase is not confirmed yet"
 
-The payment settled, but the Swarm node did not confirm the stamp in time. The gateway keeps waiting and registers the stamp to your wallet once the node reports it. Do not buy another one: use the lookup shown in the message (the stamp label and your wallet address) to find it.
+The payment settled, but the Swarm node did not confirm the stamp in time. The gateway keeps waiting and registers the stamp to your wallet once the node reports it. Do not buy another one: the message shows the stamp label and a link listing your wallet's stamps, where it appears under that label.
 
 ### "Refused the gateway's payment request; nothing was signed"
 

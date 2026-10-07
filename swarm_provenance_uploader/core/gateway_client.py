@@ -14,6 +14,8 @@ import requests
 import os
 import re
 import warnings
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Callable, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
@@ -88,11 +90,13 @@ class GatewayClient:
 
     DEFAULT_URL = "https://provenance-gateway.datafund.io"
 
-    # Timeout for requests that may carry a payment. It must be longer than the
-    # gateway's own work after settling (a stamp purchase waits up to 120 s on
-    # Bee): a client that gives up first sees a failure for a request that was
-    # paid and usually delivered.
-    PAID_REQUEST_TIMEOUT = 180
+    # (connect, read) timeout for requests that may carry a payment. The read
+    # timeout must outlast the gateway's own work after settling: for a paid
+    # stamp purchase that is the settlement, up to 120 s waiting on Bee and up
+    # to 30 s looking the batch up afterwards. A client that gives up first sees
+    # a failure for a request that was paid and usually delivered. The connect
+    # timeout stays short: a gateway that cannot be reached was never paid.
+    PAID_REQUEST_TIMEOUT = (10, 240)
 
     def __init__(
         self,
@@ -414,6 +418,15 @@ class GatewayClient:
                     "The payment may have been taken.",
                     **payment,
                 ) from e
+            except KeyboardInterrupt as e:
+                # Ctrl-C during the long paid wait: the gateway carries on, so
+                # this is an unknown outcome too, and the identifiers matter.
+                self._notify_payment_sent(payment)
+                raise PaymentOutcomeUnknownError(
+                    "Interrupted while waiting for the paid request. "
+                    "The payment may have been taken.",
+                    **payment,
+                ) from e
 
             if verbose:
                 print(f"DEBUG: Paid request status: {response.status_code}")
@@ -454,12 +467,13 @@ class GatewayClient:
         Identify a signed payment from its own X-PAYMENT header.
 
         Returns the keyword arguments of PaymentOutcomeUnknownError: payer,
-        nonce, amount (smallest units), amount_usd, pay_to and network. Fields
-        that cannot be read are None.
+        nonce, amount (smallest units), amount_usd, pay_to, network and
+        valid_before (unix time after which the authorization can no longer
+        be collected). Fields that cannot be read are None.
         """
         details = {
             "payer": None, "nonce": None, "amount": None, "amount_usd": amount_usd,
-            "pay_to": None, "network": None, "transaction": None,
+            "pay_to": None, "network": None, "transaction": None, "valid_before": None,
         }
         try:
             payload = json.loads(base64.b64decode(payment_header))
@@ -471,6 +485,7 @@ class GatewayClient:
                 pay_to=authorization.get("to"),
                 network=payload.get("network"),
             )
+            details["valid_before"] = int(authorization["validBefore"])
         except (ValueError, KeyError, TypeError):
             pass
         return details
@@ -496,6 +511,39 @@ class GatewayClient:
         if isinstance(body, dict) and isinstance(body.get("detail"), dict):
             body = body["detail"]
         return body if isinstance(body, dict) else {}
+
+    # Server errors the gateway sends only before it settles a payment.
+    _NOT_CHARGED_CODES = {"PURCHASE_CAPACITY"}
+
+    @classmethod
+    def _says_not_charged(cls, body: dict) -> bool:
+        """True for a 5xx the gateway answers before collecting the payment."""
+        if body.get("code") in cls._NOT_CHARGED_CODES:
+            return True
+        # The gateway's answer to a paid request that crashed before settling.
+        detail = body.get("detail")
+        return isinstance(detail, str) and detail.endswith("You were not charged.")
+
+    @contextmanager
+    def _reading_paid_result(self, response: requests.Response):
+        """
+        Parse a 2xx result; if a payment was sent, a parse failure is not a plain failure.
+
+        The gateway answered success, so the payment was collected and the work
+        was most likely done; an unreadable body (version skew, a proxy page)
+        must not make the user re-run and pay again.
+        """
+        try:
+            yield
+        except Exception as e:
+            payment = getattr(response, "x402_payment", None)
+            if not payment or isinstance(e, PaymentOutcomeUnknownError):
+                raise
+            raise PaymentSettledNotDeliveredError(
+                f"The payment was collected and the gateway answered HTTP {response.status_code}, "
+                f"but its response could not be read ({type(e).__name__}: {e}).",
+                status_code=response.status_code, **payment,
+            ) from e
 
     def _raise_for_paid_failure(self, response: requests.Response, payment: dict) -> None:
         """
@@ -528,7 +576,7 @@ class GatewayClient:
                 f"The gateway did not accept the payment: {reason}",
                 reason=reason,
             )
-        if status_code >= 500:
+        if status_code >= 500 and not self._says_not_charged(body):
             raise PaymentOutcomeUnknownError(
                 f"The paid request failed with HTTP {status_code}. "
                 "The payment may have been taken."
@@ -652,8 +700,8 @@ class GatewayClient:
             if response.status_code == 202:
                 self._raise_purchase_pending(response)
             response.raise_for_status()
-            data = response.json()
-            result = StampPurchaseResponse.model_validate(data)
+            with self._reading_paid_result(response):
+                result = StampPurchaseResponse.model_validate(response.json())
             if verbose:
                 print(f"DEBUG: Purchased stamp ID: {result.batchID}")
             return result.batchID
@@ -804,8 +852,8 @@ class GatewayClient:
             if verbose:
                 print(f"DEBUG: Upload status: {response.status_code}")
             response.raise_for_status()
-            data_response = response.json()
-            result = DataUploadResponse.model_validate(data_response)
+            with self._reading_paid_result(response):
+                result = DataUploadResponse.model_validate(response.json())
             if verbose:
                 print(f"DEBUG: Upload reference: {result.reference}")
             return result.reference
@@ -1064,8 +1112,8 @@ class GatewayClient:
             if verbose:
                 print(f"DEBUG: Acquire response: {response.status_code}")
             response.raise_for_status()
-            data = response.json()
-            result = AcquireStampResponse.model_validate(data)
+            with self._reading_paid_result(response):
+                result = AcquireStampResponse.model_validate(response.json())
 
             if not result.success:
                 raise PoolAcquisitionError(
@@ -1293,12 +1341,15 @@ class GatewayClient:
                     pass  # Fall through to raise_for_status
 
             response.raise_for_status()
-            data_response = response.json()
+            with self._reading_paid_result(response):
+                data_response = response.json()
 
-            # Build response - gateway may return signed_document or just reference
-            reference = data_response.get("reference", "")
-            signed_doc = data_response.get("signed_document")
-            message = data_response.get("message")
+                # Build response - gateway may return signed_document or just reference
+                reference = data_response.get("reference", "")
+                signed_doc = data_response.get("signed_document")
+                message = data_response.get("message")
+                if response.x402_payment and not reference:
+                    raise ValueError("no reference in the response")
 
             if verbose:
                 print(f"DEBUG: Upload reference: {reference}")
@@ -1391,18 +1442,21 @@ class GatewayClient:
                 print(f"DEBUG: Upload manifest status: {response.status_code}")
 
             response.raise_for_status()
-            data = response.json()
+            with self._reading_paid_result(response):
+                data = response.json()
 
-            timing = None
-            if include_timing and "timing" in data:
-                timing = ManifestUploadTiming.model_validate(data["timing"])
+                timing = None
+                if include_timing and "timing" in data:
+                    timing = ManifestUploadTiming.model_validate(data["timing"])
 
-            result = ManifestUploadResponse(
-                reference=data.get("reference", ""),
-                file_count=data.get("file_count"),
-                message=data.get("message"),
-                timing=timing,
-            )
+                result = ManifestUploadResponse(
+                    reference=data.get("reference", ""),
+                    file_count=data.get("file_count"),
+                    message=data.get("message"),
+                    timing=timing,
+                )
+                if response.x402_payment and not result.reference:
+                    raise ValueError("no reference in the response")
 
             if verbose:
                 print(f"DEBUG: Manifest reference: {result.reference}")

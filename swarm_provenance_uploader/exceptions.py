@@ -146,7 +146,9 @@ class PaymentOutcomeUnknownError(X402Error):
 
     The attributes identify the payment so the user can check it on-chain or
     cite it to the operator: `nonce` is the EIP-3009 authorization nonce,
-    `transaction` the settlement transaction hash when the gateway sent one.
+    `transaction` the settlement transaction hash when the gateway sent one,
+    and `valid_before` the unix time after which the authorization can no
+    longer be collected.
     """
 
     def __init__(
@@ -161,6 +163,7 @@ class PaymentOutcomeUnknownError(X402Error):
         transaction: str = None,
         status_code: int = None,
         code: str = None,
+        valid_before: int = None,
     ):
         super().__init__(message)
         self.payer = payer
@@ -172,6 +175,7 @@ class PaymentOutcomeUnknownError(X402Error):
         self.transaction = transaction
         self.status_code = status_code
         self.code = code
+        self.valid_before = valid_before
 
     # Whether the gateway confirmed the payment was collected.
     settled = False
