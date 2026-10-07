@@ -485,7 +485,7 @@ class GatewayClient:
         # IDEMPOTENCY_* answer or a success says what happened to it.
         outstanding = None
 
-        def unknown(reason: str, cause: BaseException):
+        def unknown(reason: str):
             self._notify_payment_sent(outstanding)
             return PaymentOutcomeUnknownError(f"{reason} The payment may have been taken.", **outstanding)
 
@@ -523,14 +523,18 @@ class GatewayClient:
                 reason = ("Interrupted while waiting for the paid request." if interrupted
                           else f"The paid request did not complete ({type(e).__name__}).")
                 if not (gateway_honours_key and not interrupted and time.monotonic() < deadline):
-                    raise unknown(reason, e) from e
+                    raise unknown(reason) from e
                 # The gateway answers a retry with this key from the first
-                # request; this attempt may itself be in use, so sign anew.
+                # request. An attempt that was sent may itself be in use, so
+                # the next one is signed anew; one never sent is resent.
                 try:
                     self._wait_before_retry(5, deadline, verbose)
-                    payment_header = new_authorization()
+                    if not never_sent:
+                        payment_header = new_authorization()
+                except PaymentRejectedError as retry_error:
+                    raise unknown(f"{reason} Stopped retrying: {retry_error}") from retry_error
                 except (Exception, KeyboardInterrupt) as retry_error:
-                    raise unknown(reason, retry_error) from retry_error
+                    raise unknown(reason) from retry_error
                 continue
 
             if verbose:
@@ -539,6 +543,10 @@ class GatewayClient:
             # Check x-payment-response header to verify payment actually succeeded
             payment_result = self._parse_payment_response(response, verbose)
             if payment_result:
+                if not payment_result.success and outstanding is not None:
+                    # This attempt failed on-chain; an earlier one may not have.
+                    raise unknown("A retry's payment failed, which does not say what happened "
+                                  "to an earlier attempt.")
                 if not payment_result.success:
                     # Payment was signed but the on-chain transaction failed
                     # Gateway may have fallen back to free tier
@@ -560,7 +568,7 @@ class GatewayClient:
 
             payment["transaction"] = self._payment_transaction(response, payment_result)
             response.x402_payment = payment
-            body_code = self._error_body(response).get("code") or ""
+            body_code = str(self._error_body(response).get("code") or "")
 
             if body_code in ("IDEMPOTENCY_KEY_IN_PROGRESS", "IDEMPOTENCY_UNAVAILABLE") \
                     and response.status_code in (409, 503):
@@ -584,19 +592,20 @@ class GatewayClient:
                     except (Exception, KeyboardInterrupt) as retry_error:
                         if outstanding is None:
                             raise
-                        raise unknown("Stopped while retrying the paid request.", retry_error) from retry_error
+                        raise unknown("Stopped while retrying the paid request.") from retry_error
                     continue
 
             if (response.status_code == 402 and gateway_honours_key
                     and "already been used" in str(self._error_body(response).get("error", ""))):
-                # A gateway that kept the resent authorization reserved: sign a
-                # new one (within the cap) and carry on with the same key.
+                # The resent authorization is in use or was used (reserved, or
+                # it paid the first request): it may have been collected. Sign
+                # a new one (within the cap) and carry on with the same key.
+                if outstanding is None:
+                    outstanding = payment
                 try:
                     payment_header = new_authorization()
-                except PaymentRejectedError:
-                    if outstanding is None:
-                        raise
-                    raise unknown("Stopped retrying the paid request.", None)
+                except PaymentRejectedError as retry_error:
+                    raise unknown(f"Stopped retrying: {retry_error}") from retry_error
                 continue
 
             replayed = bool(response.headers.get("Idempotent-Replayed"))
@@ -608,7 +617,7 @@ class GatewayClient:
                 # Says nothing about the earlier attempt that may have been collected.
                 raise unknown(
                     f"A retry was answered with HTTP {response.status_code}, which does not say "
-                    "what happened to an earlier attempt.", None,
+                    "what happened to an earlier attempt."
                 )
 
             if self._charged_by_this_operation(response, body_code or None, outstanding):
@@ -647,7 +656,7 @@ class GatewayClient:
             return False
         if (code or "").startswith("IDEMPOTENCY") or response.headers.get("Idempotent-Replayed"):
             return outstanding is not None
-        body_code = GatewayClient._error_body(response).get("code") or ""
+        body_code = str(GatewayClient._error_body(response).get("code") or "")
         if body_code.startswith("IDEMPOTENCY"):
             return outstanding is not None
         return True
@@ -826,7 +835,7 @@ class GatewayClient:
             return
 
         body = self._error_body(response)
-        code = body.get("code")
+        code = str(body.get("code") or "") or None
         gateway_message = body.get("message")
 
         if code and code.startswith("IDEMPOTENCY"):

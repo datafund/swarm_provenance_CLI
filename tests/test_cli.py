@@ -5301,3 +5301,21 @@ class TestStampsOutputReviewCases:
         result = runner.invoke(app, ["stamps", "info", self.STAMP])
         assert "\x1b" not in result.output
         assert "evil[2Jlabel" in result.output
+
+
+class TestRerunLine:
+    def test_url_options_redacted_and_key_quoted(self, mocker):
+        from swarm_provenance_uploader.cli import _rerun_with_key
+
+        mocker.patch("swarm_provenance_uploader.cli.sys.argv", [
+            "swarm-prov-upload", "--gateway-url", "https://u:secret@gw", "--chain-rpc=https://rpc/key123",
+            "upload", "--file", "d.txt"])
+        line = _rerun_with_key("my key")
+        assert "secret" not in line and "key123" not in line
+        assert "--idempotency-key 'my key'" in line
+
+    def test_fallback_quotes_key(self, mocker):
+        from swarm_provenance_uploader.cli import _rerun_with_key
+
+        mocker.patch("swarm_provenance_uploader.cli.sys.argv", ["python", "-m", "x"])
+        assert "--idempotency-key 'k $(id)'" in _rerun_with_key("k $(id)")

@@ -2230,3 +2230,46 @@ class TestIdempotencyPaymentTotal:
         finally:
             patcher.stop()
         assert len(sent) == 1
+
+
+class TestIdempotencyVerificationCases:
+    """Cases from the verification review of the retry loop."""
+
+    def _purchase(self, idem_x402, requests_mock, responses, **kw):
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED] + responses)
+        client, patcher = _client_with(idem_x402, x402_auto_pay=True, **kw)
+        try:
+            return client.purchase_stamp()
+        finally:
+            patcher.stop()
+
+    def test_already_used_402_marks_attempt_as_possibly_collected(self, idem_x402, requests_mock, no_sleep):
+        sent = []
+        used = {"status_code": 402, "json": {"detail": {"error": "This payment authorization has already been used."}}}
+        replay = {"status_code": 201, "json": {"batchID": DUMMY_STAMP}, "headers": {"Idempotent-Replayed": "true"}}
+        assert self._purchase(idem_x402, requests_mock, [_idem("IDEMPOTENCY_KEY_IN_PROGRESS"), used, replay],
+                              x402_on_payment_sent=sent.append) == DUMMY_STAMP
+        assert [p["nonce"] for p in sent] == [NONCES[0]]  # this run paid, via the first authorization
+
+    def test_failed_payment_response_after_unknown_attempt_reports_it(self, idem_x402, requests_mock, no_sleep):
+        import base64
+        import json
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        failed = {"status_code": 200, "json": {"batchID": DUMMY_STAMP}, "headers": {
+            "x-payment-response": base64.b64encode(json.dumps({"success": False, "errorReason": "x"}).encode()).decode()}}
+        with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+            self._purchase(idem_x402, requests_mock, [
+                _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), {"exc": requests.exceptions.ReadTimeout}, failed])
+        assert exc_info.value.nonce == NONCES[0]
+
+    def test_connect_timeout_resends_without_new_signature(self, idem_x402, requests_mock, no_sleep):
+        ct = {"exc": requests.exceptions.ConnectTimeout}
+        assert self._purchase(idem_x402, requests_mock, [
+            _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), {"exc": requests.exceptions.ReadTimeout}, ct, ct, CREATED,
+        ]) == DUMMY_STAMP
+        assert idem_x402.sign_payment.call_count == 2  # the first, and one after the read timeout
+
+    def test_non_string_code_does_not_crash(self, idem_x402, requests_mock):
+        with pytest.raises(ConnectionError):
+            self._purchase(idem_x402, requests_mock, [{"status_code": 400, "json": {"code": 1}}])

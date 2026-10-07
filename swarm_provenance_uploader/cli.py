@@ -314,6 +314,9 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
     raise typer.Exit(code=1)
 
 
+_URL_OPTIONS = ("--gateway-url", "--chain-rpc", "--bee-url")
+
+
 def _rerun_with_key(key: str) -> str:
     """The command line that repeats this command with an Idempotency-Key.
 
@@ -324,11 +327,17 @@ def _rerun_with_key(key: str) -> str:
         i = args.index("--idempotency-key")
         del args[i:i + 2]
     args = [a for a in args if not a.startswith("--idempotency-key=")]
-    if args and Path(sys.argv[0]).name == "swarm-prov-upload":
-        import shlex
+    # URLs can carry credentials (user:pass@, API keys in RPC URLs): never echo them
+    for i, arg in enumerate(args):
+        if arg in _URL_OPTIONS and i + 1 < len(args):
+            args[i + 1] = "<url>"
+        elif arg.split("=", 1)[0] in _URL_OPTIONS and "=" in arg:
+            args[i] = arg.split("=", 1)[0] + "=<url>"
+    import shlex
+    if args and Path(sys.argv[0]).stem == "swarm-prov-upload":
         return "swarm-prov-upload --idempotency-key " + shlex.quote(key) + " " + " ".join(shlex.quote(a) for a in args)
     # Not run from the entry point (e.g. python -m): the arguments may not be ours
-    return f"swarm-prov-upload --idempotency-key {key} <same command and options>"
+    return f"swarm-prov-upload --idempotency-key {shlex.quote(key)} <same command and options>"
 
 
 def _command_idempotency_key() -> str:
