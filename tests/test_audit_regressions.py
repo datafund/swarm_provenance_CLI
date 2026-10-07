@@ -468,8 +468,8 @@ class TestDownloadClaims:
         assert "verification passed" not in result.output.lower()
         assert "not checked against the Swarm reference" in result.output
 
-    def test_self_consistent_forgery_fails_against_a_pinned_notary(self, mocker, tmp_path):
-        """What does tie the content to a trusted party today: a pinned notary signature."""
+    def test_self_consistent_forgery_by_a_foreign_key_fails_against_a_pinned_notary(self, mocker, tmp_path):
+        """A pin stops a gateway that names its own key as notary (#135); see the next test for its limit."""
         pytest.importorskip("eth_account")
         from eth_account import Account
 
@@ -489,3 +489,42 @@ class TestDownloadClaims:
         result = _download(mocker, tmp_path, document, "--notary-address", Account.from_key(NOTARY_KEY).address)
         assert result.exit_code == 0, result.output
         assert "signed by the pinned notary" in result.output
+
+
+class TestDownloadClaimsReviewCases:
+    """The limits of a notary signature, stated in the output (#134 review)."""
+
+    @pytest.fixture(autouse=True)
+    def _needs_eth_account(self):
+        pytest.importorskip("eth_account")
+
+    def test_genuinely_signed_substitute_still_passes_and_output_says_so(self, mocker, tmp_path):
+        """The notary signs whatever is uploaded: a substituted but genuinely signed document passes a pin."""
+        from eth_account import Account
+
+        substitute = _metadata(b"someone else's genuinely signed upload")
+        substitute["signatures"] = [_notary_signature(substitute, NOTARY_KEY)]
+        result = _download(mocker, tmp_path, substitute, "--notary-address", Account.from_key(NOTARY_KEY).address)
+        assert result.exit_code == 0
+        assert "not that it is the content of this reference" in result.output
+
+    def test_gateway_notary_summary_names_the_gateway(self, mocker, tmp_path):
+        document = _metadata(b"gw signed")
+        document["signatures"] = [_notary_signature(document, NOTARY_KEY)]
+        result = _download(mocker, tmp_path, document)
+        assert result.exit_code == 0, result.output
+        assert "signed by the notary of the gateway it came from (https://" in result.output
+        assert "pinned notary" not in result.output
+
+    def test_local_backend_note_names_the_bee_node(self, mocker, tmp_path):
+        from eth_account import Account
+
+        document = _metadata(b"local")
+        document["signatures"] = [_notary_signature(document, NOTARY_KEY)]
+        mocker.patch("swarm_provenance_uploader.cli.swarm_client.download_data_from_swarm",
+                     return_value=json.dumps(document).encode())
+        result = runner.invoke(app, ["--backend", "local", "download", REFERENCE, "--output-dir", str(tmp_path),
+                                     "--notary-address", Account.from_key(NOTARY_KEY).address])
+        assert result.exit_code == 0, result.output
+        assert "signed by the pinned notary" in result.output
+        assert "your Bee node is trusted" in result.output

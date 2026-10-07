@@ -43,13 +43,13 @@ swarm-prov-upload upload --file /path/to/data.txt --size medium
 # Upload with existing stamp (skip purchase)
 swarm-prov-upload upload --file /path/to/data.txt --stamp-id <existing_stamp_id>
 
-# Download and verify
+# Download (checks content hash and notary signature)
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads
 
 # Upload with notary signing (gateway only)
 swarm-prov-upload upload --file /path/to/data.txt --sign notary
 
-# Download and verify data (a notary signature that does not verify fails the download)
+# Download (a notary signature that does not verify fails the download)
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads
 
 # Also fail if the document carries no notary signature, and pin the notary
@@ -416,7 +416,7 @@ swarm-prov-upload upload --file /path/to/data.txt --stamp-id <existing_stamp_id>
 # Upload using pooled stamp (instant ~5s vs >1min for purchase)
 swarm-prov-upload upload --file /path/to/data.txt --usePool
 
-# Download and verify data
+# Download data (checks content hash and notary signature)
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads --verbose
 ```
 
@@ -700,7 +700,7 @@ swarm-prov-upload download <swarm_hash> --notary-address 0x...   # or NOTARY_ADD
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads --no-verify
 ```
 
-What `download` checks: the decoded data against the document's own `content_hash`, and the notary signature when there is one. It does **not** check that the content is what the Swarm reference points to: the gateway that serves it is trusted for that, so a document from an untrusted gateway (or `--gateway-url`) is only as good as its signature. A notary signature checked against a pinned `--notary-address` is what ties it to a signer you trust.
+What `download` checks: the decoded data against the document's own `content_hash`, and the notary signature when there is one. It does **not** check that the content is what the Swarm reference points to: the gateway (or, with `--backend local`, your Bee node) that serves it is trusted for that. A notary signature does not close that gap, even with a pinned `--notary-address`: it covers only the document's `data`, and the gateway's notary signs whatever an uploader sends with `--sign notary`. So a hostile gateway could serve a different, genuinely signed document for your reference. Pinning protects against a gateway that names a notary key of its own, not against substituted content. To be sure of the content, compare it with a hash you obtained independently (for example the original file's, or one anchored on-chain).
 
 The expected signer comes from `GET /api/v1/notary/info` on the same gateway, so a gateway serving forged documents could also name its own key; pin the notary address you trust with `--notary-address` or `NOTARY_ADDRESS`. The saved `<hash>.meta.json` is the document as downloaded, signatures included, so it can be checked again later with `swarm-prov-upload notary verify --file <hash>.meta.json`. `--strict` is kept as an alias of `--require-signature`.
 
