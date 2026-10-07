@@ -128,6 +128,7 @@ swarm-prov-upload download <swarm_hash> --output-dir ./downloads
 
 # Stamp management (gateway only)
 swarm-prov-upload stamps list
+swarm-prov-upload stamps list --full --wallet <address>   # Full IDs + labels, one wallet's stamps
 swarm-prov-upload stamps info <stamp_id>
 swarm-prov-upload stamps extend <stamp_id> --amount 1000000
 swarm-prov-upload stamps check <stamp_id>     # Health check

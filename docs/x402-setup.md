@@ -262,7 +262,11 @@ The gateway confirmed it collected the payment, but the request failed afterward
 
 ### "Payment received, but the stamp purchase is not confirmed yet"
 
-The payment settled, but the Swarm node did not confirm the stamp in time. The gateway keeps waiting and registers the stamp to your wallet once the node reports it. Do not buy another one: the message shows the stamp label and a link listing your wallet's stamps, where it appears under that label.
+The payment settled, but the Swarm node did not confirm the stamp in time. The gateway keeps waiting and registers the stamp to your wallet once the node reports it. Do not buy another one: the message shows the stamp label and the command that lists your wallet's stamps (`swarm-prov-upload stamps list --wallet <payer> --full`), where it appears under that label.
+
+### An upload failed after the stamp was bought
+
+The full stamp ID is printed when the stamp is bought, and again if the command then fails. Re-run the same command with `--stamp-id <id>` to use that stamp instead of buying another.
 
 ### "Refused the gateway's payment request; nothing was signed"
 

@@ -627,20 +627,26 @@ class GatewayClient:
 
     # --- Stamps ---
 
-    def list_stamps(self, verbose: bool = False) -> StampListResponse:
+    def list_stamps(self, wallet: Optional[str] = None, verbose: bool = False) -> StampListResponse:
         """
         List all postage stamp batches.
+
+        Args:
+            wallet: Only stamps registered to this wallet address (e.g. the
+                    x402 payer's, which owns the stamps it paid for).
+            verbose: Enable debug output
 
         Returns:
             StampListResponse with list of stamps and total count.
         """
         url = self._make_url("/api/v1/stamps/")
+        params = {"wallet": wallet} if wallet else None
         if verbose:
             print(f"--- DEBUG: List Stamps ---")
-            print(f"URL: GET {url}")
+            print(f"URL: GET {url}" + (f" (wallet={wallet})" if wallet else ""))
 
         try:
-            response = requests.get(url, headers=self._get_headers(), timeout=30)
+            response = requests.get(url, headers=self._get_headers(), params=params, timeout=30)
             if verbose:
                 print(f"DEBUG: List stamps status: {response.status_code}")
             response.raise_for_status()

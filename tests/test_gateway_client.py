@@ -1919,3 +1919,15 @@ class TestPresentationReviewCases:
         from swarm_provenance_uploader.core.gateway_client import is_insecure_gateway_url
 
         assert is_insecure_gateway_url(url)
+
+
+class TestListStampsWallet:
+    def test_wallet_query_param(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/stamps/", json={"stamps": [], "total_count": 0})
+        GatewayClient(base_url=GW).list_stamps(wallet=PAYER)
+        assert requests_mock.last_request.qs == {"wallet": [PAYER.lower()]}
+
+    def test_no_wallet_no_param(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/stamps/", json={"stamps": [], "total_count": 0})
+        GatewayClient(base_url=GW).list_stamps()
+        assert requests_mock.last_request.qs == {}

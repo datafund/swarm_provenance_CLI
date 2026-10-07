@@ -68,6 +68,11 @@ _x402_config = {
 # Payments sent during this command (reset per invocation in main())
 _x402_session = {"spent": 0, "payments": 0, "reported": False}
 
+# A stamp this command bought or took from the pool and has not used yet.
+# If the command fails before the upload completes, its ID is repeated with a
+# --stamp-id hint so a retry does not buy another one (reset in main()).
+_unused_stamp = {"id": None, "how": None}
+
 # Global state for chain / blockchain configuration
 _chain_config = {
     "enabled": config.CHAIN_ENABLED,
@@ -176,6 +181,22 @@ def _record_x402_payment(payment: dict):
     _x402_session["payments"] += 1
 
 
+def _hold_unused_stamp(stamp_id: str, how: str):
+    """Remember a stamp this command acquired until the upload that uses it succeeds."""
+    _unused_stamp.update(id=stamp_id, how=how)
+
+
+def _echo_unused_stamp_hint():
+    """On a failed command, repeat the ID of the stamp it acquired, with a reuse hint."""
+    stamp_id = _unused_stamp["id"]
+    if not stamp_id:
+        return
+    typer.secho(f"\nThe stamp {_unused_stamp['how']} for this command can be reused:", fg=typer.colors.YELLOW, err=True)
+    typer.echo(f"  {stamp_id}", err=True)
+    typer.echo(f"To retry without buying another, run the same command with --stamp-id {stamp_id}", err=True)
+    _unused_stamp.update(id=None, how=None)
+
+
 def _echo_x402_spent(err: bool = False):
     """Print the total sent in this command, if anything was paid (once per command)."""
     if _x402_session["payments"] and not _x402_session["reported"]:
@@ -238,14 +259,18 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
             typer.echo(f"  {name + ':':<13}{value}", err=True)
 
     explorer = _X402_EXPLORERS.get(e.network or "")
+    link = None
+    if explorer and e.transaction:
+        link = f"{explorer}/tx/{e.transaction}"
+    elif explorer and e.payer:
+        link = f"{explorer}/address/{e.payer}#tokentxns"
     typer.echo("", err=True)
     if isinstance(e, exceptions.StampPurchasePendingError):
         typer.echo("The stamp is registered to your wallet once the node reports it. "
                    "Do not buy another one.", err=True)
         if e.payer:
-            gateway_url = _backend_config["gateway_url"].rstrip("/")
-            typer.echo(f"To find it, look for the label above in "
-                       f"{gateway_url}/api/v1/stamps/?wallet={e.payer}", err=True)
+            typer.echo("To find it, look for the label above in:", err=True)
+            typer.echo(f"  swarm-prov-upload stamps list --wallet {e.payer} --full", err=True)
     elif e.settled:
         typer.echo("Contact the gateway operator with the transaction above for the "
                    "result or a refund. Re-running pays again.", err=True)
@@ -253,14 +278,15 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
         typer.echo("Do not re-run yet: a re-run signs a new payment and can pay twice.", err=True)
         typer.echo("Check whether the authorization above was used (a USDC transfer "
                    "from the payer to the pay-to address with this nonce):", err=True)
+        if link:
+            typer.echo(f"  {link}", err=True)
+            link = None
         if valid_until:
             typer.echo(f"The authorization can be collected until {valid_until}. If no such "
                        "transfer has appeared by then, it never will, and re-running is safe.",
                        err=True)
-    if explorer and e.transaction:
-        typer.echo(f"  {explorer}/tx/{e.transaction}", err=True)
-    elif explorer and e.payer:
-        typer.echo(f"  {explorer}/address/{e.payer}#tokentxns", err=True)
+    if link:
+        typer.echo(f"  {link}", err=True)
     raise typer.Exit(code=1)
 
 
@@ -437,9 +463,7 @@ def upload(
     if stamp_id:
         # User provided an existing stamp ID
         used_existing_stamp = True
-        typer.echo(f"Using existing stamp: ...{stamp_id[-12:]}")
-        if verbose:
-            typer.echo(f"    Stamp ID: {stamp_id}")
+        typer.echo(f"Using existing stamp: {stamp_id}")
     elif use_pool:
         # Acquire stamp from pool (gateway only)
         if not use_gateway:
@@ -467,6 +491,7 @@ def upload(
             acquire_result = gw_client.acquire_stamp_from_pool(size=size, depth=stamp_depth, verbose=verbose)
             stamp_id = acquire_result.batch_id
             acquired_from_pool = True
+            _hold_unused_stamp(stamp_id, "acquired from the pool")
 
             if verbose:
                 typer.echo(f"    Stamp ID Received: {stamp_id} (Length: {len(stamp_id)})")
@@ -474,7 +499,7 @@ def upload(
                 if acquire_result.fallback_used:
                     typer.secho(f"    Note: Larger stamp substituted (fallback used)", fg=typer.colors.YELLOW)
             else:
-                msg = f"Stamp acquired from pool (ID: ...{stamp_id[-12:]})"
+                msg = f"Stamp acquired from pool (ID: {stamp_id})"
                 if acquire_result.fallback_used:
                     msg += " [fallback size]"
                 typer.echo(msg)
@@ -524,11 +549,12 @@ def upload(
                 local_amount = stamp_amount or config.DEFAULT_POSTAGE_AMOUNT
                 local_depth = stamp_depth or config.DEFAULT_POSTAGE_DEPTH
                 stamp_id = swarm_client.purchase_postage_stamp(local_bee_url, local_amount, local_depth, verbose=verbose)
+            _hold_unused_stamp(stamp_id, "bought")
             if verbose:
                 typer.echo(f"    Stamp ID Received: {stamp_id} (Length: {len(stamp_id)})")
                 typer.echo(f"    Stamp ID (lowercase for header): {stamp_id.lower()}")
             else:
-                typer.echo(f"Postage stamp purchased (ID: ...{stamp_id[-12:]})")
+                typer.echo(f"Postage stamp purchased (ID: {stamp_id})")
 
         except exceptions.PaymentRequiredError as e:
             _report_payment_required(e)
@@ -659,6 +685,7 @@ def upload(
         raise typer.Exit(code=1)
 
     # 10. Display Swarm reference_hash
+    _unused_stamp.update(id=None, how=None)  # used: nothing to reuse
     typer.secho(f"\nSUCCESS! Upload complete.", fg=typer.colors.GREEN, bold=True)
     typer.echo("Swarm Reference Hash:")
     typer.secho(f"{swarm_ref_hash}", fg=typer.colors.CYAN)
@@ -1012,18 +1039,16 @@ def upload_collection(
         gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
 
         if stamp_id:
-            typer.echo(f"Using existing stamp: ...{stamp_id[-12:]}")
+            typer.echo(f"Using existing stamp: {stamp_id}")
         elif use_pool:
             typer.echo("Acquiring stamp from pool...")
             acquire_result = gw_client.acquire_stamp_from_pool(size=size, verbose=verbose)
             stamp_id = acquire_result.batch_id
-            if verbose:
-                typer.echo(f"    Stamp ID: {stamp_id}")
-            else:
-                msg = f"Stamp acquired from pool (ID: ...{stamp_id[-12:]})"
-                if acquire_result.fallback_used:
-                    msg += " [fallback size]"
-                typer.echo(msg)
+            _hold_unused_stamp(stamp_id, "acquired from the pool")
+            msg = f"Stamp acquired from pool (ID: {stamp_id})"
+            if acquire_result.fallback_used:
+                msg += " [fallback size]"
+            typer.echo(msg)
         else:
             typer.echo("Purchasing postage stamp...")
             stamp_id = gw_client.purchase_stamp(
@@ -1031,10 +1056,8 @@ def upload_collection(
                 size=size,
                 verbose=verbose,
             )
-            if verbose:
-                typer.echo(f"    Stamp ID: {stamp_id}")
-            else:
-                typer.echo(f"Postage stamp purchased (ID: ...{stamp_id[-12:]})")
+            _hold_unused_stamp(stamp_id, "bought")
+            typer.echo(f"Postage stamp purchased (ID: {stamp_id})")
 
     except exceptions.PoolNotEnabledError:
         typer.secho("ERROR: Stamp pool is not enabled on this gateway.", fg=typer.colors.RED, err=True)
@@ -1073,6 +1096,8 @@ def upload_collection(
         except Exception:
             pass
 
+    _unused_stamp.update(id=None, how=None)  # used: nothing to reuse
+
     # Output
     if output_json:
         from .models import CollectionFileInfo, CollectionProvenanceMetadata
@@ -1106,6 +1131,11 @@ def upload_collection(
 
 # --- Stamps Subcommands ---
 
+def _sanitize_label(label: Optional[str]) -> str:
+    """A stamp label as printable text (labels come from the gateway)."""
+    return "".join(ch for ch in (label or "") if ch.isprintable())
+
+
 def _format_ttl(seconds: int) -> str:
     """Format TTL seconds into human readable string."""
     if seconds < 60:
@@ -1124,10 +1154,14 @@ def _format_ttl(seconds: int) -> str:
 
 @stamps_app.command("list")
 def stamps_list(
+    full: Annotated[bool, typer.Option("--full", help="Show full stamp IDs (for --stamp-id) and labels.")] = False,
+    wallet: Annotated[Optional[str], typer.Option("--wallet", help="Only stamps registered to this wallet address, e.g. your x402 payer.")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
 ):
     """
     List all postage stamp batches. (Gateway only)
+
+    Use --full to show complete IDs that can be passed to --stamp-id.
     """
     if _backend_config["backend"] != "gateway":
         typer.secho("ERROR: 'stamps list' requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
@@ -1139,22 +1173,30 @@ def stamps_list(
 
     try:
         gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
-        result = gw_client.list_stamps(verbose=verbose)
+        result = gw_client.list_stamps(wallet=wallet, verbose=verbose)
 
         if not result.stamps:
             typer.echo("No stamps found.")
             return
 
         # Print header
-        typer.echo(f"\n{'ID':<20} {'Usable':<8} {'TTL':<12} {'Depth':<6} {'Utilization':<12}")
-        typer.echo("-" * 60)
+        id_width = 64 if full else 20
+        header = f"\n{'ID':<{id_width}} {'Usable':<8} {'TTL':<12} {'Depth':<6} {'Utilization':<12}"
+        typer.echo(header + (" Label" if full else ""))
+        typer.echo("-" * (len(header) - 1 + (6 if full else 0)))
 
         for stamp in result.stamps:
-            stamp_id_short = f"{stamp.batchID[:8]}...{stamp.batchID[-8:]}"
+            stamp_id_str = stamp.batchID if full else f"{stamp.batchID[:8]}...{stamp.batchID[-8:]}"
             usable_str = typer.style("Yes", fg=typer.colors.GREEN) if stamp.usable else typer.style("No", fg=typer.colors.RED)
             ttl_str = _format_ttl(stamp.batchTTL)
             util_str = f"{stamp.utilization}%"
-            typer.echo(f"{stamp_id_short:<20} {usable_str:<8} {ttl_str:<12} {stamp.depth:<6} {util_str:<12}")
+            line = f"{stamp_id_str:<{id_width}} {usable_str:<8} {ttl_str:<12} {stamp.depth:<6} {util_str:<12}"
+            if full:
+                line += f" {_sanitize_label(stamp.label)}"
+            typer.echo(line)
+
+        if not full:
+            typer.echo("\n(IDs shortened; use --full for complete IDs to pass to --stamp-id)")
 
         typer.echo(f"\nTotal: {result.total_count} stamp(s)")
 
@@ -2846,8 +2888,11 @@ def main(
     """
     _x402_session.update(spent=0, payments=0, reported=False)
     _backend_config.pop("_http_warning_shown", None)
-    # A command that fails after paying still says what it paid.
+    _unused_stamp.update(id=None, how=None)
+    # A command that fails after paying still says what it paid, and which
+    # stamp it already holds (callbacks run in reverse order: stamp first).
     ctx.call_on_close(lambda: _echo_x402_spent(err=True))
+    ctx.call_on_close(_echo_unused_stamp_hint)
 
     if backend:
         if backend not in ("gateway", "local"):

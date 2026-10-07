@@ -19,7 +19,10 @@ Payment safety (epic #145).
 - The 402 payment request is validated before signing: only the `exact` scheme is signed (others were signed as EIP-3009 anyway), an `asset` other than the network's USDC contract is refused, and a malformed amount or `payTo` (or the zero address) is refused. Raises `PaymentRequirementsError` listing the reasons (#129)
 - The payment prompt leads with the request the CLI made (`POST /api/v1/stamps/`); the gateway's own description is shown after it, cleaned of control and invisible formatting characters, truncated and marked as the gateway's (#129)
 
+- The full stamp ID is printed after a purchase or pool acquisition (it was cut to the last 12 characters without `-v`), and if the command then fails (stamp never usable, upload error, unknown payment outcome), the ID is repeated with a `--stamp-id` hint so a retry does not buy another stamp (#130)
+
 ### Added
+- `stamps list --full` shows complete stamp IDs and labels; `stamps list --wallet <address>` lists the stamps registered to one wallet (#130)
 - `--no-x402`, `--no-auto-pay` and `--no-free` flags, which override `X402_ENABLED`, `X402_AUTO_PAY` and `FREE_TIER` for one command (#128)
 - A running total of payments sent during a command, shown at the second prompt and at the end of the command, also when it fails (#128)
 - `GatewayClient(x402_on_payment_sent=...)` hook; a payment callback with a parameter named `option` receives the `X402PaymentOption` (#128)

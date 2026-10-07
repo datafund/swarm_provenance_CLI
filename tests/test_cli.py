@@ -4720,7 +4720,7 @@ class TestPaymentOutcomeReporting:
         assert "not confirmed yet" in result.output
         assert "x402-abc" in result.output
         assert "Do not buy another one" in result.output
-        assert f"/api/v1/stamps/?wallet={self.PAYMENT['payer']}" in result.output
+        assert f"stamps list --wallet {self.PAYMENT['payer']} --full" in result.output
         assert "Idempotency-Key" not in result.output  # the gateway's hint does not apply to the CLI
 
     def test_upload_collection_unknown_outcome(self, mocker, tmp_path):
@@ -5004,3 +5004,125 @@ class TestPayToPinStatus:
         _x402_config["expected_pay_to"] = "operator.eth"
         result = runner.invoke(app, ["x402", "status"])
         assert "is not an address" in result.output
+
+
+# --- Full stamp IDs and reuse hints (#130) ---
+
+class TestStampIdVisibility:
+    STAMP = "c0ffee" + "ab" * 29
+
+    def _client(self, mocker, usable=True):
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.return_value = self.STAMP
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=self.STAMP, usable=usable, exists=True, depth=17, amount="1",
+            bucketDepth=16, immutableFlag=False, batchTTL=3600,
+        )
+        mock_client.upload_data.return_value = DUMMY_SWARM_REF
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        mocker.patch("swarm_provenance_uploader.cli.time.sleep")
+        return mock_client
+
+    def _upload(self, *extra):
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            return runner.invoke(app, ["upload", "--file", "d.txt", *extra])
+
+    def test_full_id_printed_after_purchase_without_verbose(self, mocker):
+        self._client(mocker)
+        result = self._upload()
+        assert result.exit_code == 0, result.output
+        assert f"Postage stamp purchased (ID: {self.STAMP})" in result.output
+        assert "can be reused" not in result.output  # used: no hint on success
+
+    def test_upload_failure_after_purchase_repeats_id_with_hint(self, mocker):
+        client = self._client(mocker)
+        client.upload_data.side_effect = ConnectionError("Failed to upload data: 503")
+        result = self._upload()
+        assert result.exit_code == 1
+        assert "The stamp bought for this command can be reused" in result.output
+        assert f"--stamp-id {self.STAMP}" in result.output
+
+    def test_unknown_payment_outcome_on_upload_still_gives_stamp_hint(self, mocker):
+        client = self._client(mocker)
+        client.upload_data.side_effect = exceptions.PaymentOutcomeUnknownError("timed out")
+        result = self._upload()
+        assert result.exit_code == 1
+        assert "may have been taken" in result.output
+        assert f"--stamp-id {self.STAMP}" in result.output
+
+    def test_stamp_never_usable_gives_hint(self, mocker):
+        self._client(mocker, usable=False)
+        result = self._upload("--stamp-retries", "2", "--stamp-interval", "0")
+        assert result.exit_code == 1
+        assert f"--stamp-id {self.STAMP}" in result.output
+
+    def test_pool_stamp_failure_gives_hint(self, mocker):
+        client = self._client(mocker)
+        client.get_pool_available_count.return_value = 1
+        client.acquire_stamp_from_pool.return_value = mocker.MagicMock(
+            batch_id=self.STAMP, depth=17, size_name="small", fallback_used=False,
+        )
+        client.upload_data.side_effect = ConnectionError("nope")
+        result = self._upload("--usePool")
+        assert result.exit_code == 1
+        assert f"Stamp acquired from pool (ID: {self.STAMP})" in result.output
+        assert "acquired from the pool for this command" in result.output
+
+    def test_existing_stamp_failure_gives_no_hint(self, mocker):
+        client = self._client(mocker)
+        client.upload_data.side_effect = ConnectionError("nope")
+        result = self._upload("--stamp-id", self.STAMP)
+        assert result.exit_code == 1
+        assert f"Using existing stamp: {self.STAMP}" in result.output
+        assert "can be reused" not in result.output
+
+    def test_collection_failure_after_purchase_gives_hint(self, mocker, tmp_path):
+        (tmp_path / "a.txt").write_text("a")
+        client = self._client(mocker)
+        client.upload_manifest.side_effect = ConnectionError("nope")
+        result = runner.invoke(app, ["upload-collection", str(tmp_path)])
+        assert result.exit_code == 1
+        assert f"Postage stamp purchased (ID: {self.STAMP})" in result.output
+        assert f"--stamp-id {self.STAMP}" in result.output
+
+    def test_hint_not_carried_into_next_command(self, mocker):
+        client = self._client(mocker)
+        client.upload_data.side_effect = ConnectionError("nope")
+        self._upload()
+        result = runner.invoke(app, ["x402", "status"])
+        assert "can be reused" not in result.output
+
+
+class TestStampsListFull:
+    STAMP = "c0ffee" + "ab" * 29
+
+    def _list(self, mocker, *args, label="paid-1a2b"):
+        client = mocker.MagicMock()
+        client.list_stamps.return_value = StampListResponse(stamps=[StampDetails(
+            batchID=self.STAMP, usable=True, depth=17, amount="1", bucketDepth=16,
+            immutableFlag=False, batchTTL=86400, utilization=0, label=label,
+        )], total_count=1)
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=client)
+        return client, runner.invoke(app, ["stamps", "list", *args])
+
+    def test_default_shortens_and_points_to_full(self, mocker):
+        _, result = self._list(mocker)
+        assert self.STAMP not in result.output
+        assert "use --full" in result.output
+
+    def test_full_shows_complete_ids_and_labels(self, mocker):
+        _, result = self._list(mocker, "--full")
+        assert result.exit_code == 0, result.output
+        assert self.STAMP in result.output
+        assert "paid-1a2b" in result.output
+
+    def test_wallet_filter_passed_to_gateway(self, mocker):
+        client, result = self._list(mocker, "--wallet", "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00")
+        assert result.exit_code == 0
+        assert client.list_stamps.call_args.kwargs["wallet"] == "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
+
+    def test_label_control_characters_dropped(self, mocker):
+        _, result = self._list(mocker, "--full", label="evil\x1b[2Jlabel")
+        assert "\x1b" not in result.output
