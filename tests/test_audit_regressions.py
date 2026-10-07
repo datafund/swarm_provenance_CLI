@@ -21,6 +21,18 @@ from swarm_provenance_uploader.models import NotaryInfoResponse
 
 runner = CliRunner()
 
+
+@pytest.fixture(autouse=True)
+def _restore_cli_config():
+    """Global flags (--backend, --x402 ...) persist in module state between invocations."""
+    from swarm_provenance_uploader import cli
+
+    saved = {name: dict(getattr(cli, name)) for name in ("_backend_config", "_x402_config", "_chain_config")}
+    yield
+    for name, values in saved.items():
+        getattr(cli, name).clear()
+        getattr(cli, name).update(values)
+
 STAMP = "a3" * 32
 REFERENCE = "b5d4ea763a1396676771151158461f73678f1676166acd06a0a18600b85de8a4"
 NOTARY_KEY = "0x" + "11" * 32
@@ -185,12 +197,14 @@ class TestForeignNotarySigner:
         assert result.exit_code == 1
         assert "Data hash mismatch" in result.output
 
-    def test_without_strict_a_foreign_signature_is_reported(self, mocker, tmp_path):
-        """Verification is on by default; without --strict a failure is shown, not hidden."""
+    def test_without_strict_a_foreign_signature_fails(self, mocker, tmp_path):
+        """A failed signature exits 1 by default, and nothing is saved (#135)."""
         document = _metadata(b"foreign")
         document["signatures"] = [_notary_signature(document, FOREIGN_KEY)]
         result = _download(mocker, tmp_path, document)
+        assert result.exit_code == 1
         assert "Signature: ✗ FAILED" in result.output
+        assert not any(tmp_path.iterdir())
 
 
 # --- Pinned x402 signer vector ---------------------------------------------
@@ -308,3 +322,77 @@ class TestStampIdValidation:
         result = runner.invoke(app, ["upload", "--file", "f.txt", "--stamp-id", "0x" + STAMP])
         assert result.exit_code == 0, result.output
         assert client.get_stamp.call_args.args[0] == STAMP
+
+
+# --- Notary checking is enforced (#135) --------------------------------------
+
+class TestNotaryEnforcement:
+    @pytest.fixture(autouse=True)
+    def _needs_eth_account(self):
+        pytest.importorskip("eth_account")
+
+    def _address(self, key):
+        from eth_account import Account
+        return Account.from_key(key).address
+
+    def test_unsigned_document_passes_by_default(self, mocker, tmp_path):
+        result = _download(mocker, tmp_path, _metadata(b"plain"))
+        assert result.exit_code == 0, result.output
+
+    @pytest.mark.parametrize("flag", ["--require-signature", "--strict"])
+    def test_missing_signature_fails_when_required(self, mocker, tmp_path, flag):
+        """A document whose signatures were stripped no longer passes --strict."""
+        result = _download(mocker, tmp_path, _metadata(b"stripped"), flag)
+        assert result.exit_code == 1
+        assert "no notary signature" in result.output
+        assert not any(tmp_path.iterdir())
+
+    def test_pinned_address_beats_the_serving_gateway(self, mocker, tmp_path):
+        """A gateway serving forged data can name its own key as notary; a pin stops that."""
+        document = _metadata(b"forged by the gateway")
+        document["signatures"] = [_notary_signature(document, FOREIGN_KEY)]
+        # The gateway vouches for its own key...
+        unpinned = _download(mocker, tmp_path / "a", document, notary_key=FOREIGN_KEY)
+        assert unpinned.exit_code == 0
+        # ...but not against the pinned notary
+        pinned = _download(mocker, tmp_path / "b", document, "--notary-address", self._address(NOTARY_KEY),
+                           notary_key=FOREIGN_KEY)
+        assert pinned.exit_code == 1
+        assert "(pinned)" in pinned.output
+
+    def test_pinned_address_from_environment(self, mocker, tmp_path, monkeypatch):
+        document = _metadata(b"genuine")
+        document["signatures"] = [_notary_signature(document, NOTARY_KEY)]
+        monkeypatch.setenv("NOTARY_ADDRESS", self._address(NOTARY_KEY))
+        client_notary = FOREIGN_KEY  # the gateway's answer must not be used
+        result = _download(mocker, tmp_path, document, notary_key=client_notary)
+        assert result.exit_code == 0, result.output
+        assert "(pinned)" in result.output
+
+    def test_local_backend_verifies_with_pinned_address(self, mocker, tmp_path):
+        document = _metadata(b"local")
+        document["signatures"] = [_notary_signature(document, NOTARY_KEY)]
+        mocker.patch("swarm_provenance_uploader.cli.swarm_client.download_data_from_swarm",
+                     return_value=json.dumps(document).encode())
+        result = runner.invoke(app, ["--backend", "local", "download", REFERENCE, "--output-dir", str(tmp_path),
+                                     "--notary-address", self._address(NOTARY_KEY)])
+        assert result.exit_code == 0, result.output
+        assert "Verified" in result.output
+
+    def test_invalid_pinned_address_rejected(self, mocker, tmp_path):
+        document = _metadata(b"genuine")
+        document["signatures"] = [_notary_signature(document, NOTARY_KEY)]
+        result = _download(mocker, tmp_path, document, "--notary-address", "notary.eth")
+        assert result.exit_code == 1
+        assert "is not an address" in result.output
+
+    def test_saved_metadata_keeps_signatures_and_reverifies(self, mocker, tmp_path):
+        from swarm_provenance_uploader.core.notary_utils import verify_notary_signature
+
+        document = _metadata(b"keep me")
+        document["signatures"] = [_notary_signature(document, NOTARY_KEY)]
+        result = _download(mocker, tmp_path, document)
+        assert result.exit_code == 0, result.output
+        saved = json.loads((tmp_path / f"{REFERENCE}.meta.json").read_text())
+        assert saved["signatures"] == document["signatures"]
+        assert verify_notary_signature(saved, self._address(NOTARY_KEY)) == (True, None)

@@ -823,6 +823,87 @@ def upload(
     elif use_signing:
         typer.secho("\nNote: Signature requested but signed document not returned by gateway.", fg=typer.colors.YELLOW)
 
+_ETH_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
+
+
+def _verify_download_signature(raw_document: dict, gateway_url: Optional[str],
+                               notary_address: Optional[str], require_signature: bool,
+                               verbose: bool = False):
+    """
+    Check a downloaded document's notary signature; exit 1 unless it verifies.
+
+    A document without a signature passes unless require_signature is set.
+    The expected signer is notary_address if given (pinned), otherwise the
+    notary address of the gateway that served the document.
+
+    Raises:
+        typer.Exit: With code 1 when the signature is missing (and required),
+            cannot be checked, or does not verify.
+    """
+    from .core.notary_utils import extract_notary_signature, verify_notary_signature
+
+    def fail(message: str, hint: Optional[str] = None):
+        typer.secho(f"ERROR: {message}", fg=typer.colors.RED, err=True)
+        if hint:
+            typer.echo(hint, err=True)
+        raise typer.Exit(code=1)
+
+    notary_sig = extract_notary_signature(raw_document) if isinstance(raw_document, dict) else None
+    if notary_sig is None:
+        if require_signature:
+            fail("The document has no notary signature (--require-signature).")
+        if verbose:
+            typer.echo("\nNo notary signatures found in document.")
+        return
+
+    typer.echo("\nSignature Verification:")
+    typer.echo("-" * 50)
+    try:
+        import eth_account  # noqa: F401
+    except ImportError:
+        fail("Cannot verify the notary signature: eth-account is not installed.",
+             'Install it with: pip install "eth-account>=0.10.0" (or use --no-verify to skip).')
+
+    if notary_address:
+        notary_address = notary_address.strip()
+        if not _ETH_ADDRESS_RE.fullmatch(notary_address):
+            fail(f"--notary-address / NOTARY_ADDRESS is not an address: {notary_address!r}")
+        expected_address, source = notary_address, "pinned"
+    elif gateway_url:
+        try:
+            gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
+            expected_address = gw_client.get_notary_info(verbose=verbose).address
+        except exceptions.NotaryNotEnabledError:
+            expected_address = None
+        except Exception as e:
+            fail(f"Could not fetch the gateway's notary address: {e}",
+                 "Pin it with --notary-address (or NOTARY_ADDRESS), or use --no-verify to skip.")
+        source = f"from {gateway_url}"
+    else:
+        expected_address = None
+    if not expected_address:
+        fail("Cannot verify the notary signature: no expected notary address.",
+             "Pin it with --notary-address (or NOTARY_ADDRESS), or use --no-verify to skip.")
+
+    signer = str(notary_sig.get("signer", ""))
+    typer.echo(f"  Type:      {notary_sig.get('type', 'unknown')}")
+    typer.echo(f"  Signer:    {signer}")
+    typer.echo(f"  Expected:  {expected_address} ({source})")
+    typer.echo(f"  Timestamp: {notary_sig.get('timestamp', 'unknown')}")
+    if verbose:
+        if notary_sig.get("hashed_fields"):
+            typer.echo(f"  Hashed fields: {notary_sig.get('hashed_fields')}")
+        if notary_sig.get("signed_message_format"):
+            typer.echo(f"  Message format: {notary_sig.get('signed_message_format')}")
+
+    is_valid, error_msg = verify_notary_signature(raw_document, expected_address)
+    if not is_valid:
+        typer.secho(f"  Signature: ✗ FAILED - {error_msg}", fg=typer.colors.RED)
+        fail("Notary signature verification failed; nothing was saved.",
+             "Use --no-verify to download without checking the signature.")
+    typer.secho("  Signature: ✓ Verified", fg=typer.colors.GREEN)
+
+
 @app.command()
 def download(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash of the Provenance Metadata to download.")],
@@ -838,15 +919,23 @@ def download(
     bee_url: Annotated[Optional[str], typer.Option("--bee-url", help="Bee Gateway URL (when backend=local).")] = None,
     no_verify: Annotated[bool, typer.Option("--no-verify", help="Skip notary signature verification.")] = False,
     verify_flag: Annotated[bool, typer.Option("--verify", help="Verify notary signature (default, kept for backward compatibility).", hidden=True)] = False,
-    strict: Annotated[bool, typer.Option("--strict", help="Fail (exit 1) if signature verification fails.")] = False,
+    require_signature: Annotated[bool, typer.Option("--require-signature", help="Fail (exit 1) if the document has no notary signature.")] = False,
+    notary_address: Annotated[Optional[str], typer.Option(
+        "--notary-address", envvar="NOTARY_ADDRESS", show_envvar=True,
+        help="Expected notary signer address. Without it the address is taken from the gateway that served the document.",
+    )] = None,
+    strict: Annotated[bool, typer.Option("--strict", help="Same as --require-signature (a failed signature always fails).", hidden=True)] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False
 ):
     """
     Downloads Provenance Metadata from Swarm, decodes the wrapped data,
     verifies its integrity, and saves both files.
 
-    Notary signatures are verified by default when present.
-    Use --no-verify to skip verification, --strict to fail on invalid signatures.
+    Notary signatures are verified by default when present, and a signature
+    that does not verify fails the download (exit 1).
+    Use --require-signature to also fail when there is no signature,
+    --notary-address (or NOTARY_ADDRESS) to pin the expected signer, and
+    --no-verify to skip verification.
     """
     verify = not no_verify
 
@@ -925,73 +1014,19 @@ def download(
     #    and check for essential fields if not using Pydantic or for extra safety.
     #    Pydantic model already ensures 'data' and 'content_hash' exist if parsing succeeds.
 
-    # 4.5 Verify notary signature if requested
+    # 4.5 Verify the notary signature. A failed check fails the download (#135).
+    try:
+        raw_document = json.loads(metadata_str)
+    except json.JSONDecodeError:
+        raw_document = {}
     if verify:
-        from .core.notary_utils import verify_notary_signature, has_notary_signature
-
-        # Parse the raw metadata to check for signatures
-        try:
-            raw_document = json.loads(metadata_str)
-        except json.JSONDecodeError:
-            raw_document = {}
-
-        if has_notary_signature(raw_document):
-            typer.echo("\nSignature Verification:")
-            typer.echo("-" * 50)
-
-            # Get expected notary address from gateway
-            expected_address = None
-            if use_gateway:
-                try:
-                    gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
-                    notary_info = gw_client.get_notary_info(verbose=verbose)
-                    expected_address = notary_info.address
-                    if verbose:
-                        typer.echo(f"    Fetched notary address: {expected_address}")
-                except exceptions.NotaryNotEnabledError:
-                    typer.secho("  Warning: Could not fetch notary address (notary not enabled on gateway)", fg=typer.colors.YELLOW)
-                except Exception as e:
-                    typer.secho(f"  Warning: Could not fetch notary address: {e}", fg=typer.colors.YELLOW)
-
-            if expected_address:
-                # Extract signature info for display
-                signatures = raw_document.get("signatures", [])
-                notary_sig = None
-                for sig in signatures:
-                    if sig.get("type") == "notary":
-                        notary_sig = sig
-                        break
-
-                if notary_sig:
-                    signer = notary_sig.get("signer", "")
-                    signer_short = f"{signer[:10]}...{signer[-4:]}" if len(signer) > 14 else signer
-                    typer.echo(f"  Type:      {notary_sig.get('type', 'unknown')}")
-                    typer.echo(f"  Signer:    {signer_short}")
-                    typer.echo(f"  Timestamp: {notary_sig.get('timestamp', 'unknown')}")
-                    if verbose:
-                        hashed_fields = notary_sig.get("hashed_fields")
-                        if hashed_fields:
-                            typer.echo(f"  Hashed fields: {hashed_fields}")
-                        msg_format = notary_sig.get("signed_message_format")
-                        if msg_format:
-                            typer.echo(f"  Message format: {msg_format}")
-
-                # Verify signature
-                is_valid, error_msg = verify_notary_signature(raw_document, expected_address)
-
-                if is_valid:
-                    typer.secho(f"  Signature: ✓ Verified", fg=typer.colors.GREEN)
-                else:
-                    typer.secho(f"  Signature: ✗ FAILED - {error_msg}", fg=typer.colors.RED)
-                    if strict:
-                        typer.secho("\nAborting download (--strict mode).", fg=typer.colors.RED, err=True)
-                        raise typer.Exit(code=1)
-            else:
-                typer.secho("  Cannot verify: No notary address available", fg=typer.colors.YELLOW)
-                typer.echo("  Use gateway backend or run 'notary verify' manually with --address")
-        else:
-            if verbose:
-                typer.echo("\nNo notary signatures found in document.")
+        _verify_download_signature(
+            raw_document,
+            gateway_url=gateway_url if use_gateway else None,
+            notary_address=notary_address,
+            require_signature=require_signature or strict,
+            verbose=verbose,
+        )
 
     # 5. Extract Base64 encoded data
     b64_encoded_original_data = provenance_metadata_obj.data
@@ -1024,8 +1059,12 @@ def download(
     metadata_filename = f"{swarm_hash}.meta.json"
     metadata_filepath = output_dir / metadata_filename
     try:
-        # Save the pretty-printed JSON version of the Pydantic model
-        file_utils.save_bytes_to_file(metadata_filepath, provenance_metadata_obj.model_dump_json(indent=2).encode('utf-8'))
+        # Save the document as downloaded (pretty-printed), so fields the model
+        # does not know, such as `signatures`, are kept and can be
+        # re-verified later with `notary verify` (#135)
+        saved = (json.dumps(raw_document, indent=2) if raw_document
+                 else provenance_metadata_obj.model_dump_json(indent=2))
+        file_utils.save_bytes_to_file(metadata_filepath, saved.encode('utf-8'))
         typer.echo(f"Provenance metadata saved to: {metadata_filepath}")
     except Exception as e:
         typer.secho(f"ERROR: Failed to save metadata file: {e}", fg=typer.colors.RED, err=True)
