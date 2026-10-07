@@ -149,7 +149,7 @@ class TestDownloadHashMismatch:
         result = runner.invoke(app, ["download", REFERENCE, "--output-dir", str(tmp_path), "--no-verify"])
 
         assert result.exit_code == 1
-        assert "Content hash verification FAILED" in result.output
+        assert "Content hash mismatch" in result.output
         assert not (tmp_path / f"{REFERENCE}.data").exists()
         assert (tmp_path / f"{REFERENCE}.UNVERIFIED.data").read_bytes() == b"tampered"
 
@@ -451,3 +451,41 @@ class TestNotaryReviewCases:
         result = runner.invoke(app, ["notary", "verify", "--file", str(path)])
         assert result.exit_code == 0, result.output
         gateway.return_value.get_notary_info.assert_not_called()
+
+
+# --- What download actually checks (#134) ------------------------------------
+
+class TestDownloadClaims:
+    """The content is not checked against the Swarm reference, so the output must not say so."""
+
+    def test_unsigned_self_consistent_document_is_not_called_verified(self, mocker, tmp_path):
+        client = MagicMock()
+        client.download_data.return_value = json.dumps(_metadata(b"anything at all")).encode()
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=client)
+        result = runner.invoke(app, ["download", REFERENCE, "--output-dir", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        assert "verification successful" not in result.output.lower()
+        assert "verification passed" not in result.output.lower()
+        assert "not checked against the Swarm reference" in result.output
+
+    def test_self_consistent_forgery_fails_against_a_pinned_notary(self, mocker, tmp_path):
+        """What does tie the content to a trusted party today: a pinned notary signature."""
+        pytest.importorskip("eth_account")
+        from eth_account import Account
+
+        forged = _metadata(b"different content, consistent hash")
+        forged["signatures"] = [_notary_signature(forged, FOREIGN_KEY)]
+        result = _download(mocker, tmp_path, forged, "--notary-address", Account.from_key(NOTARY_KEY).address,
+                           notary_key=FOREIGN_KEY)
+        assert result.exit_code == 1
+        assert not any(tmp_path.iterdir())
+
+    def test_pinned_signature_summary(self, mocker, tmp_path):
+        pytest.importorskip("eth_account")
+        from eth_account import Account
+
+        document = _metadata(b"genuine")
+        document["signatures"] = [_notary_signature(document, NOTARY_KEY)]
+        result = _download(mocker, tmp_path, document, "--notary-address", Account.from_key(NOTARY_KEY).address)
+        assert result.exit_code == 0, result.output
+        assert "signed by the pinned notary" in result.output

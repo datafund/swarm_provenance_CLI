@@ -700,6 +700,8 @@ swarm-prov-upload download <swarm_hash> --notary-address 0x...   # or NOTARY_ADD
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads --no-verify
 ```
 
+What `download` checks: the decoded data against the document's own `content_hash`, and the notary signature when there is one. It does **not** check that the content is what the Swarm reference points to: the gateway that serves it is trusted for that, so a document from an untrusted gateway (or `--gateway-url`) is only as good as its signature. A notary signature checked against a pinned `--notary-address` is what ties it to a signer you trust.
+
 The expected signer comes from `GET /api/v1/notary/info` on the same gateway, so a gateway serving forged documents could also name its own key; pin the notary address you trust with `--notary-address` or `NOTARY_ADDRESS`. The saved `<hash>.meta.json` is the document as downloaded, signatures included, so it can be checked again later with `swarm-prov-upload notary verify --file <hash>.meta.json`. `--strict` is kept as an alias of `--require-signature`.
 
 #### Signature Structure
