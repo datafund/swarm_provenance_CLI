@@ -457,7 +457,9 @@ class X402Client:
         domain = USDC_PERMIT_DOMAIN.get(self.network, {})
         for field in ("name", "version"):
             advertised = extra.get(field)
-            if advertised is not None and advertised != domain.get(field):
+            # EIP-712 name and version are strings; a gateway sending version 2
+            # as a number means the same domain.
+            if advertised is not None and str(advertised) != domain.get(field):
                 raise X402ConfigurationError(
                     f"Gateway advertises EIP-712 {field} '{advertised}' for {self.network}, "
                     f"but the USDC contract uses '{domain.get(field)}'. The payment would be "
@@ -490,8 +492,10 @@ class X402Client:
         """
         # Validate domain configuration against on-chain contract BEFORE signing
         # This prevents signing with an incorrect domain that would fail on-chain
-        self.validate_domain()
+        # The advertised-domain check is local, so it runs first: a mismatch is
+        # reported as such rather than hidden behind an RPC round-trip or error.
         self._check_advertised_domain(payment_option)
+        self.validate_domain()
 
         try:
             # Generate authorization data

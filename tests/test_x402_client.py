@@ -765,3 +765,19 @@ class TestAdvertisedDomainCheck:
         client = X402Client(network="base", skip_domain_validation=True)
         assert client.sign_payment(self._option("base", {"name": "USD Coin", "version": "2"}))
         assert client.sign_payment(self._option("base", None))
+
+    def test_numeric_extra_version_accepted(self, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(network="base", skip_domain_validation=True)
+        assert client.sign_payment(self._option("base", {"name": "USD Coin", "version": 2}))
+
+    def test_advertised_mismatch_reported_before_rpc_validation(self, mock_eth_deps):
+        """A mismatch must not be masked by the on-chain check (or its RPC failure)."""
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(network="base")  # domain validation not skipped
+        with patch.object(client, "validate_domain") as validate:
+            with pytest.raises(X402ConfigurationError, match="Gateway advertises"):
+                client.sign_payment(self._option("base", {"name": "USDC", "version": "2"}))
+            validate.assert_not_called()
