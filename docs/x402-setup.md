@@ -233,6 +233,26 @@ swarm-prov-upload x402 balance
 
 The signed payment may have expired or been invalid. Try the request again.
 
+### "The payment may have been taken"
+
+The paid request timed out, dropped, or failed with a server error after the payment was sent. The gateway collects the payment before doing the work and finishes it even if the CLI stops waiting, so the payment may have been collected and the request may even have succeeded.
+
+**Do not re-run straight away**: a re-run signs a new payment and can pay twice. The error prints the amount, payer, pay-to address and authorization nonce, and a block-explorer link for the payer. Check whether a USDC transfer from the payer to the pay-to address happened at that time:
+- If it did not, re-running is safe.
+- If it did, and the command bought a stamp, look for the stamp with `swarm-prov-upload stamps list` before buying another. Otherwise contact the gateway operator with the transaction.
+
+### "Payment was taken, but ... failed"
+
+The gateway confirmed it collected the payment, but the request failed afterwards. Contact the gateway operator with the transaction hash shown; they can deliver the result or refund it. Re-running pays again.
+
+### "Payment received, but the stamp purchase is not confirmed yet"
+
+The payment settled, but the Swarm node did not confirm the stamp in time. The gateway keeps waiting and registers the stamp to your wallet once the node reports it. Do not buy another one: use the lookup shown in the message (the stamp label and your wallet address) to find it.
+
+### "Gateway advertises EIP-712 name ..."
+
+The gateway's payment request names a different USDC signing domain than the token contract uses, so the payment would be rejected. Nothing was signed. The gateway's x402 configuration needs updating (on Base mainnet the USDC contract's name is `USD Coin`; on Base Sepolia it is `USDC`).
+
 ### "No matching network option"
 
 The gateway doesn't support your configured network. Check that `X402_NETWORK` matches what the gateway accepts.

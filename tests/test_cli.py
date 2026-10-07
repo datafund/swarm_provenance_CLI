@@ -2,6 +2,7 @@ import json
 import pytest
 import typer
 from typer.testing import CliRunner
+from swarm_provenance_uploader import exceptions
 from swarm_provenance_uploader.cli import app, _backend_config, _x402_config, _chain_config
 from swarm_provenance_uploader.models import (
     StampDetails,
@@ -4643,3 +4644,89 @@ class TestChainInsufficientFunds:
 
         assert result.exit_code == 0
         assert "alchemy.com/faucets/base-sepolia" in result.output
+
+# --- Payment outcome reporting (#127) ---
+
+class TestPaymentOutcomeReporting:
+    """A payment that may have been taken is reported with its identifiers, without -v."""
+
+    PAYMENT = dict(
+        payer="0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00",
+        nonce="0x" + "ab" * 32,
+        amount="50000",
+        amount_usd="$0.050000",
+        pay_to="0x1234567890AbcdEF1234567890aBcDeF12345678",
+        network="base-sepolia",
+    )
+    TX = "0x" + "cd" * 32
+
+    def _upload(self, mocker, **client_behaviour):
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.return_value = DUMMY_STAMP
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=DUMMY_STAMP, usable=True, exists=True, depth=17, amount="1",
+            bucketDepth=16, immutableFlag=False, batchTTL=3600,
+        )
+        for name, effect in client_behaviour.items():
+            getattr(mock_client, name).side_effect = effect
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        mocker.patch("swarm_provenance_uploader.cli.time.sleep")
+        with runner.isolated_filesystem():
+            with open("data.txt", "w") as f:
+                f.write("data")
+            return runner.invoke(app, ["upload", "--file", "data.txt"])
+
+    def test_unknown_outcome_on_purchase(self, mocker):
+        err = exceptions.PaymentOutcomeUnknownError("The paid request did not complete (ReadTimeout).", **self.PAYMENT)
+        result = self._upload(mocker, purchase_stamp=err)
+
+        assert result.exit_code == 1
+        assert "may have been taken" in result.output
+        assert self.PAYMENT["nonce"] in result.output
+        assert self.PAYMENT["payer"] in result.output
+        assert "$0.050000 USDC" in result.output
+        assert "Do not re-run" in result.output
+        assert f"sepolia.basescan.org/address/{self.PAYMENT['payer']}" in result.output
+        assert "Failed purchasing stamp" not in result.output
+
+    def test_settled_not_delivered_on_upload_shows_transaction(self, mocker):
+        err = exceptions.PaymentSettledNotDeliveredError(
+            "The payment was collected but the request failed (HTTP 500).",
+            transaction=self.TX, **self.PAYMENT,
+        )
+        result = self._upload(mocker, upload_data=err)
+
+        assert result.exit_code == 1
+        assert "Payment was taken, but the upload failed" in result.output
+        assert self.TX in result.output
+        assert f"sepolia.basescan.org/tx/{self.TX}" in result.output
+        assert "Contact the gateway operator" in result.output
+
+    def test_purchase_pending(self, mocker):
+        err = exceptions.StampPurchasePendingError(
+            "Payment received, but the Bee node did not confirm the purchase in time.",
+            label="x402-abc", depth=17, lookup="GET /api/v1/stamps/?wallet=0x742d",
+            transaction=self.TX, **self.PAYMENT,
+        )
+        result = self._upload(mocker, purchase_stamp=err)
+
+        assert result.exit_code == 1
+        assert "not confirmed yet" in result.output
+        assert "x402-abc" in result.output
+        assert "Do not buy another one" in result.output
+        assert "GET /api/v1/stamps/?wallet=0x742d" in result.output
+
+    def test_upload_collection_unknown_outcome(self, mocker, tmp_path):
+        (tmp_path / "a.txt").write_text("a")
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.return_value = DUMMY_STAMP
+        mock_client.upload_manifest.side_effect = exceptions.PaymentOutcomeUnknownError(
+            "The paid request failed with HTTP 502.", status_code=502, **self.PAYMENT,
+        )
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+
+        result = runner.invoke(app, ["upload-collection", str(tmp_path)])
+
+        assert result.exit_code == 1
+        assert "the collection upload did not complete" in result.output
+        assert self.PAYMENT["nonce"] in result.output

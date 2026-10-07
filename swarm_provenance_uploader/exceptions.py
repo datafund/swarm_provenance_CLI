@@ -114,6 +114,74 @@ class PaymentTransactionFailedError(X402Error):
         self.payer = payer
 
 
+class PaymentOutcomeUnknownError(X402Error):
+    """A signed payment was sent, but whether it was collected is not known.
+
+    Raised when a paid request times out, drops, or fails with a server error
+    after the X-PAYMENT header went out. The gateway settles before doing the
+    work and does not undo it when the client disconnects, so the payment may
+    have been taken and the request may even have completed. Re-running the
+    command signs a new authorization and can pay a second time.
+
+    The attributes identify the payment so the user can check it on-chain or
+    cite it to the operator: `nonce` is the EIP-3009 authorization nonce,
+    `transaction` the settlement transaction hash when the gateway sent one.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        payer: str = None,
+        nonce: str = None,
+        amount: str = None,
+        amount_usd: str = None,
+        pay_to: str = None,
+        network: str = None,
+        transaction: str = None,
+        status_code: int = None,
+        code: str = None,
+    ):
+        super().__init__(message)
+        self.payer = payer
+        self.nonce = nonce
+        self.amount = amount
+        self.amount_usd = amount_usd
+        self.pay_to = pay_to
+        self.network = network
+        self.transaction = transaction
+        self.status_code = status_code
+        self.code = code
+
+    # Whether the gateway confirmed the payment was collected.
+    settled = False
+
+
+class PaymentSettledNotDeliveredError(PaymentOutcomeUnknownError):
+    """The gateway collected the payment but did not deliver the result.
+
+    The gateway reports this with `X-Payment-Status: settled_not_delivered`
+    or the `DELIVERY_FAILED_AFTER_PAYMENT` code. The operator needs the
+    `transaction` to deliver the result or refund it.
+    """
+
+    settled = True
+
+
+class StampPurchasePendingError(PaymentSettledNotDeliveredError):
+    """A paid stamp purchase was accepted but not yet confirmed (HTTP 202).
+
+    The payment has settled; the gateway registers the batch to the payer's
+    wallet once the Bee node reports it. Buying again would pay twice.
+    """
+
+    def __init__(self, message: str, label: str = None, depth: int = None,
+                 lookup: str = None, **kwargs):
+        super().__init__(message, **kwargs)
+        self.label = label
+        self.depth = depth
+        self.lookup = lookup
+
+
 # --- Stamp Pool Exceptions ---
 
 class PoolError(ProvenanceError):

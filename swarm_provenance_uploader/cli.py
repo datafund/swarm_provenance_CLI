@@ -135,6 +135,71 @@ def _x402_payment_callback(amount_usd: str, description: str) -> bool:
     return confirm
 
 
+_X402_EXPLORERS = {
+    "base-sepolia": "https://sepolia.basescan.org",
+    "base": "https://basescan.org",
+}
+
+
+def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: str):
+    """
+    Explain a paid request whose payment may have been taken, then exit.
+
+    Printed without --verbose: the identifiers are what the user needs to check
+    the payment on-chain or ask the operator for the result or a refund, and a
+    re-run would sign a new authorization and pay again.
+
+    Args:
+        e: The payment outcome error raised by the gateway client.
+        action: What was being paid for, e.g. "the stamp purchase".
+
+    Raises:
+        typer.Exit: Always, with code 1.
+    """
+    if isinstance(e, exceptions.StampPurchasePendingError):
+        headline = f"Payment received, but {action} is not confirmed yet."
+    elif e.settled:
+        headline = f"Payment was taken, but {action} failed."
+    else:
+        headline = f"The payment may have been taken: {action} did not complete."
+    typer.secho(f"\nERROR: {headline}", fg=typer.colors.RED, err=True)
+    typer.echo(f"  {e}", err=True)
+
+    fields = [
+        ("Amount", f"{e.amount_usd} USDC" if e.amount_usd else None),
+        ("Network", e.network),
+        ("Payer", e.payer),
+        ("Pay to", e.pay_to),
+        ("Nonce", e.nonce),
+        ("Transaction", e.transaction),
+    ]
+    if isinstance(e, exceptions.StampPurchasePendingError):
+        fields += [("Stamp label", e.label), ("Depth", e.depth)]
+    for name, value in fields:
+        if value is not None:
+            typer.echo(f"  {name + ':':<13}{value}", err=True)
+
+    explorer = _X402_EXPLORERS.get(e.network or "")
+    typer.echo("", err=True)
+    if isinstance(e, exceptions.StampPurchasePendingError):
+        typer.echo("The stamp is registered to your wallet once the node reports it. "
+                   "Do not buy another one.", err=True)
+        if e.lookup:
+            typer.echo(f"To find it: {e.lookup}", err=True)
+    elif e.settled:
+        typer.echo("Contact the gateway operator with the transaction above for the "
+                   "result or a refund. Re-running pays again.", err=True)
+    else:
+        typer.echo("Do not re-run yet: a re-run signs a new payment and can pay twice.", err=True)
+        typer.echo("Check whether the authorization above was used (a USDC transfer "
+                   "from the payer to the pay-to address with this nonce):", err=True)
+    if explorer and e.transaction:
+        typer.echo(f"  {explorer}/tx/{e.transaction}", err=True)
+    elif explorer and e.payer:
+        typer.echo(f"  {explorer}/address/{e.payer}#tokentxns", err=True)
+    raise typer.Exit(code=1)
+
+
 def _get_gateway_client_with_x402(gateway_url: str, verbose: bool = False) -> GatewayClient:
     """
     Create a GatewayClient with x402 configuration if enabled.
@@ -340,6 +405,8 @@ def upload(
             if hasattr(e, 'payment_options') and e.payment_options:
                 typer.echo(f"Payment options: {e.payment_options}")
             raise typer.Exit(code=1)
+        except exceptions.PaymentOutcomeUnknownError as e:
+            _report_payment_outcome(e, "the pool stamp acquisition")
         except Exception as e:
             typer.secho(f"ERROR: Failed acquiring stamp from pool: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -379,6 +446,8 @@ def upload(
             if hasattr(e, 'payment_options') and e.payment_options:
                 typer.echo(f"Payment options: {e.payment_options}")
             raise typer.Exit(code=1)
+        except exceptions.PaymentOutcomeUnknownError as e:
+            _report_payment_outcome(e, "the stamp purchase")
         except exceptions.StampPurchaseError as e:
             typer.secho(f"ERROR: Failed purchasing stamp: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -501,6 +570,8 @@ def upload(
         if hasattr(e, 'payment_options') and e.payment_options:
             typer.echo(f"Payment options: {e.payment_options}")
         raise typer.Exit(code=1)
+    except exceptions.PaymentOutcomeUnknownError as e:
+        _report_payment_outcome(e, "the upload")
     except Exception as e:
         typer.secho(f"ERROR: Failed uploading data: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -889,6 +960,8 @@ def upload_collection(
         typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
         typer.echo("Use --x402 to enable x402 payments, or use a gateway without x402 mode.")
         raise typer.Exit(code=1)
+    except exceptions.PaymentOutcomeUnknownError as e:
+        _report_payment_outcome(e, "getting the stamp")
     except Exception as e:
         typer.secho(f"ERROR: Failed acquiring stamp: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -907,6 +980,8 @@ def upload_collection(
     except exceptions.PaymentRequiredError:
         typer.secho(f"\nERROR: Payment required but not completed.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+    except exceptions.PaymentOutcomeUnknownError as e:
+        _report_payment_outcome(e, "the collection upload")
     except Exception as e:
         typer.secho(f"ERROR: Failed uploading collection: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)

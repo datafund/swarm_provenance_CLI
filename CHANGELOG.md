@@ -9,6 +9,11 @@ Payment safety (epic #145).
 ### Fixed
 - Base mainnet USDC payments can now be signed: the EIP-712 domain name for `base` is `"USD Coin"` (the contract's `name()`), not `"USDC"`, which is correct only on Base Sepolia. Tests pin both networks' `DOMAIN_SEPARATOR` to the on-chain values (#126). Must ship together with the gateway fix datafund/swarm_connect#467.
 
+- A paid request that times out, drops or fails with a server error after the payment was sent is no longer reported as a plain failure. It raises `PaymentOutcomeUnknownError`; when the gateway confirms it collected the payment (`X-Payment-Status: settled_not_delivered` or `DELIVERY_FAILED_AFTER_PAYMENT`), `PaymentSettledNotDeliveredError`. The CLI prints the amount, payer, pay-to address, authorization nonce and any `X-Payment-Transaction`, without `-v`, and tells the user not to re-run (#127)
+- A 202 `PURCHASE_PENDING` answer to a paid stamp purchase raises `StampPurchasePendingError` with the transaction, stamp label and lookup, instead of a model validation error (#127)
+- A second 402 after paying raises `PaymentRejectedError` with the gateway's reason (#127)
+- Paid calls (stamp purchase, upload, signed upload, pool acquire, manifest upload) wait 180 s instead of 30–120 s, longer than the gateway's own work after settling (#127)
+
 ### Added
 - A 402 option whose `extra` advertises a different EIP-712 `name` or `version` than the USDC contract uses is refused before signing, with a message naming the mismatch (#126)
 

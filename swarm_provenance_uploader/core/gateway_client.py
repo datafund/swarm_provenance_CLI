@@ -15,8 +15,12 @@ from typing import Callable, List, Optional, Tuple
 from urllib.parse import urljoin
 
 from ..exceptions import (
+    PaymentOutcomeUnknownError,
+    PaymentRejectedError,
     PaymentRequiredError,
+    PaymentSettledNotDeliveredError,
     PaymentTransactionFailedError,
+    StampPurchasePendingError,
     PoolNotEnabledError,
     PoolEmptyError,
     PoolAcquisitionError,
@@ -55,6 +59,12 @@ class GatewayClient:
     """
 
     DEFAULT_URL = "https://provenance-gateway.datafund.io"
+
+    # Timeout for requests that may carry a payment. It must be longer than the
+    # gateway's own work after settling (a stamp purchase waits up to 120 s on
+    # Bee): a client that gives up first sees a failure for a request that was
+    # paid and usually delivered.
+    PAID_REQUEST_TIMEOUT = 180
 
     def __init__(
         self,
@@ -264,9 +274,11 @@ class GatewayClient:
             PaymentTransactionFailedError: If payment was signed but on-chain tx failed
         """
         response = requests.request(method, url, **kwargs)
+        response.x402_payment = None
 
         if response.status_code == 402:
             payment_header, amount_usd = self._handle_402_response(response, verbose)
+            payment = self._describe_payment(payment_header, amount_usd)
 
             # Add payment header and retry
             headers = kwargs.get("headers", {}).copy()
@@ -276,7 +288,21 @@ class GatewayClient:
             if verbose:
                 print(f"DEBUG: Retrying request with X-PAYMENT header ({amount_usd})")
 
-            response = requests.request(method, url, **kwargs)
+            # From here on the signed authorization has left the client. Any
+            # failure that does not prove it was not collected is reported as
+            # an unknown outcome, never as a plain connection error.
+            try:
+                response = requests.request(method, url, **kwargs)
+            except requests.exceptions.ConnectTimeout:
+                # The connection was never established, so the payment was
+                # never sent: an ordinary failure, nothing was charged.
+                raise
+            except requests.exceptions.RequestException as e:
+                raise PaymentOutcomeUnknownError(
+                    f"The paid request did not complete ({type(e).__name__}). "
+                    "The payment may have been taken.",
+                    **payment,
+                ) from e
 
             if verbose:
                 print(f"DEBUG: Paid request status: {response.status_code}")
@@ -303,7 +329,99 @@ class GatewayClient:
                         tx_hash = payment_result.transaction or "pending"
                         print(f"DEBUG: Payment successful, tx: {tx_hash}")
 
+            payment["transaction"] = self._payment_transaction(response, payment_result)
+            response.x402_payment = payment
+            self._raise_for_paid_failure(response, payment)
+
         return response
+
+    @staticmethod
+    def _describe_payment(payment_header: str, amount_usd: str) -> dict:
+        """
+        Identify a signed payment from its own X-PAYMENT header.
+
+        Returns the keyword arguments of PaymentOutcomeUnknownError: payer,
+        nonce, amount (smallest units), amount_usd, pay_to and network. Fields
+        that cannot be read are None.
+        """
+        details = {
+            "payer": None, "nonce": None, "amount": None, "amount_usd": amount_usd,
+            "pay_to": None, "network": None, "transaction": None,
+        }
+        try:
+            payload = json.loads(base64.b64decode(payment_header))
+            authorization = payload["payload"]["authorization"]
+            details.update(
+                payer=authorization.get("from"),
+                nonce=authorization.get("nonce"),
+                amount=authorization.get("value"),
+                pay_to=authorization.get("to"),
+                network=payload.get("network"),
+            )
+        except (ValueError, KeyError, TypeError):
+            pass
+        return details
+
+    @staticmethod
+    def _payment_transaction(
+        response: requests.Response,
+        payment_result: Optional[X402PaymentResponse],
+    ) -> Optional[str]:
+        """The settlement transaction hash, from the header or the payment response."""
+        tx = response.headers.get("X-Payment-Transaction")
+        if not tx and payment_result:
+            tx = payment_result.transaction
+        return tx if tx and tx != "unknown" else None
+
+    @staticmethod
+    def _error_body(response: requests.Response) -> dict:
+        """The JSON error body, unwrapped from FastAPI's {"detail": {...}}."""
+        try:
+            body = response.json()
+        except ValueError:
+            return {}
+        if isinstance(body, dict) and isinstance(body.get("detail"), dict):
+            body = body["detail"]
+        return body if isinstance(body, dict) else {}
+
+    def _raise_for_paid_failure(self, response: requests.Response, payment: dict) -> None:
+        """
+        Turn a failed paid response into an error that says what happened to the money.
+
+        - Settled but not delivered (gateway says so): PaymentSettledNotDeliveredError.
+        - 402 again: the payment was not accepted: PaymentRejectedError.
+        - 5xx: the gateway may have settled first: PaymentOutcomeUnknownError.
+        - Other 4xx are left to the caller: the gateway refused the request
+          before collecting the payment.
+        """
+        status_code = response.status_code
+        if 200 <= status_code < 300:
+            return
+
+        body = self._error_body(response)
+        code = body.get("code")
+        gateway_message = body.get("message")
+
+        if (response.headers.get("X-Payment-Status") == "settled_not_delivered"
+                or code == "DELIVERY_FAILED_AFTER_PAYMENT"):
+            raise PaymentSettledNotDeliveredError(
+                f"The payment was collected but the request failed (HTTP {status_code})."
+                + (f" Gateway: {gateway_message}" if gateway_message else ""),
+                status_code=status_code, code=code, **payment,
+            )
+        if status_code == 402:
+            reason = gateway_message or body.get("error") or "no reason given"
+            raise PaymentRejectedError(
+                f"The gateway did not accept the payment: {reason}",
+                reason=reason,
+            )
+        if status_code >= 500:
+            raise PaymentOutcomeUnknownError(
+                f"The paid request failed with HTTP {status_code}. "
+                "The payment may have been taken."
+                + (f" Gateway: {gateway_message}" if gateway_message else ""),
+                status_code=status_code, code=code, **payment,
+            )
 
     # --- Health ---
 
@@ -413,11 +531,13 @@ class GatewayClient:
                 url,
                 json=payload,
                 headers=self._get_headers(),
-                timeout=120,
+                timeout=self.PAID_REQUEST_TIMEOUT,
                 verbose=verbose,
             )
             if verbose:
                 print(f"DEBUG: Purchase stamp status: {response.status_code}")
+            if response.status_code == 202:
+                self._raise_purchase_pending(response)
             response.raise_for_status()
             data = response.json()
             result = StampPurchaseResponse.model_validate(data)
@@ -428,6 +548,27 @@ class GatewayClient:
             if verbose:
                 print(f"ERROR: Purchase stamp failed: {e}")
             raise ConnectionError(f"Failed to purchase stamp: {e}") from e
+
+    def _raise_purchase_pending(self, response: requests.Response) -> None:
+        """
+        Raise for a 202 PURCHASE_PENDING: paid, batch not yet confirmed by Bee.
+
+        Raises:
+            StampPurchasePendingError: Always.
+        """
+        body = self._error_body(response)
+        payment = dict(getattr(response, "x402_payment", None) or {})
+        payment["transaction"] = body.get("transaction") or payment.get("transaction")
+        raise StampPurchasePendingError(
+            body.get("message")
+            or "Payment received, but the stamp purchase is not confirmed yet.",
+            label=body.get("label"),
+            depth=body.get("depth"),
+            lookup=body.get("lookup"),
+            status_code=response.status_code,
+            code=body.get("code"),
+            **payment,
+        )
 
     def get_stamp(self, stamp_id: str, verbose: bool = False) -> Optional[StampDetails]:
         """
@@ -544,7 +685,7 @@ class GatewayClient:
                 params=params,
                 files=files,
                 headers=headers,
-                timeout=60,
+                timeout=self.PAID_REQUEST_TIMEOUT,
                 verbose=verbose,
             )
             if verbose:
@@ -804,7 +945,7 @@ class GatewayClient:
                 url,
                 json=payload,
                 headers=self._get_headers(),
-                timeout=30,
+                timeout=self.PAID_REQUEST_TIMEOUT,
                 verbose=verbose,
             )
             if verbose:
@@ -1007,7 +1148,7 @@ class GatewayClient:
                 params=params,
                 files=files,
                 headers=headers,
-                timeout=60,
+                timeout=self.PAID_REQUEST_TIMEOUT,
                 verbose=verbose,
             )
 
@@ -1129,7 +1270,7 @@ class GatewayClient:
                 params=params,
                 files=files,
                 headers=headers,
-                timeout=120,
+                timeout=self.PAID_REQUEST_TIMEOUT,
                 verbose=verbose,
             )
 
