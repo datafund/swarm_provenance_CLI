@@ -811,15 +811,18 @@ class GatewayClient:
         List all postage stamp batches.
 
         Args:
-            wallet: Only stamps registered to this wallet address (e.g. the
-                    x402 payer's, which owns the stamps it paid for).
+            wallet: Only stamps bought by this wallet address (e.g. the x402
+                    payer's). Sent lowercased with `exclusive=true`: the gateway
+                    stores owners lowercased and matches them exactly, and
+                    without `exclusive` also returns shared and untracked
+                    stamps. The filter needs x402 enabled on the gateway.
             verbose: Enable debug output
 
         Returns:
             StampListResponse with list of stamps and total count.
         """
         url = self._make_url("/api/v1/stamps/")
-        params = {"wallet": wallet} if wallet else None
+        params = {"wallet": wallet.strip().lower(), "exclusive": "true"} if wallet else None
         if verbose:
             print(f"--- DEBUG: List Stamps ---")
             print(f"URL: GET {url}" + (f" (wallet={wallet})" if wallet else ""))

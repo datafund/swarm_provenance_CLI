@@ -526,7 +526,7 @@ You can also use any Swarm gateway or a local Bee node to access the files.
 # List all stamps
 swarm-prov-upload stamps list
 
-# Full IDs (to pass to --stamp-id) and labels; only the stamps your x402 wallet paid for
+# Full IDs (to pass to --stamp-id) and labels; only the stamps your x402 wallet bought
 swarm-prov-upload stamps list --full --wallet 0xYourPayerAddress
 
 # Get stamp details

@@ -5044,7 +5044,7 @@ class TestStampIdVisibility:
         result = self._upload()
         assert result.exit_code == 1
         assert "The stamp bought for this command can be reused" in result.output
-        assert f"--stamp-id {self.STAMP}" in result.output
+        assert f"add --stamp-id {self.STAMP}" in result.output
 
     def test_unknown_payment_outcome_on_upload_still_gives_stamp_hint(self, mocker):
         client = self._client(mocker)
@@ -5089,12 +5089,47 @@ class TestStampIdVisibility:
         assert f"Postage stamp purchased (ID: {self.STAMP})" in result.output
         assert f"--stamp-id {self.STAMP}" in result.output
 
-    def test_hint_not_carried_into_next_command(self, mocker):
-        client = self._client(mocker)
-        client.upload_data.side_effect = ConnectionError("nope")
-        self._upload()
+    def test_hint_not_carried_into_next_command(self):
+        from swarm_provenance_uploader.cli import _unused_stamp
+
+        _unused_stamp.update(id=self.STAMP, how="bought")  # left over from an earlier command
         result = runner.invoke(app, ["x402", "status"])
         assert "can be reused" not in result.output
+
+    def test_hint_goes_to_stderr(self, mocker):
+        client = self._client(mocker)
+        client.upload_data.side_effect = ConnectionError("nope")
+        split = CliRunner(mix_stderr=False)
+        with split.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = split.invoke(app, ["upload", "--file", "d.txt"])
+        assert f"add --stamp-id {self.STAMP}" in result.stderr
+        assert "can be reused" not in result.stdout
+
+    def test_hint_after_unknown_outcome_does_not_say_retry_now(self, mocker):
+        client = self._client(mocker)
+        client.upload_data.side_effect = exceptions.PaymentOutcomeUnknownError("timed out")
+        result = self._upload()
+        assert "If you run the command again, add --stamp-id" in result.output
+        assert "To retry without buying another" not in result.output
+
+    def test_local_backend_purchase_gives_hint(self, mocker):
+        mocker.patch("swarm_provenance_uploader.cli.swarm_client.purchase_postage_stamp", return_value=self.STAMP)
+        mocker.patch("swarm_provenance_uploader.cli.swarm_client.get_stamp_info",
+                     return_value={"exists": True, "usable": True, "batchTTL": 3600})
+        mocker.patch("swarm_provenance_uploader.cli.swarm_client.upload_data", side_effect=ConnectionError("nope"))
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--backend", "local", "upload", "--file", "d.txt"])
+        assert result.exit_code == 1
+        assert f"add --stamp-id {self.STAMP}" in result.output
+
+    def test_flags_ignored_with_stamp_id_are_named(self, mocker):
+        self._client(mocker)
+        result = self._upload("--stamp-id", self.STAMP, "--usePool", "--size", "small")
+        assert "--usePool, --size ignored with --stamp-id" in result.output
 
 
 class TestStampsListFull:
@@ -5220,3 +5255,28 @@ class TestIdempotencyKeyCli:
         assert "The stamp purchase succeeded and was paid once" in result.output
         assert "stamps list --wallet" in result.output
         assert "--stamp-id" in result.output
+
+
+class TestStampsOutputReviewCases:
+    STAMP = "c0ffee" + "ab" * 29
+
+    def _stamp(self, usable=True, label=None):
+        return StampDetails(batchID=self.STAMP, usable=usable, depth=17, amount="1", bucketDepth=16,
+                            immutableFlag=False, batchTTL=86400, utilization=0, label=label)
+
+    def test_list_columns_align_without_colour(self, mocker):
+        client = mocker.MagicMock()
+        client.list_stamps.return_value = StampListResponse(
+            stamps=[self._stamp(usable=True), self._stamp(usable=False)], total_count=2)
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=client)
+        lines = [l for l in runner.invoke(app, ["stamps", "list"]).output.splitlines() if self.STAMP[:8] in l]
+        assert len(lines) == 2
+        assert lines[0].index("1d 0h") == lines[1].index("1d 0h")  # TTL column lines up
+
+    def test_info_label_sanitized(self, mocker):
+        client = mocker.MagicMock()
+        client.get_stamp.return_value = self._stamp(label="evil\x1b[2Jlabel")
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=client)
+        result = runner.invoke(app, ["stamps", "info", self.STAMP])
+        assert "\x1b" not in result.output
+        assert "evil[2Jlabel" in result.output

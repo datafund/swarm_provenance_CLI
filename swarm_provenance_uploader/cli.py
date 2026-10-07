@@ -197,7 +197,10 @@ def _echo_unused_stamp_hint():
         return
     typer.secho(f"\nThe stamp {_unused_stamp['how']} for this command can be reused:", fg=typer.colors.YELLOW, err=True)
     typer.echo(f"  {stamp_id}", err=True)
-    typer.echo(f"To retry without buying another, run the same command with --stamp-id {stamp_id}", err=True)
+    # Conditional on purpose: after an unknown payment outcome the user must
+    # not simply retry; this only says what to add when they do.
+    typer.echo(f"If you run the command again, add --stamp-id {stamp_id} "
+               "to use this stamp instead of buying another.", err=True)
     _unused_stamp.update(id=None, how=None)
 
 
@@ -511,6 +514,11 @@ def upload(
     acquired_from_pool = False
     if stamp_id:
         # User provided an existing stamp ID
+        ignored = [flag for flag, value in (("--usePool", use_pool), ("--size", size), ("--duration", duration),
+                                            ("--depth", stamp_depth), ("--amount", stamp_amount)) if value]
+        if ignored:
+            typer.secho(f"Note: {', '.join(ignored)} ignored with --stamp-id (no stamp is bought).",
+                        fg=typer.colors.YELLOW, err=True)
         used_existing_stamp = True
         typer.echo(f"Using existing stamp: {stamp_id}")
     elif use_pool:
@@ -1088,6 +1096,11 @@ def upload_collection(
         gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
 
         if stamp_id:
+            ignored = [flag for flag, value in (("--usePool", use_pool), ("--size", size),
+                                                ("--duration", duration)) if value]
+            if ignored:
+                typer.secho(f"Note: {', '.join(ignored)} ignored with --stamp-id (no stamp is bought).",
+                            fg=typer.colors.YELLOW, err=True)
             typer.echo(f"Using existing stamp: {stamp_id}")
         elif use_pool:
             typer.echo("Acquiring stamp from pool...")
@@ -1204,7 +1217,7 @@ def _format_ttl(seconds: int) -> str:
 @stamps_app.command("list")
 def stamps_list(
     full: Annotated[bool, typer.Option("--full", help="Show full stamp IDs (for --stamp-id) and labels.")] = False,
-    wallet: Annotated[Optional[str], typer.Option("--wallet", help="Only stamps registered to this wallet address, e.g. your x402 payer.")] = None,
+    wallet: Annotated[Optional[str], typer.Option("--wallet", help="Only stamps bought by this wallet address, e.g. your x402 payer (needs x402 enabled on the gateway).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
 ):
     """
@@ -1236,10 +1249,12 @@ def stamps_list(
 
         for stamp in result.stamps:
             stamp_id_str = stamp.batchID if full else f"{stamp.batchID[:8]}...{stamp.batchID[-8:]}"
-            usable_str = typer.style("Yes", fg=typer.colors.GREEN) if stamp.usable else typer.style("No", fg=typer.colors.RED)
+            # Pad before styling: colour codes would count towards the width
+            usable_str = (typer.style(f"{'Yes':<8}", fg=typer.colors.GREEN) if stamp.usable
+                          else typer.style(f"{'No':<8}", fg=typer.colors.RED))
             ttl_str = _format_ttl(stamp.batchTTL)
             util_str = f"{stamp.utilization}%"
-            line = f"{stamp_id_str:<{id_width}} {usable_str:<8} {ttl_str:<12} {stamp.depth:<6} {util_str:<12}"
+            line = f"{stamp_id_str:<{id_width}} {usable_str} {ttl_str:<12} {stamp.depth:<6} {util_str:<12}"
             if full:
                 line += f" {_sanitize_label(stamp.label)}"
             typer.echo(line)
@@ -1291,7 +1306,7 @@ def stamps_info(
             typer.echo(f"  Amount:      {stamp.amount}")
             typer.echo(f"  Utilization: {stamp.utilization}%")
             if stamp.label:
-                typer.echo(f"  Label:       {stamp.label}")
+                typer.echo(f"  Label:       {_sanitize_label(stamp.label)}")
         else:
             stamp_info = swarm_client.get_stamp_info(bee_url, stamp_id, verbose=verbose)
             if not stamp_info:

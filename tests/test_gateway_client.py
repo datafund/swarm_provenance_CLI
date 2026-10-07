@@ -1925,7 +1925,10 @@ class TestListStampsWallet:
     def test_wallet_query_param(self, requests_mock):
         requests_mock.get(f"{GW}/api/v1/stamps/", json={"stamps": [], "total_count": 0})
         GatewayClient(base_url=GW).list_stamps(wallet=PAYER)
-        assert requests_mock.last_request.qs == {"wallet": [PAYER.lower()]}
+        # Lowercased (the gateway matches its lowercased owners exactly) and
+        # exclusive (owned only, not shared or untracked stamps)
+        assert "wallet=" + PAYER.lower() in requests_mock.last_request.url
+        assert requests_mock.last_request.qs["exclusive"] == ["true"]
 
     def test_no_wallet_no_param(self, requests_mock):
         requests_mock.get(f"{GW}/api/v1/stamps/", json={"stamps": [], "total_count": 0})
