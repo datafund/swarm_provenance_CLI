@@ -18,7 +18,12 @@ Payment safety (epic #145).
 - The payment prompt defaults to No (`[y/N]`), so Enter or a piped newline no longer pays (#128)
 - Amounts are shown with all 6 USDC decimals ($0.004 showed as "$0.00"); the prompt shows the payment option's network (not the configured one), the `payTo` address and the asset (#128)
 
+- The 402 payment request is validated before signing: only the `exact` scheme is signed (others were signed as EIP-3009 anyway), an `asset` other than the network's USDC contract is refused, and a malformed amount or `payTo` is refused. Raises `PaymentRequirementsError` listing the reasons (#129)
+- The payment prompt leads with the request the CLI made (`POST /api/v1/stamps/`); the gateway's own description is shown after it, cleaned of control characters, truncated and marked as the gateway's (#129)
+
 ### Added
+- `X402_EXPECTED_PAY_TO` (and `GatewayClient(x402_expected_pay_to=...)` / `X402Client(expected_pay_to=...)`) pins the payment recipient; `x402 status` shows it (#129)
+- A warning (`InsecureGatewayWarning` in library use) when x402 is enabled against a plain-http gateway that is not on loopback (#129)
 - `--no-x402`, `--no-auto-pay` and `--no-free` flags, which override `X402_ENABLED`, `X402_AUTO_PAY` and `FREE_TIER` for one command (#128)
 - A running total of payments sent during a command, shown at the second prompt and after a successful `upload` / `upload-collection` (#128)
 - `GatewayClient(x402_on_payment_sent=...)` hook, and payment callbacks that accept an `option` keyword receive the `X402PaymentOption` (#128)

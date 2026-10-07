@@ -114,6 +114,27 @@ class PaymentTransactionFailedError(X402Error):
         self.payer = payer
 
 
+class PaymentRequirementsError(X402Error):
+    """The gateway's 402 payment request was refused before anything was signed.
+
+    Raised when no offered option is safe to sign: an unsupported scheme, an
+    asset that is not USDC on the network, a malformed amount or recipient,
+    or a recipient other than the pinned X402_EXPECTED_PAY_TO.
+    """
+
+    def __init__(self, message: str, reasons: list = None):
+        super().__init__(message)
+        self.reasons = reasons or []
+
+
+class InsecureGatewayWarning(UserWarning):
+    """x402 payments are enabled against a plain-http (non-loopback) gateway.
+
+    Anyone on the network path can then rewrite the 402 payment request,
+    including the amount and the recipient.
+    """
+
+
 class PaymentOutcomeUnknownError(X402Error):
     """A signed payment was sent, but whether it was collected is not known.
 

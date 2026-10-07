@@ -805,3 +805,97 @@ class TestAdvertisedDomainCheck:
             with pytest.raises(X402ConfigurationError, match="Gateway advertises"):
                 client.sign_payment(self._option("base", {"name": "USDC", "version": "2"}))
             validate.assert_not_called()
+
+
+# --- Validating the 402 payment request before signing (#129) ---
+
+USDC_SEPOLIA = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+
+
+def _opt(**overrides):
+    fields = dict(
+        scheme="exact", network="base-sepolia", maxAmountRequired="50000",
+        resource="/api/v1/stamps/", payTo=DUMMY_PAY_TO, asset=USDC_SEPOLIA,
+    )
+    fields.update(overrides)
+    return X402PaymentOption(**fields)
+
+
+class TestPaymentRequirementValidation:
+    def _client(self, **kwargs):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        return X402Client(skip_domain_validation=True, **kwargs)
+
+    def _refused(self, client, *options):
+        from swarm_provenance_uploader.exceptions import PaymentRequirementsError
+
+        with pytest.raises(PaymentRequirementsError) as exc_info:
+            client.select_payment_option(X402PaymentRequirements(accepts=list(options)))
+        return exc_info.value
+
+    def test_valid_option_selected(self, mock_eth_deps):
+        assert self._client().select_payment_option(X402PaymentRequirements(accepts=[_opt()])).payTo == DUMMY_PAY_TO
+
+    def test_non_exact_scheme_refused(self, mock_eth_deps):
+        err = self._refused(self._client(), _opt(scheme="upto"))
+        assert "scheme 'upto'" in str(err)
+
+    def test_exact_preferred_over_unsupported(self, mock_eth_deps):
+        chosen = self._client().select_payment_option(
+            X402PaymentRequirements(accepts=[_opt(scheme="upto", payTo="0x" + "1" * 40), _opt()])
+        )
+        assert chosen.scheme == "exact"
+        assert chosen.payTo == DUMMY_PAY_TO
+
+    def test_wrong_asset_refused(self, mock_eth_deps):
+        err = self._refused(self._client(), _opt(asset="0x" + "9" * 40))
+        assert "is not USDC on base-sepolia" in str(err)
+
+    def test_asset_compared_case_insensitively(self, mock_eth_deps):
+        assert self._client().select_payment_option(X402PaymentRequirements(accepts=[_opt(asset=USDC_SEPOLIA.lower())]))
+
+    def test_absent_asset_accepted(self, mock_eth_deps):
+        """No asset named: the signer only ever signs for its own USDC contract."""
+        assert self._client().select_payment_option(X402PaymentRequirements(accepts=[_opt(asset=None)]))
+
+    def test_mainnet_usdc_refused_on_sepolia(self, mock_eth_deps):
+        self._refused(self._client(), _opt(asset="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"))
+
+    @pytest.mark.parametrize("amount", ["-1", "1.5", "", "1e6", "0x10"])
+    def test_malformed_amount_refused(self, mock_eth_deps, amount):
+        self._refused(self._client(), _opt(maxAmountRequired=amount))
+
+    @pytest.mark.parametrize("pay_to", ["", "0x123", "not-an-address", "0x" + "g" * 40])
+    def test_malformed_pay_to_refused(self, mock_eth_deps, pay_to):
+        self._refused(self._client(), _opt(payTo=pay_to))
+
+    def test_expected_pay_to_mismatch_refused(self, mock_eth_deps):
+        err = self._refused(self._client(expected_pay_to="0x" + "2" * 40), _opt())
+        assert "X402_EXPECTED_PAY_TO" in str(err)
+
+    def test_expected_pay_to_match_case_insensitive(self, mock_eth_deps):
+        client = self._client(expected_pay_to=DUMMY_PAY_TO.lower())
+        assert client.select_payment_option(X402PaymentRequirements(accepts=[_opt()]))
+
+    def test_expected_pay_to_from_env(self, mock_eth_deps):
+        with patch.dict(os.environ, {"X402_EXPECTED_PAY_TO": "0x" + "2" * 40}):
+            client = self._client()
+        assert client.expected_pay_to == "0x" + "2" * 40
+        self._refused(client, _opt())
+
+    def test_invalid_expected_pay_to_is_config_error(self, mock_eth_deps):
+        with pytest.raises(X402ConfigurationError, match="not an address"):
+            self._client(expected_pay_to="operator.eth")
+
+    def test_sign_payment_refuses_invalid_option_directly(self, mock_eth_deps):
+        from swarm_provenance_uploader.exceptions import PaymentRequirementsError
+
+        client = self._client()
+        with pytest.raises(PaymentRequirementsError):
+            client.sign_payment(_opt(scheme="upto"))
+        mock_eth_deps["account"].sign_typed_data.assert_not_called()
+
+    def test_all_reasons_reported(self, mock_eth_deps):
+        err = self._refused(self._client(), _opt(scheme="upto"), _opt(asset="0x" + "9" * 40))
+        assert len(err.reasons) == 2

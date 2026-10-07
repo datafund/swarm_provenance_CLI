@@ -32,6 +32,8 @@ def reset_backend_config():
     _x402_config["auto_pay"] = False
     _x402_config["max_auto_pay_usd"] = 1.00
     _x402_config["network"] = "base-sepolia"
+    _x402_config["expected_pay_to"] = None
+    _backend_config.pop("_http_warning_shown", None)
     _chain_config["enabled"] = False
     _chain_config["chain"] = "base-sepolia"
     _chain_config["rpc_url"] = None
@@ -49,6 +51,8 @@ def reset_backend_config():
     _x402_config["auto_pay"] = False
     _x402_config["max_auto_pay_usd"] = 1.00
     _x402_config["network"] = "base-sepolia"
+    _x402_config["expected_pay_to"] = None
+    _backend_config.pop("_http_warning_shown", None)
     _chain_config["enabled"] = False
     _chain_config["chain"] = "base-sepolia"
     _chain_config["rpc_url"] = None
@@ -4846,3 +4850,49 @@ class TestUploadPaymentTotal:
             result = runner.invoke(app, ["upload", "--file", "d.txt"])
         assert result.exit_code == 0, result.output
         assert "Payments sent: $0.060000 USDC (2 payment(s))" in result.output
+
+
+# --- Payment request presentation (#129) ---
+
+class TestPaymentRequestPresentation:
+    def test_http_gateway_warning_with_x402(self, mocker):
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        from swarm_provenance_uploader.cli import _get_gateway_client_with_x402
+
+        _x402_config["enabled"] = True
+        warn_app = typer.Typer()
+
+        @warn_app.command()
+        def go():
+            _get_gateway_client_with_x402("http://gateway.example.com")
+            _get_gateway_client_with_x402("http://gateway.example.com")
+
+        result = runner.invoke(warn_app, [])
+        assert result.output.count("x402 payments over plain http") == 1
+
+    def test_no_http_warning_for_https(self, mocker):
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        from swarm_provenance_uploader.cli import _get_gateway_client_with_x402
+
+        _x402_config["enabled"] = True
+        warn_app = typer.Typer()
+
+        @warn_app.command()
+        def go():
+            _get_gateway_client_with_x402("https://gateway.example.com")
+
+        assert "plain http" not in runner.invoke(warn_app, []).output
+
+    def test_expected_pay_to_passed_to_client(self, mocker):
+        constructor = mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        from swarm_provenance_uploader.cli import _get_gateway_client_with_x402
+
+        _x402_config["enabled"] = True
+        _x402_config["expected_pay_to"] = "0x" + "2" * 40
+        _get_gateway_client_with_x402("https://gateway.example.com")
+        assert constructor.call_args.kwargs["x402_expected_pay_to"] == "0x" + "2" * 40
+
+    def test_status_shows_pay_to_pin(self):
+        _x402_config["expected_pay_to"] = "0x" + "2" * 40
+        result = runner.invoke(app, ["x402", "status"])
+        assert "Pay-to pin:   0x" + "2" * 40 in result.output

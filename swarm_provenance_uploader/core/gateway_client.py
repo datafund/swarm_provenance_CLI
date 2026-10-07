@@ -12,10 +12,13 @@ import inspect
 import json
 import requests
 import os
+import re
+import warnings
 from typing import Callable, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from ..exceptions import (
+    InsecureGatewayWarning,
     PaymentOutcomeUnknownError,
     PaymentRejectedError,
     PaymentRequiredError,
@@ -51,6 +54,30 @@ from ..models import (
 )
 
 
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def is_insecure_gateway_url(url: str) -> bool:
+    """True for a plain-http URL that is not on this machine (loopback)."""
+    parsed = urlparse(url)
+    return parsed.scheme == "http" and (parsed.hostname or "") not in _LOOPBACK_HOSTS
+
+
+def _sanitize_gateway_text(text: Optional[str], limit: int = 80) -> Optional[str]:
+    """Gateway-authored text made safe to show next to a payment prompt.
+
+    Control characters (which could redraw the terminal) are dropped,
+    whitespace is collapsed and the result is truncated.
+    """
+    if not text:
+        return None
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(text))
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > limit:
+        text = text[: limit - 1] + "…"
+    return text or None
+
+
 class GatewayClient:
     """Client for provenance-gateway.datafund.io API.
 
@@ -79,6 +106,7 @@ class GatewayClient:
         x402_payment_callback: Optional[Callable[..., bool]] = None,
         free_tier: bool = False,
         x402_on_payment_sent: Optional[Callable[[dict], None]] = None,
+        x402_expected_pay_to: Optional[str] = None,
     ):
         """
         Initialize the gateway client.
@@ -104,6 +132,12 @@ class GatewayClient:
                                   (payer, nonce, amount, amount_usd, pay_to,
                                   network, transaction) once a signed payment has
                                   been sent and not refused.
+            x402_expected_pay_to: Only sign payments to this address (falls back
+                                  to the X402_EXPECTED_PAY_TO env var).
+
+        Warns:
+            InsecureGatewayWarning: If x402 is enabled and the gateway URL is
+                                    plain http on a non-loopback host.
         """
         self.base_url = (base_url or os.getenv("PROVENANCE_GATEWAY_URL", self.DEFAULT_URL)).rstrip("/")
         self.api_key = api_key or os.getenv("PROVENANCE_GATEWAY_API_KEY")
@@ -117,7 +151,17 @@ class GatewayClient:
         self._x402_max_auto_pay_usd = x402_max_auto_pay_usd
         self._x402_payment_callback = x402_payment_callback
         self._x402_on_payment_sent = x402_on_payment_sent
+        self._x402_expected_pay_to = x402_expected_pay_to
         self._x402_client = None  # Lazy initialization
+
+        if self.x402_enabled and is_insecure_gateway_url(self.base_url):
+            warnings.warn(
+                f"x402 payments are enabled but the gateway URL {self.base_url} is plain "
+                "http: the payment request (amount, recipient) can be altered in transit. "
+                "Use https.",
+                InsecureGatewayWarning,
+                stacklevel=2,
+            )
 
     def _get_x402_client(self):
         """Get or create the x402 client (lazy initialization)."""
@@ -126,6 +170,7 @@ class GatewayClient:
             self._x402_client = X402Client(
                 private_key=self._x402_private_key,
                 network=self._x402_network,
+                expected_pay_to=self._x402_expected_pay_to,
             )
         return self._x402_client
 
@@ -209,7 +254,7 @@ class GatewayClient:
         # Check if we should auto-pay or need confirmation
         if not self._should_auto_pay(amount_float):
             if self._x402_payment_callback:
-                if not self._confirm_payment(amount_usd, option):
+                if not self._confirm_payment(amount_usd, option, response):
                     raise PaymentRequiredError(
                         f"Payment of {amount_usd} declined by user",
                         payment_options=[option.model_dump()],
@@ -238,10 +283,31 @@ class GatewayClient:
 
         return payment_header, amount_usd
 
-    def _confirm_payment(self, amount_usd: str, option) -> bool:
+    @staticmethod
+    def _describe_request(option, response: Optional[requests.Response] = None) -> str:
+        """
+        What a payment is for, as shown to the user.
+
+        Led by the request this client made (method and path), which the
+        gateway cannot change. The gateway's own description follows, cleaned
+        and marked as the gateway's words, so it cannot pose as the prompt.
+        """
+        request = getattr(response, "request", None)
+        method = getattr(request, "method", None)
+        url = getattr(response, "url", None)
+        if isinstance(method, str) and isinstance(url, str):
+            described = f"{method} {urlparse(url).path or '/'}"
+        else:
+            described = f"API request to {_sanitize_gateway_text(option.resource) or 'unknown resource'}"
+        note = _sanitize_gateway_text(option.description)
+        if note:
+            described += f' (gateway says: "{note}")'
+        return described
+
+    def _confirm_payment(self, amount_usd: str, option, response: Optional[requests.Response] = None) -> bool:
         """Ask the payment callback, passing the option if it accepts one."""
         callback = self._x402_payment_callback
-        description = option.description or f"API request to {option.resource}"
+        description = self._describe_request(option, response)
         try:
             params = inspect.signature(callback).parameters.values()
             takes_option = any(

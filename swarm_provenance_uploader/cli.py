@@ -9,7 +9,7 @@ import warnings
 
 from . import config, __version__
 from .core import file_utils, swarm_client, metadata_builder
-from .core.gateway_client import GatewayClient
+from .core.gateway_client import GatewayClient, is_insecure_gateway_url
 from .models import ProvenanceMetadata, ValidationError
 from . import exceptions
 
@@ -60,6 +60,7 @@ _x402_config = {
     "auto_pay": config.X402_AUTO_PAY,
     "max_auto_pay_usd": config.X402_MAX_AUTO_PAY_USD,
     "network": config.X402_NETWORK,
+    "expected_pay_to": config.X402_EXPECTED_PAY_TO,
 }
 
 # Payments sent during this command (reset per invocation in main())
@@ -257,16 +258,28 @@ def _get_gateway_client_with_x402(gateway_url: str, verbose: bool = False) -> Ga
         if verbose:
             typer.echo(f"    x402 payments enabled ({_x402_config['network']})")
 
-        return GatewayClient(
-            base_url=gateway_url,
-            x402_enabled=True,
-            x402_network=_x402_config["network"],
-            x402_auto_pay=_x402_config["auto_pay"],
-            x402_max_auto_pay_usd=_x402_config["max_auto_pay_usd"],
-            x402_payment_callback=_x402_payment_callback,
-            x402_on_payment_sent=_record_x402_payment,
-            free_tier=_backend_config["free_tier"],
-        )
+        if is_insecure_gateway_url(gateway_url) and not _backend_config.get("_http_warning_shown"):
+            typer.secho(
+                f"WARNING: x402 payments over plain http ({gateway_url}): the payment request "
+                "(amount, recipient) can be altered in transit. Use an https gateway URL.",
+                fg=typer.colors.YELLOW, err=True,
+            )
+            _backend_config["_http_warning_shown"] = True
+
+        # The CLI shows its own warning above; the library's would repeat it.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", exceptions.InsecureGatewayWarning)
+            return GatewayClient(
+                base_url=gateway_url,
+                x402_enabled=True,
+                x402_network=_x402_config["network"],
+                x402_auto_pay=_x402_config["auto_pay"],
+                x402_max_auto_pay_usd=_x402_config["max_auto_pay_usd"],
+                x402_payment_callback=_x402_payment_callback,
+                x402_on_payment_sent=_record_x402_payment,
+                x402_expected_pay_to=_x402_config["expected_pay_to"],
+                free_tier=_backend_config["free_tier"],
+            )
     else:
         return GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
 
@@ -1483,6 +1496,8 @@ def x402_status(
     auto_str = typer.style("Yes", fg=typer.colors.GREEN) if auto_pay else typer.style("No", fg=typer.colors.YELLOW)
     typer.echo(f"  Auto-pay:     {auto_str}")
     typer.echo(f"  Max auto-pay: ${max_pay:.2f}")
+    expected_pay_to = _x402_config.get("expected_pay_to")
+    typer.echo(f"  Pay-to pin:   {expected_pay_to or 'none (any recipient the gateway names)'}")
 
     # Check for private key (don't show the actual key)
     pk_env_name = config.X402_PRIVATE_KEY_ENV
@@ -2800,6 +2815,7 @@ def main(
     For testing/development, use --free for rate-limited free tier access.
     """
     _x402_session.update(spent=0, payments=0)
+    _backend_config.pop("_http_warning_shown", None)
 
     if backend:
         if backend not in ("gateway", "local"):

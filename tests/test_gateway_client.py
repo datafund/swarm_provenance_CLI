@@ -1634,7 +1634,7 @@ class TestPaymentCallbackOption:
             client.purchase_stamp()
         finally:
             patcher.stop()
-        assert calls == [("$0.050000", "Stamp purchase")]
+        assert calls == [("$0.050000", 'POST /api/v1/stamps/ (gateway says: "Stamp purchase")')]
 
     def test_callback_accepting_option_receives_it(self, mock_x402, requests_mock):
         seen = {}
@@ -1704,3 +1704,71 @@ class TestPaymentSentHook:
             assert client.purchase_stamp() == DUMMY_STAMP
         finally:
             patcher.stop()
+
+
+# --- Payment request presentation and transport (#129) ---
+
+class TestInsecureGatewayWarning:
+    @pytest.mark.parametrize("url", ["http://gateway.example.com", "http://10.0.0.5:8000"])
+    def test_plain_http_with_x402_warns(self, url):
+        from swarm_provenance_uploader.exceptions import InsecureGatewayWarning
+
+        with pytest.warns(InsecureGatewayWarning):
+            GatewayClient(base_url=url, x402_enabled=True)
+
+    @pytest.mark.parametrize("url,x402", [
+        ("https://gateway.example.com", True),
+        ("http://localhost:8000", True),
+        ("http://127.0.0.1:8000", True),
+        ("http://[::1]:8000", True),
+        ("http://gateway.example.com", False),
+    ])
+    def test_no_warning(self, url, x402):
+        import warnings
+        from swarm_provenance_uploader.exceptions import InsecureGatewayWarning
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", InsecureGatewayWarning)
+            GatewayClient(base_url=url, x402_enabled=x402)
+
+
+class TestPaymentDescription:
+    def test_leads_with_client_request_and_marks_gateway_text(self, mock_x402, requests_mock):
+        seen = []
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        client, patcher = _client_with(mock_x402, x402_payment_callback=lambda a, d: seen.append(d) or True)
+        try:
+            client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert seen == ['POST /api/v1/stamps/ (gateway says: "Stamp purchase")']
+
+    def test_gateway_text_sanitized_and_truncated(self):
+        from swarm_provenance_uploader.models import X402PaymentOption
+
+        option = X402PaymentOption(
+            scheme="exact", network="base-sepolia", maxAmountRequired="1", resource="/x",
+            payTo=PAY_TO, description="Free!\x1b[2K\rPay now?\n" + "x" * 200,
+        )
+        described = GatewayClient._describe_request(option)
+        assert "\x1b" not in described and "\r" not in described and "\n" not in described
+        assert described.startswith("API request to /x")
+        assert len(described) < 130
+
+    def test_no_gateway_description(self):
+        from swarm_provenance_uploader.models import X402PaymentOption
+
+        option = X402PaymentOption(scheme="exact", network="base-sepolia", maxAmountRequired="1",
+                                   resource="/x", payTo=PAY_TO)
+        assert GatewayClient._describe_request(option) == "API request to /x"
+
+
+class TestExpectedPayToPassedThrough:
+    def test_expected_pay_to_reaches_x402_client(self):
+        from unittest.mock import patch
+
+        client = GatewayClient(base_url=GW, x402_enabled=True, x402_private_key="0x" + "a" * 64,
+                               x402_expected_pay_to=PAY_TO)
+        with patch("swarm_provenance_uploader.core.x402_client.X402Client") as cls:
+            client._get_x402_client()
+        assert cls.call_args.kwargs["expected_pay_to"] == PAY_TO

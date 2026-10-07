@@ -150,6 +150,9 @@ X402_AUTO_PAY=false
 
 # Optional: Maximum auto-pay amount per request in USD
 X402_MAX_AUTO_PAY_USD=1.00
+
+# Optional: Only pay this recipient (the gateway operator's published pay-to address)
+X402_EXPECTED_PAY_TO=0x...
 ```
 
 ### Verify configuration
@@ -258,6 +261,20 @@ The gateway confirmed it collected the payment, but the request failed afterward
 ### "Payment received, but the stamp purchase is not confirmed yet"
 
 The payment settled, but the Swarm node did not confirm the stamp in time. The gateway keeps waiting and registers the stamp to your wallet once the node reports it. Do not buy another one: use the lookup shown in the message (the stamp label and your wallet address) to find it.
+
+### "Refused the gateway's payment request; nothing was signed"
+
+Before signing, the CLI checks the gateway's payment request and refuses an option that:
+- uses a scheme other than `exact`;
+- names a token (`asset`) other than USDC on the configured network;
+- has a malformed amount or recipient; or
+- pays someone other than `X402_EXPECTED_PAY_TO`, when that is set.
+
+The message lists the reasons. A gateway that triggers this is misconfigured or not the one you meant to use.
+
+### "x402 payments over plain http"
+
+The gateway URL is `http://` on a host other than this machine. Anyone on the network path could rewrite the payment request, including the amount and the recipient. Use the gateway's `https://` URL.
 
 ### "Gateway advertises EIP-712 name ..."
 

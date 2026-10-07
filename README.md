@@ -179,6 +179,7 @@ swarm-prov-upload x402 info
 | `X402_NETWORK` | `base-sepolia` (testnet) or `base` (mainnet) | `base-sepolia` |
 | `X402_AUTO_PAY` | Auto-pay without prompts | `false` |
 | `X402_MAX_AUTO_PAY_USD` | Maximum auto-pay amount per request | `1.00` |
+| `X402_EXPECTED_PAY_TO` | Only pay this recipient address (optional) | not set |
 | `X402_RPC_URL` | Custom RPC URL (optional) | Uses default |
 
 ### Global Flags
