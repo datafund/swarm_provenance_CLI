@@ -111,6 +111,9 @@ def download_data_from_swarm(gateway_url: str, swarm_hash: str, verbose: bool = 
     Downloads data from Swarm via Bee Gateway using a Swarm reference hash.
     Returns the raw bytes of the content.
     """
+    from .file_utils import is_swarm_reference
+    if not is_swarm_reference(swarm_hash):
+        raise ValueError(f"Not a Swarm reference (64 or 128 hex characters): {swarm_hash!r}")
     # Swarm hashes are typically lowercase, ensure it for the URL
     api_path = f"/bzz/{swarm_hash.lower()}" # Assuming data was uploaded via /bzz
     # If data could have been uploaded via /bytes, you might need a way to distinguish

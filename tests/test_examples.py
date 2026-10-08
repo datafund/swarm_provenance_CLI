@@ -13,8 +13,9 @@ Unit tests verify:
 - 08-ci-cd-integration: CI/CD artifact archival with CI-ARTIFACT-V1
 - 09-verification: tamper detection and integrity verification
 
-Integration tests (marked @pytest.mark.gateway) run actual demos
-against a live gateway — skipped when gateway is unavailable.
+Integration tests (marked @pytest.mark.integration and gateway) run actual
+demos against a live gateway. They upload real data, so they run only with
+RUN_LIVE_TESTS=1 (and are skipped when the gateway is unavailable).
 """
 
 import csv
@@ -1351,7 +1352,8 @@ def _can_upload_to_gateway():
     """
     try:
         import requests
-        url = os.getenv("PROVENANCE_GATEWAY_URL", "https://provenance-gateway.datafund.io")
+        # `or`: an unset CI secret arrives as "" and must not mean "no gateway"
+        url = os.getenv("PROVENANCE_GATEWAY_URL") or "https://provenance-gateway.datafund.io"
         resp = requests.get(f"{url}/", timeout=5)
         if resp.status_code != 200:
             return False
@@ -1376,6 +1378,12 @@ def _can_upload_to_gateway():
         return False
 
 
+def _venv_python():
+    """The repo .venv's interpreter if there is one (local runs), else this one (CI)."""
+    venv_python = Path(__file__).parent.parent / ".venv" / "bin" / "python3"
+    return str(venv_python) if venv_python.exists() else sys.executable
+
+
 def _venv_cli_path():
     """Return path to the venv CLI binary, or None if not found."""
     venv_cli = Path(__file__).parent.parent / ".venv" / "bin" / "swarm-prov-upload"
@@ -1386,9 +1394,14 @@ def _venv_cli_path():
     return cli
 
 
+# Live demos upload real data to a gateway (production by default), so they
+# run only when asked for: RUN_LIVE_TESTS=1. Checked first, so collecting the
+# tests does not touch the network either (#132).
+_LIVE_TESTS = os.getenv("RUN_LIVE_TESTS") == "1"
+
 skip_if_no_gateway_upload = pytest.mark.skipif(
-    not _can_upload_to_gateway(),
-    reason="Gateway not available or CLI not installed with --usePool support"
+    not (_LIVE_TESTS and _can_upload_to_gateway()),
+    reason="Live demos need RUN_LIVE_TESTS=1, a reachable gateway and a CLI with --usePool"
 )
 
 
@@ -1408,7 +1421,7 @@ class TestDemoIntegration:
     def test_python_demo_e2e(self):
         """Run run_demo.py end-to-end against the live gateway."""
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         # Ensure the venv CLI is first on PATH
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
@@ -1451,7 +1464,7 @@ class TestAuditTrailIntegration:
     @skip_if_no_gateway_upload
     def test_python_demo_e2e(self):
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
 
@@ -1492,7 +1505,7 @@ class TestScientificDataIntegration:
     @skip_if_no_gateway_upload
     def test_python_demo_e2e(self):
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
 
@@ -1533,7 +1546,7 @@ class TestEncryptedDataIntegration:
     @skip_if_no_gateway_upload
     def test_python_demo_e2e(self):
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
 
@@ -1574,7 +1587,7 @@ class TestMarketMemoryIntegration:
     @skip_if_no_gateway_upload
     def test_python_demo_e2e(self):
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
 
@@ -2632,7 +2645,7 @@ class TestBatchProcessingIntegration:
     @skip_if_no_gateway_upload
     def test_python_demo_e2e(self):
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
 
@@ -2673,7 +2686,7 @@ class TestStampManagementIntegration:
     @skip_if_no_gateway_upload
     def test_python_demo_e2e(self):
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
 
@@ -2714,7 +2727,7 @@ class TestCiCdIntegration:
     @skip_if_no_gateway_upload
     def test_python_demo_e2e(self):
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
 
@@ -2755,7 +2768,7 @@ class TestVerificationIntegration:
     @skip_if_no_gateway_upload
     def test_python_demo_e2e(self):
         cli_path = _venv_cli_path()
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+        venv_python = _venv_python()
         env = os.environ.copy()
         env["PATH"] = str(Path(cli_path).parent) + ":" + env.get("PATH", "")
 
