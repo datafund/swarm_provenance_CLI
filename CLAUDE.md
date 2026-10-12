@@ -85,8 +85,11 @@ pip install -e .[testing]
 # Run all tests (unit + integration)
 pytest
 
-# Run only unit tests (skip integration)
-pytest --ignore=tests/test_integration.py
+# Run only unit tests (what CI runs; nothing talks to real services)
+pytest --ignore=tests/test_integration.py -m "not integration"
+
+# Payment and chain tests need the real signing libraries, or they skip
+pip install -e .[x402,blockchain,testing]
 
 # Run only integration tests (requires real backends)
 pytest tests/test_integration.py -v
@@ -95,6 +98,7 @@ pytest tests/test_integration.py -v
 pytest -m local_bee    # Local Bee tests only
 pytest -m gateway      # Gateway tests only
 pytest -m integration  # All integration tests
+RUN_LIVE_TESTS=1 pytest tests/test_examples.py -m integration  # Live example demos (upload real data)
 ```
 
 ### CLI Usage

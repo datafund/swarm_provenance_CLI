@@ -7,6 +7,8 @@ All notable changes to this project will be documented in this file.
 Payment safety (epic #145).
 
 ### Fixed
+- `download` refuses a reference that is not 64 or 128 hex characters before using it as a file name or URL path; `download ../x` wrote outside `--output-dir`. A `0x` prefix is accepted and dropped. `--stamp-id` is checked the same way (64 hex) (#132)
+- `ChainProvider.health_check` and `get_block_number` try each RPC URL at most once per call; two endpoints that connect but fail the check (e.g. wrong chain) were switched between until the recursion limit, and a dead fallback was probed repeatedly (#132)
 - Base mainnet USDC payments can now be signed: the EIP-712 domain name for `base` is `"USD Coin"` (the contract's `name()`), not `"USDC"`, which is correct only on Base Sepolia. Tests pin both networks' `DOMAIN_SEPARATOR` to the on-chain values (#126). Must ship together with the gateway fix datafund/swarm_connect#467.
 - A paid request that times out, drops, is interrupted (Ctrl-C) or fails with a server error after the payment was sent is no longer reported as a plain failure. It raises `PaymentOutcomeUnknownError`; when the gateway confirms it collected the payment (`X-Payment-Status: settled_not_delivered`, `DELIVERY_FAILED_AFTER_PAYMENT`, or a success answer the CLI cannot read), `PaymentSettledNotDeliveredError`. The CLI prints the amount, payer, pay-to address, authorization nonce, until when the authorization can be collected, and any `X-Payment-Transaction`, without `-v`, and tells the user not to re-run (#127)
 - A 202 `PURCHASE_PENDING` answer to a paid stamp purchase raises `StampPurchasePendingError` with the transaction and stamp label, instead of a model validation error (#127)
@@ -31,7 +33,13 @@ Payment safety (epic #145).
 - A warning (`InsecureGatewayWarning` in library use) when x402 is enabled against a plain-http gateway that is not on loopback (#129)
 - A 402 option whose `extra` advertises a different EIP-712 `name` or `version` than the USDC contract uses is refused before signing, with a message naming the mismatch (#126)
 
+
 ### Changed
+- CI runs on `main` and `development`, installs the `x402` and `blockchain` extras, runs unit tests only (`-m "not integration"`), and reports one `CI passed` check to require on protected branches (#132)
+- The example demos in `tests/test_examples.py` that upload to a live gateway run only with `RUN_LIVE_TESTS=1`; CI's unit job uploaded to the production gateway (#132)
+- `typer` is pinned below 0.23 (0.23+ needs click 8.2, which the click pin excludes, and newer versions broke the CLI tests) (#132)
+- The `x402` extra no longer installs the unused `x402` SDK package; it needs Python 3.10+, which made the extra uninstallable on 3.9 (#132)
+- Library users: `GatewayClient.download_data` and `swarm_client.download_data_from_swarm` raise `ValueError` for a reference that is not 64/128 hex characters (including a `0x` prefix), and `get_stamp` / `extend_stamp` / `check_stamp_health` for a stamp ID that is not 64 hex (#132)
 - Library users: after a payment was sent, timeouts, 5xx answers and a second 402 now raise `X402Error` subclasses (`PaymentOutcomeUnknownError`, `PaymentSettledNotDeliveredError`, `PaymentRejectedError`), no longer the builtin `ConnectionError`. Code catching `ConnectionError` around paid `GatewayClient` calls should also catch `X402Error` (#127)
 
 ## [0.8.3] - 2026-03-03

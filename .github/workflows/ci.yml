@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, development]
   pull_request:
-    branches: [main]
+    branches: [main, development]
   workflow_dispatch:
 
 jobs:
@@ -14,7 +14,9 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
-        extras: ["testing", "blockchain,testing"]
+        # The payment and chain code is tested with its real dependencies
+        # (web3, eth-account): without them those tests skip.
+        extras: ["testing", "x402,blockchain,testing"]
     name: Python ${{ matrix.python-version }} (${{ matrix.extras }})
     steps:
       - uses: actions/checkout@v4
@@ -27,8 +29,20 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[${{ matrix.extras }}]"
 
+      # Unit tests only: anything marked `integration` talks to real services
+      # (and the example demos upload to the production gateway).
       - name: Run unit tests
-        run: pytest tests/ --ignore=tests/test_integration.py -v
+        run: pytest tests/ --ignore=tests/test_integration.py -m "not integration" -v
+
+  # One stable check name to require on protected branches, whatever the matrix.
+  ci-passed:
+    if: always()
+    needs: [test]
+    runs-on: ubuntu-latest
+    name: CI passed
+    steps:
+      - name: All test jobs succeeded
+        run: test "${{ needs.test.result }}" = "success"
 
   integration:
     runs-on: ubuntu-latest
@@ -43,10 +57,11 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -e ".[blockchain,testing]"
+        run: pip install -e ".[x402,blockchain,testing]" pytest-timeout
 
       - name: Run integration tests
         env:
           PROVENANCE_WALLET_KEY: ${{ secrets.TEST_WALLET_KEY }}
           PROVENANCE_GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
-        run: pytest tests/test_integration.py -v --timeout=300
+          RUN_LIVE_TESTS: "1"
+        run: pytest tests/test_integration.py tests/test_examples.py -m integration -v --timeout=300
