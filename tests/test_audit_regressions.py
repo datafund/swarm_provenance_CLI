@@ -374,7 +374,7 @@ class TestNotaryEnforcement:
         document["signatures"] = [_notary_signature(document, NOTARY_KEY)]
         mocker.patch("swarm_provenance_uploader.cli.swarm_client.download_data_from_swarm",
                      return_value=json.dumps(document).encode())
-        result = runner.invoke(app, ["--backend", "local", "download", REFERENCE, "--output-dir", str(tmp_path),
+        result = runner.invoke(app, ["--backend", "local", "download", "--no-verify-reference", REFERENCE, "--output-dir", str(tmp_path),
                                      "--notary-address", self._address(NOTARY_KEY)])
         assert result.exit_code == 0, result.output
         assert "Verified" in result.output
@@ -523,7 +523,7 @@ class TestDownloadClaimsReviewCases:
         document["signatures"] = [_notary_signature(document, NOTARY_KEY)]
         mocker.patch("swarm_provenance_uploader.cli.swarm_client.download_data_from_swarm",
                      return_value=json.dumps(document).encode())
-        result = runner.invoke(app, ["--backend", "local", "download", REFERENCE, "--output-dir", str(tmp_path),
+        result = runner.invoke(app, ["--backend", "local", "download", "--no-verify-reference", REFERENCE, "--output-dir", str(tmp_path),
                                      "--notary-address", Account.from_key(NOTARY_KEY).address])
         assert result.exit_code == 0, result.output
         assert "signed by the pinned notary" in result.output

@@ -144,3 +144,25 @@ def download_data_from_swarm(gateway_url: str, swarm_hash: str, verbose: bool = 
     except requests.exceptions.RequestException as e:
         if verbose: print(f"ERROR_DETAIL: Data download request failed. URL: {url}, Error: {e}")
         raise ConnectionError(f"Swarm download failed for {swarm_hash} from URL {url}: {e}") from e
+
+
+def get_chunk(bee_url: str, address: str, verbose: bool = False) -> bytes:
+    """
+    Fetch one raw chunk (8-byte span plus payload) from a Bee node: GET /chunks/{address}.
+
+    Used to verify downloaded content against its reference (core.swarm_verify);
+    the chunk is not trusted, its address is checked by the caller.
+    """
+    if len(address) != 64 or any(c not in "0123456789abcdefABCDEF" for c in address):
+        raise ValueError(f"Not a chunk address: {address!r}")
+    url = urljoin(bee_url, f"/chunks/{address.lower()}")
+    try:
+        response = requests.get(url, timeout=60)
+        if response.status_code == 404:
+            raise FileNotFoundError(f"Chunk {address} not found (404 from {url})")
+        response.raise_for_status()
+        return response.content
+    except requests.exceptions.RequestException as e:
+        if verbose:
+            print(f"ERROR_DETAIL: Chunk request failed. URL: {url}, Error: {e}")
+        raise ConnectionError(f"Fetching chunk {address} from {url} failed: {e}") from e

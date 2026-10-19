@@ -216,6 +216,7 @@ The application follows a modular architecture with clear separation of concerns
    - `x402_client.py`: Client for x402 payment handling (optional)
    - `chain_client.py`: High-level facade for on-chain operations (optional)
    - `notary_utils.py`: Notary signature verification utilities
+   - `swarm_verify.py`: Checks content against a Swarm reference from raw chunks (BMT addresses, mantaray manifest, redundancy-aware file tree); used by `download` on the local backend
    - `file_utils.py`: File I/O and encoding utilities
    - `metadata_builder.py`: Metadata construction
 3. **Chain Subpackage** (`chain/`): Low-level blockchain components

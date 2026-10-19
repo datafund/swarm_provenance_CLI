@@ -827,6 +827,36 @@ def upload(
 _ETH_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
 
 
+def _verify_against_reference(bee_url: str, reference: str, content: bytes, verbose: bool = False) -> bool:
+    """
+    Check downloaded bytes against the reference from the Bee node's raw chunks.
+
+    Returns:
+        True when verified.
+
+    Raises:
+        typer.Exit: With code 1 when the content does not match or cannot be verified.
+    """
+    from .core.swarm_verify import SwarmVerificationError, verify_content
+
+    fetched = [0]
+
+    def fetch(address: str) -> bytes:
+        fetched[0] += 1
+        return swarm_client.get_chunk(bee_url, address, verbose=verbose)
+
+    typer.echo("Checking the content against the Swarm reference...")
+    try:
+        verify_content(fetch, reference, content)
+    except (SwarmVerificationError, FileNotFoundError, ConnectionError, ValueError) as e:
+        typer.secho(f"ERROR: The content could not be verified against the reference: {e}",
+                    fg=typer.colors.RED, err=True)
+        typer.echo("Nothing was saved. Use --no-verify-reference to download without this check.", err=True)
+        raise typer.Exit(code=1)
+    typer.secho(f"  Reference: ✓ content matches ({fetched[0]} chunks checked)", fg=typer.colors.GREEN)
+    return True
+
+
 def _verify_download_signature(raw_document: dict, gateway_url: Optional[str],
                                notary_address: Optional[str], require_signature: bool,
                                verbose: bool = False) -> Optional[str]:
@@ -943,6 +973,11 @@ def download(
         help="Expected notary signer address. Without it the address is taken from the gateway that served the document.",
     )] = None,
     strict: Annotated[bool, typer.Option("--strict", help="Same as --require-signature (a failed signature always fails).", hidden=True)] = False,
+    verify_reference: Annotated[bool, typer.Option(
+        "--verify-reference/--no-verify-reference",
+        help="Check the content against the Swarm reference, chunk by chunk (local backend; on by default there).",
+        show_default=False,
+    )] = True,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False
 ):
     """
@@ -1010,6 +1045,12 @@ def download(
     except Exception as e:
         typer.secho(f"ERROR: Failed fetching metadata from Swarm: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+    # 2.5 Check the content against the reference (#134). Only a Bee node
+    # serves the raw chunks this needs; the gateway does not (yet).
+    reference_verified = False
+    if verify_reference and not use_gateway:
+        reference_verified = _verify_against_reference(local_bee_url, swarm_hash, metadata_bytes, verbose)
 
     # 3. Deserialize fetched data to "Provenance Metadata" JSON object
     try:
@@ -1109,12 +1150,15 @@ def download(
                 typer.echo("The data is signed by the pinned notary.")
             elif signature_source:
                 typer.echo(f"The data is signed by the notary of the gateway it came from ({signature_source}).")
-            served_by = "the gateway that served it" if use_gateway else "your Bee node"
-            # A notary signature covers the data only: the notary signs what
-            # any uploader sends, so it does not tie data to this reference.
-            typer.echo(f"Note: the content is not checked against the Swarm reference itself; {served_by} "
-                       "is trusted for that. A notary signature, even a pinned one, shows only that the "
-                       "notary signed this data, not that it is the content of this reference.")
+            if reference_verified:
+                typer.echo("The content was checked against the Swarm reference, chunk by chunk.")
+            else:
+                served_by = "the gateway that served it" if use_gateway else "your Bee node"
+                # A notary signature covers the data only: the notary signs what
+                # any uploader sends, so it does not tie data to this reference.
+                typer.echo(f"Note: the content is not checked against the Swarm reference itself; {served_by} "
+                           "is trusted for that. A notary signature, even a pinned one, shows only that the "
+                           "notary signed this data, not that it is the content of this reference.")
         except Exception as e:
             typer.secho(f"ERROR: Failed to save decoded data file: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)

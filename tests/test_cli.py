@@ -154,7 +154,7 @@ class TestLocalBackendDownload:
         with runner.isolated_filesystem():
             result = runner.invoke(
                 app,
-                ["--backend", "local", "download", DUMMY_SWARM_REF, "--output-dir", "."]
+                ["--backend", "local", "download", "--no-verify-reference", DUMMY_SWARM_REF, "--output-dir", "."]
             )
 
             assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
@@ -169,7 +169,7 @@ class TestLocalBackendDownload:
 
         result = runner.invoke(
             app,
-            ["--backend", "local", "download", DUMMY_SWARM_REF]
+            ["--backend", "local", "download", "--no-verify-reference", DUMMY_SWARM_REF]
         )
 
         assert result.exit_code == 1
@@ -1708,7 +1708,7 @@ class TestDownloadWithVerify:
 
         result = runner.invoke(
             app,
-            ["--backend", "local", "download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path)]
+            ["--backend", "local", "download", "--no-verify-reference", DUMMY_SWARM_REF, "--output-dir", str(tmp_path)]
         )
 
         # Download should still succeed
@@ -2011,7 +2011,7 @@ class TestDownloadWithVerify:
 
         result = runner.invoke(
             app,
-            ["--backend", "local", "download", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--strict"]
+            ["--backend", "local", "download", "--no-verify-reference", DUMMY_SWARM_REF, "--output-dir", str(tmp_path), "--strict"]
         )
 
         # Should warn but still succeed — can't verify without notary address
