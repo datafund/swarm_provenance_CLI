@@ -152,3 +152,221 @@ class TestLocalDownloadVerifiesReference:
                         + b'", "stamp_id": "' + b"a3" * 32 + b'"}', "--no-verify-reference")
         assert result.exit_code == 0, result.output
         assert "not checked against the Swarm reference" in result.output
+
+
+# --- Crafted trees and manifests (review of the verifier) ----------------------
+
+def _chunk(payload, span=None, level=0):
+    raw_span = bytearray((len(payload) if span is None else span).to_bytes(8, "little"))
+    if level:
+        raw_span[7] = level | 0x80
+    chunk = bytes(raw_span) + payload
+    return sv.chunk_address(chunk), chunk
+
+
+class _Store:
+    def __init__(self):
+        self.chunks = {}
+
+    def put(self, payload, span=None, level=0):
+        address, chunk = _chunk(payload, span, level)
+        self.chunks[address.hex()] = chunk
+        return address
+
+    def fetch(self, address):
+        if address not in self.chunks:
+            raise sv.SwarmVerificationError(f"missing {address}")
+        return self.chunks[address]
+
+    def file(self, data):
+        """A small unredundant file: one leaf, or one intermediate over full leaves."""
+        if len(data) <= sv.CHUNK_SIZE:
+            return self.put(data)
+        refs = [self.put(data[i:i + sv.CHUNK_SIZE]) for i in range(0, len(data), sv.CHUNK_SIZE)]
+        return self.put(b"".join(refs), span=len(data))
+
+
+def _node(entry=b"\x00" * 32, forks=()):
+    """A mantaray 0.2 node (zero obfuscation key). forks: (prefix, ref, metadata or None, node_type)."""
+    out = bytearray(b"\x00" * 32) + sv._VERSION_02 + bytes([32]) + entry
+    bitmap = bytearray(32)
+    body = bytearray()
+    for prefix, ref, metadata, node_type in sorted(forks, key=lambda f: f[0][0]):
+        bitmap[prefix[0] // 8] |= 1 << (prefix[0] % 8)
+        if metadata is not None:
+            node_type |= sv._TYPE_WITH_METADATA
+        body += bytes([node_type, len(prefix)]) + prefix.ljust(30, b"\x00") + ref
+        if metadata is not None:
+            raw = json.dumps(metadata).encode() if not isinstance(metadata, bytes) else metadata
+            body += len(raw).to_bytes(2, "big") + raw
+    return bytes(out + bitmap + body)
+
+
+def _manifest(store, index, files, root_meta_extra=None, file_type=sv._TYPE_VALUE):
+    """A single-file style manifest: "/" with the index document, plus file forks."""
+    slash_meta = {"website-index-document": index, **(root_meta_extra or {})}
+    slash = store.file(_node())
+    forks = [(b"/", slash, slash_meta, 0)]
+    for path, data in files.items():
+        leaf = store.file(_node(entry=store.file(data)))
+        forks.append((path.encode(), leaf, {"Content-Type": "text/plain"}, file_type))
+    return store.file(_node(forks=forks)).hex()
+
+
+class TestManifestResolutionMatchesBee:
+    def test_index_path_is_cleaned_like_go_path_join(self):
+        store = _Store()
+        ref = _manifest(store, "./a", {"a": b"HONEST", "./a": b"FORGED"})
+        assert sv.content_of_reference(store.fetch, ref) == b"HONEST"
+
+    def test_feed_manifest_refused(self):
+        store = _Store()
+        ref = _manifest(store, "a", {"a": b"X"}, {"swarm-feed-owner": "ab" * 20, "swarm-feed-topic": "cd" * 32})
+        with pytest.raises(sv.SwarmVerificationError, match="feed"):
+            sv.content_of_reference(store.fetch, ref)
+
+    def test_non_value_node_refused(self):
+        store = _Store()
+        ref = _manifest(store, "a", {"a": b"X"}, file_type=4)  # edge, not value
+        with pytest.raises(sv.SwarmVerificationError, match="not a file"):
+            sv.content_of_reference(store.fetch, ref)
+
+    def test_empty_index_refused(self):
+        store = _Store()
+        ref = _manifest(store, "", {"a": b"X"})
+        with pytest.raises(sv.SwarmVerificationError, match="empty"):
+            sv.content_of_reference(store.fetch, ref)
+
+    def test_metadata_that_is_not_a_string_map_refused(self):
+        store = _Store()
+        slash = store.file(_node())
+        root = store.file(_node(forks=[(b"/", slash, b'["not", "a", "map"]', 0)])).hex()
+        with pytest.raises(sv.SwarmVerificationError, match="map of strings"):
+            sv.content_of_reference(store.fetch, root)
+
+    def test_truncated_metadata_refused(self):
+        node = bytearray(_node(forks=[(b"/", b"\x11" * 32, {"website-index-document": "a"}, 0)]))
+        with pytest.raises(sv.SwarmVerificationError, match="truncated"):
+            sv.parse_node(bytes(node[:-5]))
+
+    def test_manifest_larger_than_the_content_is_fine(self):
+        """Manifest nodes have their own budget (a collection's root node outgrows small content)."""
+        store = _Store()
+        # Distinct first bytes (this builder makes one fork per first byte):
+        # 120 forks with metadata make a root node of several chunks.
+        files = {chr(c) + "file": b"x" for c in range(0x30, 0x30 + 120) if chr(c) not in "/i"}
+        files["index.html"] = b"tiny"
+        ref = _manifest(store, "index.html", files)
+        sv.verify_content(store.fetch, ref, b"tiny")
+
+
+class TestTreeShapeMatchesBeeJoiner:
+    def _manifest_for(self, store, file_ref):
+        slash = store.file(_node())
+        leaf = store.file(_node(entry=file_ref))
+        return store.file(_node(forks=[(b"/", slash, {"website-index-document": "f"}, 0),
+                                       (b"f", leaf, {}, sv._TYPE_VALUE)])).hex()
+
+    def test_uneven_children_refused(self):
+        store = _Store()
+        short, full = store.put(b"a" * 10), store.put(b"b" * 4096)
+        file_ref = store.put(short + full, span=4106)
+        with pytest.raises(sv.SwarmVerificationError, match="tree needs"):
+            sv.content_of_reference(store.fetch, self._manifest_for(store, file_ref))
+
+    def test_level_byte_under_unredundant_root_refused(self):
+        store = _Store()
+        first, second = store.put(b"a" * 4096, level=2), store.put(b"b" * 10)
+        file_ref = store.put(first + second, span=4106)
+        with pytest.raises(sv.SwarmVerificationError, match="redundancy level under an unredundant root"):
+            sv.content_of_reference(store.fetch, self._manifest_for(store, file_ref))
+
+    def test_zero_padded_leaf_accepted(self):
+        """Same address as the unpadded chunk (the BMT pads with zeros); Bee serves it."""
+        store = _Store()
+        address = store.put(b"hello\x00\x00", span=5)
+        assert sv.read_file(store.fetch, address, 100) == b"hello"
+
+    def test_padding_that_is_not_zero_refused(self):
+        store = _Store()
+        address = store.put(b"hello!!", span=5)
+        with pytest.raises(sv.SwarmVerificationError):
+            sv.read_file(store.fetch, address, 100)
+
+    def test_deep_chain_refused_without_recursion_error(self):
+        store = _Store()
+        ref = store.put(b"x" * 4096)
+        span = 4096
+        for _ in range(sv.MAX_TREE_DEPTH + 2):
+            span += 0  # a chain of single-child intermediates
+            ref = store.put(ref, span=span + 1)
+            span += 1
+        with pytest.raises(sv.SwarmVerificationError):
+            sv.read_file(store.fetch, ref, 10 ** 9)
+
+
+class TestGetChunk:
+    def test_404_is_file_not_found(self, requests_mock):
+        from swarm_provenance_uploader.core import swarm_client
+
+        requests_mock.get("http://bee.test/chunks/" + "ab" * 32, status_code=404)
+        with pytest.raises(FileNotFoundError):
+            swarm_client.get_chunk("http://bee.test", "ab" * 32)
+
+    @pytest.mark.parametrize("address", ["../x", "ab" * 31, "zz" * 32])
+    def test_address_validated(self, address, requests_mock):
+        from swarm_provenance_uploader.core import swarm_client
+
+        with pytest.raises(ValueError):
+            swarm_client.get_chunk("http://bee.test", address)
+        assert requests_mock.call_count == 0
+
+
+class TestLocalDownloadReviewCases:
+    def _invoke(self, mocker, tmp_path, reference, *args, chunk_error=None):
+        from typer.testing import CliRunner
+        from swarm_provenance_uploader import cli
+
+        saved = dict(cli._backend_config)
+        f = FIXTURES["provenance_doc_level2"]
+        fetch = _fetcher("provenance_doc_level2")
+
+        def get_chunk(url, address, verbose=False):
+            if chunk_error:
+                raise chunk_error
+            return fetch(address)
+
+        mocker.patch("swarm_provenance_uploader.cli.swarm_client.get_chunk", side_effect=get_chunk)
+        mocker.patch("swarm_provenance_uploader.cli.swarm_client.download_data_from_swarm",
+                     return_value=bytes.fromhex(f["content_hex"]))
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient").return_value.download_data.return_value = \
+            bytes.fromhex(f["content_hex"])
+        try:
+            return CliRunner().invoke(cli.app, [*args[:2], "download", reference, "--output-dir", str(tmp_path), *args[2:]])
+        finally:
+            cli._backend_config.clear()
+            cli._backend_config.update(saved)
+
+    def test_missing_chunk_fails_cleanly(self, mocker, tmp_path):
+        ref = FIXTURES["provenance_doc_level2"]["reference"]
+        result = self._invoke(mocker, tmp_path, ref, "--backend", "local",
+                              chunk_error=FileNotFoundError("Chunk not found (404)"))
+        assert result.exit_code == 1
+        assert "could not be verified" in result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert not any(tmp_path.iterdir())
+
+    def test_unexpected_error_fails_cleanly(self, mocker, tmp_path):
+        ref = FIXTURES["provenance_doc_level2"]["reference"]
+        result = self._invoke(mocker, tmp_path, ref, "--backend", "local", chunk_error=RecursionError("deep"))
+        assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit)
+
+    def test_encrypted_reference_skips_check_with_note(self, mocker, tmp_path):
+        result = self._invoke(mocker, tmp_path, "ab" * 64, "--backend", "local")
+        assert "encrypted references cannot be checked" in result.output
+
+    def test_verify_reference_on_gateway_says_it_cannot(self, mocker, tmp_path):
+        ref = FIXTURES["provenance_doc_level2"]["reference"]
+        result = self._invoke(mocker, tmp_path, ref, "--backend", "gateway", "--verify-reference")
+        assert "the gateway does not serve them" in result.output

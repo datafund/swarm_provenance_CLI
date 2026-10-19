@@ -25,6 +25,9 @@ import json
 from typing import Callable, Dict, List, Optional, Tuple
 
 CHUNK_SIZE = 4096
+# Manifest nodes are read with their own size limit (a collection's root
+# node is a few KB per hundred files)
+MAX_MANIFEST_NODE_SIZE = 4 * 1024 * 1024
 SPAN_SIZE = 8
 HASH_SIZE = 32
 BRANCHES = CHUNK_SIZE // HASH_SIZE  # 128
@@ -52,8 +55,9 @@ def _keccak_backend():
     try:
         from eth_hash.auto import keccak as _eth_keccak
 
+        _eth_keccak(b"")  # eth-hash imports without a backend and fails on first use
         return _eth_keccak
-    except ImportError:
+    except Exception:
         return _keccak256_pure
 
 
@@ -167,25 +171,53 @@ def _parity_count(span: int, level: int) -> int:
     return _parities(level, data_refs)
 
 
-def read_file(fetch_chunk: ChunkFetcher, reference: bytes, max_size: int) -> bytes:
+# Deeper than any real tree: 4096 * 128**7 bytes is far beyond any limit used here.
+MAX_TREE_DEPTH = 8
+
+
+def _branch_size(span: int, refs: int, branching: int) -> int:
+    """Bytes under each non-last child (joiner.subtrieSection): all but the last child are full."""
+    branch_size = CHUNK_SIZE
+    while span - branch_size * (refs - 1) > branch_size:
+        branch_size *= branching
+    return branch_size
+
+
+def read_file(fetch_chunk: ChunkFetcher, reference: bytes, max_size: int,
+              _expected_span: Optional[int] = None, _root_level: Optional[int] = None,
+              _depth: int = 0) -> bytes:
     """
     The bytes of the file whose chunk tree has root `reference`, every chunk verified.
+
+    The tree must have the shape Bee's splitter produces (and its joiner
+    accepts): each non-last child holds exactly a full branch, and chunks
+    under an unredundant root carry no redundancy level.
 
     Raises:
         SwarmVerificationError: A chunk does not match its address, the tree is
             malformed, or the file is larger than max_size.
     """
+    if _depth > MAX_TREE_DEPTH:
+        raise SwarmVerificationError("file tree is deeper than any valid tree")
     chunk = fetch_chunk(reference.hex())
     if chunk_address(chunk) != reference:
         raise SwarmVerificationError(f"chunk {reference.hex()} does not match its address")
     level, span = decode_span(chunk[:SPAN_SIZE])
     payload = chunk[SPAN_SIZE:]
+    if _root_level is None:
+        _root_level = level
+    elif _root_level == 0 and level != 0:
+        raise SwarmVerificationError(f"chunk {reference.hex()} has a redundancy level under an unredundant root")
+    if _expected_span is not None and span != _expected_span:
+        raise SwarmVerificationError(f"chunk {reference.hex()} spans {span} bytes where the tree needs {_expected_span}")
     if span > max_size:
         raise _TooLarge(f"file is larger than the {max_size}-byte limit")
     if span <= CHUNK_SIZE:
-        if len(payload) != span:
+        # Zero padding after the span does not change the address (the BMT
+        # pads with zeros) and Bee serves such a chunk as its first `span` bytes.
+        if len(payload) < span or any(payload[span:]):
             raise SwarmVerificationError(f"chunk {reference.hex()} span {span} != payload {len(payload)}")
-        return payload
+        return payload[:span]
     # Intermediate chunk: data references, then parity references (skipped)
     refs_len = len(payload)
     while refs_len >= HASH_SIZE and payload[refs_len - HASH_SIZE:refs_len] == b"\x00" * HASH_SIZE:
@@ -195,14 +227,18 @@ def read_file(fetch_chunk: ChunkFetcher, reference: bytes, max_size: int) -> byt
     data_refs = refs_len // HASH_SIZE - _parity_count(span, level)
     if data_refs < 1:
         raise SwarmVerificationError(f"intermediate chunk {reference.hex()} has no data references")
+    branching = BRANCHES - _parities(_root_level, BRANCHES) if _root_level else BRANCHES
+    branch = _branch_size(span, data_refs, branching)
+    last = span - branch * (data_refs - 1)
+    if last <= 0:
+        raise SwarmVerificationError(f"intermediate chunk {reference.hex()} has more children than its span allows")
     parts: List[bytes] = []
-    total = 0
     for i in range(data_refs):
-        part = read_file(fetch_chunk, payload[i * HASH_SIZE:(i + 1) * HASH_SIZE], span - total)
-        parts.append(part)
-        total += len(part)
-    if total != span:
-        raise SwarmVerificationError(f"file tree under {reference.hex()} holds {total} bytes, span says {span}")
+        parts.append(read_file(
+            fetch_chunk, payload[i * HASH_SIZE:(i + 1) * HASH_SIZE], max_size,
+            _expected_span=last if i == data_refs - 1 else branch,
+            _root_level=_root_level, _depth=_depth + 1,
+        ))
     return b"".join(parts)
 
 
@@ -214,10 +250,14 @@ _TYPE_WITH_METADATA = 16
 _HEADER = 32 + 31 + 1
 
 
+_TYPE_VALUE = 2
+
+
 class _Node:
-    def __init__(self, entry: bytes, forks: Dict[int, Tuple[bytes, bytes, Dict[str, str]]]):
+    def __init__(self, entry: bytes, forks: Dict[int, Tuple[bytes, bytes, Dict[str, str], int]]):
         self.entry = entry
-        self.forks = forks  # first byte -> (prefix, child reference, child metadata)
+        # first byte -> (prefix, child reference, child metadata, child node type)
+        self.forks = forks
 
 
 def parse_node(data: bytes) -> _Node:
@@ -236,7 +276,7 @@ def parse_node(data: bytes) -> _Node:
     offset = _HEADER + ref_size
     bitmap = plain[offset:offset + 32]
     offset += 32
-    forks: Dict[int, Tuple[bytes, bytes, Dict[str, str]]] = {}
+    forks: Dict[int, Tuple[bytes, bytes, Dict[str, str], int]] = {}
     if ref_size == 0:
         return _Node(entry, forks)
     for byte in range(256):
@@ -253,30 +293,49 @@ def parse_node(data: bytes) -> _Node:
         metadata: Dict[str, str] = {}
         if version == _VERSION_02 and node_type & _TYPE_WITH_METADATA:
             meta_len = int.from_bytes(plain[offset + size:offset + size + 2], "big")
+            if offset + size + 2 + meta_len > len(plain):
+                raise SwarmVerificationError("manifest metadata truncated")
             raw = bytes(plain[offset + size + 2:offset + size + 2 + meta_len])
             size += 2 + meta_len
             try:
                 metadata = json.loads(raw) if raw.strip() else {}
             except ValueError as e:
                 raise SwarmVerificationError(f"manifest metadata is not JSON: {e}") from e
-        forks[byte] = (prefix, ref, metadata)
+            if not isinstance(metadata, dict) or not all(
+                    isinstance(k, str) and isinstance(v, str) for k, v in metadata.items()):
+                raise SwarmVerificationError("manifest metadata is not a map of strings")
+        forks[byte] = (prefix, ref, metadata, node_type)
         offset += size
     return _Node(entry, forks)
 
 
-def _lookup(fetch_chunk: ChunkFetcher, node: _Node, path: bytes, max_size: int) -> Tuple[_Node, Dict[str, str]]:
-    """The node at `path` and its metadata (mantaray Node.LookupNode)."""
+def _lookup(fetch_chunk: ChunkFetcher, node: _Node, path: bytes,
+            max_size: int) -> Tuple[_Node, Dict[str, str], Optional[int]]:
+    """The node at `path`, its metadata and node type (mantaray Node.LookupNode)."""
     metadata: Dict[str, str] = {}
+    node_type: Optional[int] = None
     while path:
         fork = node.forks.get(path[0])
         if fork is None or not path.startswith(fork[0]):
             raise SwarmVerificationError(f"path {path!r} is not in the manifest")
-        prefix, ref, metadata = fork
+        prefix, ref, metadata, node_type = fork
         if len(ref) != HASH_SIZE:
             raise SwarmVerificationError("encrypted manifest references are not supported")
         node = parse_node(read_file(fetch_chunk, ref, max_size))
         path = path[len(prefix):]
-    return node, metadata
+    return node, metadata, node_type
+
+
+def _go_path_join(element: str) -> str:
+    """Go's path.Join("", element): "" stays "", anything else is path.Clean'ed."""
+    if element == "":
+        return ""
+    import posixpath
+
+    cleaned = posixpath.normpath(element)
+    if cleaned.startswith("//"):  # POSIX keeps "//", Go's Clean does not
+        cleaned = "/" + cleaned.lstrip("/")
+    return cleaned
 
 
 def content_of_reference(fetch_chunk: ChunkFetcher, reference: str, max_size: int = 100 * 1024 * 1024) -> bytes:
@@ -292,14 +351,24 @@ def content_of_reference(fetch_chunk: ChunkFetcher, reference: str, max_size: in
         raise SwarmVerificationError(f"not a hex reference: {reference!r}") from e
     if len(ref) != HASH_SIZE:
         raise SwarmVerificationError("only unencrypted (32-byte) references can be verified")
-    root = parse_node(read_file(fetch_chunk, ref, max_size))
-    # Bee: the root path "/" carries the index document; with an empty path
-    # it serves the entry at that document (a single-file upload).
-    _, root_meta = _lookup(fetch_chunk, root, b"/", max_size)
+    # Manifest nodes are small files of their own, with their own budget: the
+    # content limit is about the file, not about the manifest around it.
+    root = parse_node(read_file(fetch_chunk, ref, MAX_MANIFEST_NODE_SIZE))
+    # Resolve exactly as Bee serves GET /bzz/<ref> (pkg/api/bzz.go): the
+    # metadata at "/" names the index document, the path is path.Join'ed,
+    # and the node found must be a value node with a file entry.
+    _, root_meta, _ = _lookup(fetch_chunk, root, b"/", MAX_MANIFEST_NODE_SIZE)
+    if "swarm-feed-owner" in root_meta or "swarm-feed-topic" in root_meta:
+        raise SwarmVerificationError("feed manifests are not supported")
     index = root_meta.get("website-index-document")
     if index is None:
-        raise SwarmVerificationError("manifest has no index document (not a single-file upload)")
-    node, _ = _lookup(fetch_chunk, root, index.encode(), max_size)
+        raise SwarmVerificationError("manifest has no index document")
+    path = _go_path_join(index)
+    if not path:
+        raise SwarmVerificationError("manifest index document is empty")
+    node, _, node_type = _lookup(fetch_chunk, root, path.encode(), MAX_MANIFEST_NODE_SIZE)
+    if node_type is None or not node_type & _TYPE_VALUE:
+        raise SwarmVerificationError(f"manifest path {path!r} is not a file")
     if len(node.entry) != HASH_SIZE or node.entry == b"\x00" * HASH_SIZE:
         raise SwarmVerificationError("manifest entry has no unencrypted file reference")
     return read_file(fetch_chunk, node.entry, max_size)

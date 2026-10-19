@@ -837,9 +837,15 @@ def _verify_against_reference(bee_url: str, reference: str, content: bytes, verb
     Raises:
         typer.Exit: With code 1 when the content does not match or cannot be verified.
     """
-    from .core.swarm_verify import SwarmVerificationError, verify_content
+    from .core import swarm_verify
+    from .core.swarm_verify import verify_content
 
     fetched = [0]
+    if len(content) > 1024 * 1024:
+        hint = ""
+        if swarm_verify.keccak256 is swarm_verify._keccak256_pure:
+            hint = ' (slow without a native hash library: pip install pycryptodome)'
+        typer.echo(f"  {len(content) // 1024} KB: about {len(content) // 4096 + 1} chunks to fetch and check{hint}")
 
     def fetch(address: str) -> bytes:
         fetched[0] += 1
@@ -848,7 +854,7 @@ def _verify_against_reference(bee_url: str, reference: str, content: bytes, verb
     typer.echo("Checking the content against the Swarm reference...")
     try:
         verify_content(fetch, reference, content)
-    except (SwarmVerificationError, FileNotFoundError, ConnectionError, ValueError) as e:
+    except Exception as e:  # any failure (including malformed input) means "not verified"
         typer.secho(f"ERROR: The content could not be verified against the reference: {e}",
                     fg=typer.colors.RED, err=True)
         typer.echo("Nothing was saved. Use --no-verify-reference to download without this check.", err=True)
@@ -973,11 +979,11 @@ def download(
         help="Expected notary signer address. Without it the address is taken from the gateway that served the document.",
     )] = None,
     strict: Annotated[bool, typer.Option("--strict", help="Same as --require-signature (a failed signature always fails).", hidden=True)] = False,
-    verify_reference: Annotated[bool, typer.Option(
+    verify_reference: Annotated[Optional[bool], typer.Option(
         "--verify-reference/--no-verify-reference",
         help="Check the content against the Swarm reference, chunk by chunk (local backend; on by default there).",
         show_default=False,
-    )] = True,
+    )] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False
 ):
     """
@@ -1049,8 +1055,16 @@ def download(
     # 2.5 Check the content against the reference (#134). Only a Bee node
     # serves the raw chunks this needs; the gateway does not (yet).
     reference_verified = False
-    if verify_reference and not use_gateway:
-        reference_verified = _verify_against_reference(local_bee_url, swarm_hash, metadata_bytes, verbose)
+    if use_gateway:
+        if verify_reference:
+            typer.secho("Note: --verify-reference needs a Bee node's chunks; the gateway does not serve them, "
+                        "so the content is not checked against the reference.", fg=typer.colors.YELLOW, err=True)
+    elif verify_reference is not False:
+        if len(swarm_hash) != 64:
+            typer.secho("Note: encrypted references cannot be checked against their content; skipping "
+                        "the reference check.", fg=typer.colors.YELLOW, err=True)
+        else:
+            reference_verified = _verify_against_reference(local_bee_url, swarm_hash, metadata_bytes, verbose)
 
     # 3. Deserialize fetched data to "Provenance Metadata" JSON object
     try:

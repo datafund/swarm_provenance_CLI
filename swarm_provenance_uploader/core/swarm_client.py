@@ -146,6 +146,9 @@ def download_data_from_swarm(gateway_url: str, swarm_hash: str, verbose: bool = 
         raise ConnectionError(f"Swarm download failed for {swarm_hash} from URL {url}: {e}") from e
 
 
+_chunk_session = None
+
+
 def get_chunk(bee_url: str, address: str, verbose: bool = False) -> bytes:
     """
     Fetch one raw chunk (8-byte span plus payload) from a Bee node: GET /chunks/{address}.
@@ -155,9 +158,12 @@ def get_chunk(bee_url: str, address: str, verbose: bool = False) -> bytes:
     """
     if len(address) != 64 or any(c not in "0123456789abcdefABCDEF" for c in address):
         raise ValueError(f"Not a chunk address: {address!r}")
+    global _chunk_session
+    if _chunk_session is None:
+        _chunk_session = requests.Session()  # one connection for the many chunk requests
     url = urljoin(bee_url, f"/chunks/{address.lower()}")
     try:
-        response = requests.get(url, timeout=60)
+        response = _chunk_session.get(url, timeout=60)
         if response.status_code == 404:
             raise FileNotFoundError(f"Chunk {address} not found (404 from {url})")
         response.raise_for_status()
