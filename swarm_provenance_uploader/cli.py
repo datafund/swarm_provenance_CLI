@@ -1059,16 +1059,20 @@ def download(
     # 2.5 Check the content against the reference (#134). Only a Bee node
     # serves the raw chunks this needs; the gateway does not (yet).
     reference_verified = False
+    # An explicit --verify-reference that cannot be honoured fails: a script
+    # asking for the check must not be told "done" when it never ran.
+    cannot = None
     if use_gateway:
-        if verify_reference:
-            typer.secho("Note: --verify-reference needs a Bee node's chunks; the gateway does not serve them, "
-                        "so the content is not checked against the reference.", fg=typer.colors.YELLOW, err=True)
-    elif verify_reference is not False:
-        if len(swarm_hash) != 64:
-            typer.secho("Note: encrypted references cannot be checked against their content; skipping "
-                        "the reference check.", fg=typer.colors.YELLOW, err=True)
-        else:
-            reference_verified = _verify_against_reference(local_bee_url, swarm_hash, metadata_bytes, verbose)
+        cannot = "the gateway does not serve the chunks it needs (use --backend local)"
+    elif len(swarm_hash) != 64:
+        cannot = "encrypted references cannot be checked against their content"
+    if cannot and verify_reference:
+        typer.secho(f"ERROR: --verify-reference: {cannot}. Nothing was saved.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    if cannot and not use_gateway and verify_reference is None:
+        typer.secho(f"Note: {cannot}; skipping the reference check.", fg=typer.colors.YELLOW, err=True)
+    if not cannot and verify_reference is not False:
+        reference_verified = _verify_against_reference(local_bee_url, swarm_hash, metadata_bytes, verbose)
 
     # 3. Deserialize fetched data to "Provenance Metadata" JSON object
     try:

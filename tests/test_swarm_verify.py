@@ -366,7 +366,21 @@ class TestLocalDownloadReviewCases:
         result = self._invoke(mocker, tmp_path, "ab" * 64, "--backend", "local")
         assert "encrypted references cannot be checked" in result.output
 
-    def test_verify_reference_on_gateway_says_it_cannot(self, mocker, tmp_path):
+    def test_explicit_verify_reference_on_gateway_fails(self, mocker, tmp_path):
+        """A script that asks for the check must not get exit 0 when it cannot run."""
         ref = FIXTURES["provenance_doc_level2"]["reference"]
         result = self._invoke(mocker, tmp_path, ref, "--backend", "gateway", "--verify-reference")
-        assert "the gateway does not serve them" in result.output
+        assert result.exit_code == 1
+        assert "the gateway does not serve the chunks" in result.output
+        assert not any(tmp_path.iterdir())
+
+    def test_explicit_verify_reference_on_encrypted_reference_fails(self, mocker, tmp_path):
+        result = self._invoke(mocker, tmp_path, "ab" * 64, "--backend", "local", "--verify-reference")
+        assert result.exit_code == 1
+        assert "encrypted references cannot be checked" in result.output
+
+    def test_gateway_default_needs_no_flag(self, mocker, tmp_path):
+        ref = FIXTURES["provenance_doc_level2"]["reference"]
+        result = self._invoke(mocker, tmp_path, ref, "--backend", "gateway")
+        assert result.exit_code == 0, result.output
+        assert "not checked against the Swarm reference" in result.output
