@@ -989,8 +989,12 @@ def download(
     """
     Downloads Provenance Metadata from Swarm, decodes the wrapped data,
     checks it against the document's own content hash (and notary
-    signature), and saves both files. The content is not checked against
-    the Swarm reference itself: the gateway that serves it is trusted for that.
+    signature), and saves both files.
+
+    On the local backend the content is also checked against the Swarm
+    reference, chunk by chunk (--no-verify-reference skips it). The gateway
+    backend cannot do that check: the gateway that serves the content is
+    trusted for it.
 
     Notary signatures are verified by default when present, and a signature
     that does not verify fails the download (exit 1).
