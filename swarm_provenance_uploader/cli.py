@@ -2222,6 +2222,17 @@ def _handle_not_recorded(
         typer.echo("  Check the contract address and chain before you try again.", err=True)
 
 
+def _print_completed_steps(steps: dict) -> None:
+    """List the writes of a composite command that were recorded before a failure."""
+    if not steps:
+        return
+    typer.echo("\nCompleted before the failure:")
+    for name, step in steps.items():
+        typer.echo(f"  {name.capitalize()}: tx {step.tx_hash}")
+        if step.explorer_url:
+            typer.echo(f"    Explorer: {step.explorer_url}")
+
+
 @chain_app.command("balance")
 def chain_balance(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
@@ -2927,6 +2938,20 @@ def chain_transform(
     if restrict_original:
         try:
             status_result = client.set_status(original_hash, status=1, verbose=verbose)
+        except exceptions.TransactionNotRecordedError as e:
+            # The restrict step was not recorded: report it and exit 1
+            if output_json:
+                typer.echo(json.dumps({
+                    "transform": result.model_dump(),
+                    "restrict": None,
+                    "partial_failure": True,
+                    "not_recorded": _not_recorded_json(e),
+                }, indent=2))
+            else:
+                _handle_not_recorded(e)
+                typer.echo(f"  Restrict manually: swarm-prov-upload chain status {original_hash} --set restricted", err=True)
+                _print_completed_steps({"transform": result})
+            raise typer.Exit(code=1)
         except exceptions.ChainError as e:
             typer.secho(f"\nWARNING: Transform succeeded but failed to restrict original: {e}", fg=typer.colors.YELLOW, err=True)
 
@@ -2988,6 +3013,24 @@ def chain_protect(
 
     results = {}
 
+    def not_recorded_exit(e: "exceptions.TransactionNotRecordedError", hint: Optional[str] = None):
+        """A step was not recorded: report it and the completed steps, exit 1."""
+        if output_json:
+            output = {}
+            if "anchor" in results:
+                output["anchor"] = results["anchor"].model_dump()
+            output["transform"] = results["transform"].model_dump() if "transform" in results else None
+            output["restrict"] = None
+            output["partial_failure"] = True
+            output["not_recorded"] = _not_recorded_json(e)
+            typer.echo(json.dumps(output, indent=2))
+        else:
+            _handle_not_recorded(e)
+            if hint:
+                typer.echo(hint, err=True)
+            _print_completed_steps(results)
+        raise typer.Exit(code=1)
+
     # Step 1: Verify original is registered and ACTIVE
     try:
         record = client.get(original_hash, verbose=verbose)
@@ -3018,6 +3061,8 @@ def chain_protect(
             # Already anchored is fine for protect — continue with transform
             if not output_json:
                 typer.secho(f"New hash already anchored, continuing.", fg=typer.colors.YELLOW)
+        except exceptions.TransactionNotRecordedError as e:
+            not_recorded_exit(e)
         except exceptions.InsufficientFundsError as e:
             _handle_insufficient_funds(e, output_json=output_json)
             raise typer.Exit(code=1)
@@ -3031,6 +3076,8 @@ def chain_protect(
         results["transform"] = transform_result
         if not output_json:
             typer.secho(f"Transformation recorded.", fg=typer.colors.GREEN)
+    except exceptions.TransactionNotRecordedError as e:
+        not_recorded_exit(e)
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
         raise typer.Exit(code=1)
@@ -3045,6 +3092,11 @@ def chain_protect(
         results["restrict"] = status_result
         if not output_json:
             typer.secho(f"Original hash restricted.", fg=typer.colors.GREEN)
+    except exceptions.TransactionNotRecordedError as e:
+        not_recorded_exit(
+            e,
+            hint=f"  Restrict manually: swarm-prov-upload chain status {original_hash} --set restricted",
+        )
     except exceptions.ChainError as e:
         restrict_failed = True
         typer.secho(
