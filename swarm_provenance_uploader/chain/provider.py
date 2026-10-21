@@ -76,6 +76,18 @@ CHAIN_PRESETS = {
 }
 
 
+def _preset_strings() -> List[str]:
+    """Chain names and the string values of CHAIN_PRESETS: public, never redacted."""
+    strings = list(CHAIN_PRESETS)
+    for preset in CHAIN_PRESETS.values():
+        for value in preset.values():
+            if isinstance(value, str):
+                strings.append(value)
+            elif isinstance(value, (list, tuple)):
+                strings.extend(v for v in value if isinstance(v, str))
+    return strings
+
+
 class ChainProvider:
     """Provider for Web3 connections to supported EVM chains.
 
@@ -137,7 +149,7 @@ class ChainProvider:
             self._rpc_urls = [self.rpc_url]
         # Error texts can repeat parts of these URLs without the URL around
         # them (an HTML page quoting the path): remember them for redaction
-        register_url_secrets(self._rpc_urls)
+        register_url_secrets(self._rpc_urls, public=_preset_strings())
 
         if not self.contract_address:
             raise ChainConfigurationError(

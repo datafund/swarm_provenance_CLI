@@ -234,3 +234,56 @@ class TestRedactUrlNonString:
         assert redact_url(UrlObject()) == f"https://base-sepolia.g.alchemy.com/{PLACEHOLDER}"
         assert isinstance(redact_url(MagicMock()), str)
         assert ChainConnectionError("failed", rpc_url=MagicMock()).rpc_url
+
+
+class TestRegisteredSecretsDoNotOverRedact:
+    """Only credential-like URL pieces are registered; chain names and hashes survive."""
+
+    @staticmethod
+    def _provider(rpc_url):
+        """A real ChainProvider (it registers the URL secrets), with web3 mocked."""
+        from unittest.mock import MagicMock, patch
+
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        web3_cls = MagicMock()
+        web3_cls.return_value.eth.chain_id = 84532
+        with patch("swarm_provenance_uploader.chain.provider._import_web3", return_value=web3_cls):
+            return ChainProvider(chain="base-sepolia", rpc_url=rpc_url)
+
+    @pytest.mark.parametrize("rpc_url", [
+        f"https://lb.drpc.org/ogrpc?network=base-sepolia&dkey={KEY}",
+        f"https://lb.drpc.live/base-sepolia/{KEY}",
+    ], ids=["drpc-query", "drpc-path"])
+    def test_drpc_network_name_survives(self, rpc_url):
+        self._provider(rpc_url)
+        message = str(ChainConfigurationError(
+            f"No contract code at {'0x' + 'ab' * 20} on base-sepolia: wrong contract address or chain."
+        ))
+        assert message.endswith("on base-sepolia: wrong contract address or chain.")
+        echoed = redact_urls(f"Could not decode '<html>No route for {rpc_url.split('drpc.', 1)[1][3:]}</html>'")
+        assert KEY not in echoed
+        assert KEY not in redact_urls(f"invalid dkey {KEY}")
+
+    @pytest.mark.parametrize("segment", ["deadbeef", "00000000", "network", "mainnet"])
+    def test_hex_or_word_segment_not_registered(self, segment):
+        register_url_secrets([f"https://rpc.example.org/{segment}/v2"])
+        tx_hash = "0x" + segment * 8
+        assert redact_urls(f"Transaction {tx_hash} failed") == f"Transaction {tx_hash} failed"
+        assert redact_urls(f"segment {segment} alone") == f"segment {segment} alone"
+
+    def test_query_keys_never_registered(self):
+        register_url_secrets([f"https://rpc.example.org/?subscription_key1={KEY}"])
+        assert redact_urls("missing subscription_key1") == "missing subscription_key1"
+        assert KEY not in redact_urls(f"bad value {KEY}")
+
+    def test_credential_like_pieces_registered(self):
+        register_url_secrets(["https://rpc.example.org/v2/abc12345/x?token=AAAAAAAAAAAAAAAAAAA"])
+        assert redact_urls("key abc12345 rejected") == f"key {PLACEHOLDER} rejected"
+        assert redact_urls("token AAAAAAAAAAAAAAAAAAA rejected") == f"token {PLACEHOLDER} rejected"
+
+    def test_public_strings_skipped(self):
+        register_url_secrets([f"https://rpc.example.org/base-sepolia-archive1/{KEY}"],
+                             public=["https://base-sepolia-archive1.example.org"])
+        assert redact_urls("on base-sepolia-archive1") == "on base-sepolia-archive1"
+        assert KEY not in redact_urls(f"key {KEY}")

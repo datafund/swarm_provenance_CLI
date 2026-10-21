@@ -116,46 +116,84 @@ def _redact_loose(value: str) -> str:
     return f"{authority}/{PLACEHOLDER}"
 
 
-def _secret_parts(url: str) -> List[str]:
-    """The parts of a URL that may hold a credential: everything but the scheme and host."""
+def _looks_like_credential(piece: str) -> bool:
+    """True for a single path segment or query value that may be a key.
+
+    Short words such as a network name (``base-sepolia``) and hex-only or
+    digit-only strings such as ``deadbeef`` are not keys, and redacting them
+    would also cut chain names, addresses and transaction hashes.
+    """
+    if len(piece) >= 16:
+        return True
+    return (
+        len(piece) >= MIN_SECRET_LENGTH
+        and any(c.isalpha() for c in piece)
+        and any(c.isdigit() for c in piece)
+    )
+
+
+def _secret_parts(url: str) -> Tuple[List[str], List[str]]:
+    """
+    The parts of a URL that may hold a credential: everything but the scheme and host.
+
+    Returns:
+        (whole, pieces): ``whole`` holds the path with query and fragment, the
+        path, query, fragment, ``user:password`` and password, which are
+        registered when long enough. ``pieces`` holds the user name, each path
+        segment and each query value, which are registered only when they look
+        like a credential. Query keys are never returned.
+    """
     rest_of_url = _SCHEME_RE.sub("", url.strip(), count=1)
     authority, rest = re.match(r"([^/?#]*)(.*)", rest_of_url, re.DOTALL).groups()
-    parts = []
+    whole: List[str] = []
+    pieces: List[str] = []
     if "@" in authority:
         userinfo = authority.rsplit("@", 1)[0]
-        parts.append(userinfo)
-        parts.extend(userinfo.split(":", 1))
+        user, _, password = userinfo.partition(":")
+        whole.extend([userinfo, password])
+        pieces.append(user)
     if rest:
-        parts.append(rest)
         before_fragment, _, fragment = rest.partition("#")
         path, _, query = before_fragment.partition("?")
-        parts.extend([before_fragment, path, query, fragment])
-        parts.extend(path.split("/"))
+        whole.extend([rest, before_fragment, path, query, fragment])
+        pieces.extend(path.split("/"))
         for pair in query.split("&"):
-            parts.extend(pair.split("=", 1))
-    return parts
+            pieces.append(pair.partition("=")[2])
+    return whole, pieces
 
 
-def register_url_secrets(urls: Iterable[Optional[str]]) -> None:
+def register_url_secrets(urls: Iterable[Optional[str]], public: Iterable[str] = ()) -> None:
     """
     Remember the secret parts of RPC URLs, so :func:`redact_urls` removes them.
 
-    For each URL, the path, query, fragment, ``user:password``, and each path
-    segment and query value are registered, when they are at least
-    MIN_SECRET_LENGTH characters long. Their percent-encoded, decoded and
-    HTML-escaped forms are registered too. The scheme, host and port are not.
+    For each URL, the path, query, fragment, ``user:password`` and password
+    are registered when they are at least MIN_SECRET_LENGTH characters long.
+    The user name, each path segment and each query value are registered only
+    when they look like a credential: at least 16 characters, or at least
+    MIN_SECRET_LENGTH characters with both a letter and a digit. Query keys,
+    the scheme, the host and the port are never registered. Percent-encoded,
+    decoded and HTML-escaped forms are registered too.
 
     Args:
         urls: The configured RPC URLs (primary and fallbacks). None is skipped.
+        public: Strings that are not secret, such as chain names and preset
+            URLs. A part equal to one of them, or contained in one, is skipped.
     """
+    public = [p for p in public if p]
+
+    def is_public(form: str) -> bool:
+        return any(form in p for p in public)
+
     found = set()
     for url in urls:
         if not url:
             continue
-        for part in _secret_parts(url):
+        whole, pieces = _secret_parts(str(url))
+        candidates = whole + [p for p in pieces if _looks_like_credential(p)]
+        for part in candidates:
             for form in (part, unquote(part), quote(part, safe="/"), quote(part, safe=""),
                          html.escape(part)):
-                if len(form) >= MIN_SECRET_LENGTH and form.strip("/"):
+                if len(form) >= MIN_SECRET_LENGTH and form.strip("/") and not is_public(form):
                     found.add(form)
     global _secrets_sorted
     with _secrets_lock:
