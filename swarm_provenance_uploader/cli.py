@@ -1,6 +1,6 @@
 import click
 import typer
-from typing import List, Optional
+from typing import List, NoReturn, Optional
 from typing_extensions import Annotated
 from pathlib import Path
 import sys
@@ -2303,7 +2303,7 @@ def _composite_step_failed(
     output_json: bool = False,
     hint: Optional[str] = None,
     error_json: Optional[dict] = None,
-) -> None:
+) -> NoReturn:
     """Report a failed step of a composite command and exit 1.
 
     `steps` holds the results of the steps that were recorded before the
