@@ -312,3 +312,47 @@ class TestAlwaysRegisteredParts:
     def test_last_segment_that_is_a_preset_string_is_skipped(self):
         register_url_secrets(["https://rpc.example.org/base-sepolia"], public=["base-sepolia"])
         assert redact_urls("on base-sepolia") == "on base-sepolia"
+
+
+class TestCodeCheckRejection:
+    """The contract code check reports a JSON-RPC error answer as a rejection (#169)."""
+
+    @staticmethod
+    def _client():
+        from unittest.mock import MagicMock, patch
+
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        client = ChainClient.__new__(ChainClient)
+        client._contract_code_checked = False
+        client._contract = MagicMock(address="0x" + "ab" * 20)
+        client._provider = MagicMock(rpc_url=PATH_KEY_URL, chain="base-sepolia")
+        return client
+
+    def test_web3_rpc_error_is_a_rejection(self):
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        client = self._client()
+        client._provider.web3.eth.get_code.side_effect = web3_exceptions.Web3RPCError(
+            "{'code': -32601, 'message': 'method not allowed'}",
+            rpc_response={"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "method not allowed"}},
+        )
+        with pytest.raises(ChainConfigurationError) as exc_info:
+            client._check_contract_code()
+        assert not isinstance(exc_info.value, ChainConnectionError)
+        assert str(exc_info.value) == "The RPC rejected the contract code check: method not allowed"
+
+    def test_request_timed_out_stays_connection_error(self):
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        client = self._client()
+        client._provider.web3.eth.get_code.side_effect = web3_exceptions.RequestTimedOut("timed out")
+        with pytest.raises(ChainConnectionError) as exc_info:
+            client._check_contract_code()
+        assert "did not answer the contract code check" in str(exc_info.value)
+        assert KEY not in exc_info.value.rpc_url
+
+    def test_transport_failure_stays_connection_error(self):
+        client = self._client()
+        client._provider.web3.eth.get_code.side_effect = ConnectionError(f"refused: {PATH_KEY_URL}")
+        with pytest.raises(ChainConnectionError) as exc_info:
+            client._check_contract_code()
+        assert KEY not in str(exc_info.value)

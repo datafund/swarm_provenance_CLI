@@ -115,6 +115,32 @@ def _error_reason(error: Exception) -> str:
     # An exception with no arguments has an empty str(): name its class
     return str(error) or type(error).__name__
 
+
+def _rpc_rejection_message(error: Exception) -> Optional[str]:
+    """The node's message if error is a JSON-RPC error answer, else None.
+
+    A Web3RPCError means the node answered and refused the request (for
+    example "nonce too low"), so it is not a connection failure. Its
+    RequestTimedOut subclass is: the node did not answer in time.
+    """
+    try:
+        from web3 import exceptions as web3_exceptions
+    except ImportError:
+        return None
+    rpc_error = getattr(web3_exceptions, "Web3RPCError", None)
+    timed_out = getattr(web3_exceptions, "RequestTimedOut", None)
+    if not isinstance(rpc_error, type) or not isinstance(error, rpc_error):
+        return None
+    if isinstance(timed_out, type) and isinstance(error, timed_out):
+        return None
+    response = getattr(error, "rpc_response", None)
+    if isinstance(response, dict):
+        details = response.get("error")
+        if isinstance(details, dict) and details.get("message"):
+            return str(details["message"])
+    return str(error)
+
+
 class ChainClient:
     """High-level client for DataProvenance smart contract operations.
 
@@ -238,8 +264,9 @@ class ChainClient:
         nothing. Checked once per client, before the first signature.
 
         Raises:
-            ChainConfigurationError: If the address has no contract code, or
-                the code check fails for a reason other than the RPC.
+            ChainConfigurationError: If the address has no contract code, the
+                RPC rejected the check (a JSON-RPC error answer), or the check
+                fails for a reason other than the RPC.
             ChainConnectionError: If the RPC cannot be reached.
         """
         if self._contract_code_checked:
@@ -250,6 +277,12 @@ class ChainClient:
         try:
             code = self._provider.web3.eth.get_code(address)
         except Exception as e:
+            rejection = _rpc_rejection_message(e)
+            if rejection is not None:
+                # The node answered and refused: not a connection failure
+                raise ChainConfigurationError(
+                    f"The RPC rejected the contract code check: {rejection}"
+                ) from e
             if _is_rpc_failure(e):
                 # The RPC is at fault, not the contract address
                 raise ChainConnectionError(
