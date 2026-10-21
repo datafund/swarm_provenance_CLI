@@ -2710,12 +2710,51 @@ class TestWriteConfirmation:
     def test_code_check_rpc_failure_is_connection_error(self, mock_chain_deps):
         """An RPC failure while reading the code is a connection error, not a send."""
         web3 = mock_chain_deps["web3_instance"]
-        web3.eth.get_code.side_effect = Exception("rpc down")
+        web3.eth.get_code.side_effect = ConnectionError("rpc down")
         client = _write_client(mock_chain_deps, [_log("DataAccessed")])
 
         with pytest.raises(ChainConnectionError):
             client.access(swarm_hash=DUMMY_HASH)
         web3.eth.send_raw_transaction.assert_not_called()
+
+    def test_code_check_input_error_is_not_connection_error(self, mock_chain_deps):
+        """An error that is not an RPC failure is not reported as a connection error."""
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.get_code.side_effect = ValueError("invalid address")
+        client = _write_client(mock_chain_deps, [_log("DataAccessed")])
+
+        with pytest.raises(ChainConfigurationError) as exc_info:
+            client.access(swarm_hash=DUMMY_HASH)
+        assert not isinstance(exc_info.value, ChainConnectionError)
+        web3.eth.send_raw_transaction.assert_not_called()
+
+    def test_code_check_uses_checksummed_address(self, mock_chain_deps):
+        """A lowercase contract address is checked, and matched, in checksum form."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        web3 = mock_chain_deps["web3_instance"]
+        web3.to_checksum_address = (
+            lambda x: DUMMY_CONTRACT if x.lower() == DUMMY_CONTRACT.lower() else x
+        )
+        receipt = web3.eth.wait_for_transaction_receipt.return_value
+        receipt["logs"] = [_log("DataAccessed")]
+
+        client = ChainClient(chain="base-sepolia", contract_address=DUMMY_CONTRACT.lower())
+        result = client.access(swarm_hash=DUMMY_HASH)
+
+        web3.eth.get_code.assert_called_once_with(DUMMY_CONTRACT)
+        assert result.tx_hash == DUMMY_TX_HASH_BYTES.hex()
+
+    def test_rpc_failure_classification_with_web3(self):
+        """web3's RPC errors count as RPC failures; InvalidAddress does not."""
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        from swarm_provenance_uploader.core.chain_client import _is_rpc_failure
+
+        assert _is_rpc_failure(web3_exceptions.Web3RPCError("boom"))
+        assert _is_rpc_failure(web3_exceptions.ProviderConnectionError("down"))
+        assert _is_rpc_failure(ConnectionError("refused"))
+        assert not _is_rpc_failure(web3_exceptions.InvalidAddress("bad"))
+        assert not _is_rpc_failure(ValueError("bad"))
 
 
 class TestCountReceiptEventsWithWeb3:

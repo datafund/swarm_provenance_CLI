@@ -40,6 +40,26 @@ MIN_BALANCE_WEI = 100_000_000_000_000       # 0.0001 ETH — hard floor
 LOW_BALANCE_WEI = 1_000_000_000_000_000     # 0.001 ETH  — warning threshold
 
 
+def _is_rpc_failure(error: Exception) -> bool:
+    """True if an error comes from reaching the RPC, not from bad input."""
+    if isinstance(error, OSError):  # includes requests' connection errors and timeouts
+        return True
+    try:
+        from web3 import exceptions as web3_exceptions
+    except ImportError:
+        return False
+    rpc_errors = tuple(
+        cls
+        for cls in (
+            getattr(web3_exceptions, "Web3RPCError", None),
+            getattr(web3_exceptions, "ProviderConnectionError", None),
+            getattr(web3_exceptions, "TimeExhausted", None),
+        )
+        if isinstance(cls, type)
+    )
+    return bool(rpc_errors) and isinstance(error, rpc_errors)
+
+
 class ChainClient:
     """High-level client for DataProvenance smart contract operations.
 
@@ -163,16 +183,23 @@ class ChainClient:
         nothing. Checked once per client, before the first signature.
 
         Raises:
-            ChainConfigurationError: If the address has no contract code.
-            ChainConnectionError: If the code cannot be read from the RPC.
+            ChainConfigurationError: If the address has no contract code, or
+                the code check fails for a reason other than the RPC.
+            ChainConnectionError: If the RPC cannot be reached.
         """
         if self._contract_code_checked:
             return
-        address = self._provider.contract_address
+        # The checksummed address: web3 rejects a lowercase one, and the
+        # event check compares against the same value.
+        address = self._contract.address
         try:
             code = self._provider.web3.eth.get_code(address)
         except Exception as e:
-            raise ChainConnectionError(
+            if _is_rpc_failure(e):
+                raise ChainConnectionError(
+                    f"Could not check the contract code at {address}: {e}"
+                ) from e
+            raise ChainConfigurationError(
                 f"Could not check the contract code at {address}: {e}"
             ) from e
         if not code:
