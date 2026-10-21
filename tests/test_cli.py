@@ -5421,16 +5421,16 @@ class TestChainNotRecorded:
 
     def test_not_verified_output(self, mocker):
         """Events that could not be decoded are reported as not verified, not as not recorded."""
-        from swarm_provenance_uploader.exceptions import TransactionNotRecordedError
+        from swarm_provenance_uploader.exceptions import TransactionNotVerifiedError
 
-        error = TransactionNotRecordedError(
+        error = TransactionNotVerifiedError(
             f"Not verified: transaction {DUMMY_TX_HASH} was mined, but its DataAccessed events could not be verified: boom",
             tx_hash=DUMMY_TX_HASH,
             event_name="DataAccessed",
             expected_count=1,
-            emitted_count=None,
             contract_address=DUMMY_ADDRESS,
             explorer_url=DUMMY_EXPLORER_URL,
+            reason="boom",
         )
         mock_client = mocker.MagicMock()
         mock_client.access.side_effect = error
@@ -5448,7 +5448,8 @@ class TestChainNotRecorded:
         output = json.loads(result.output)
         assert output["error"] == "not_verified"
         assert output["tx_hash"] == DUMMY_TX_HASH
-        assert output["emitted_count"] is None
+        assert output["reason"] == "boom"
+        assert "emitted_count" not in output
 
 
 class TestChainCompositeNotRecorded:

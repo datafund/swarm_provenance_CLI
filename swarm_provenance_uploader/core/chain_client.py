@@ -18,6 +18,7 @@ from ..chain.exceptions import (
     ChainTransactionError,
     InsufficientFundsError,
     TransactionNotRecordedError,
+    TransactionNotVerifiedError,
     DataAlreadyRegisteredError,
     DataNotRegisteredError,
     TransformationAlreadyExistsError,
@@ -234,6 +235,8 @@ class ChainClient:
             InsufficientFundsError: If wallet balance is too low.
             TransactionNotRecordedError: If the transaction succeeded but the
                 contract did not emit expected_count expected_event events.
+            TransactionNotVerifiedError: If the transaction was mined but its
+                events could not be decoded.
             ChainTransactionError: If transaction fails.
         """
         web3 = self._provider.web3
@@ -285,15 +288,15 @@ class ChainClient:
                 emitted = self._contract.count_receipt_events(expected_event, receipt)
             except Exception as e:
                 # Mined, so not "Transaction failed": say what is unknown
-                raise TransactionNotRecordedError(
+                raise TransactionNotVerifiedError(
                     f"Not verified: transaction {tx_hash.hex()} was mined, but its "
                     f"{expected_event} events could not be verified: {e}",
                     tx_hash=tx_hash.hex(),
                     event_name=expected_event,
                     expected_count=expected_count,
-                    emitted_count=None,
                     contract_address=self._contract.address,
                     explorer_url=self._provider.get_explorer_tx_url(tx_hash.hex()),
+                    reason=str(e),
                 ) from e
             if emitted != expected_count:
                 raise TransactionNotRecordedError(

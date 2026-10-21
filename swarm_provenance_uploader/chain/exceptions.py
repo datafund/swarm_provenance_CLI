@@ -88,15 +88,11 @@ class InsufficientFundsError(ChainTransactionError):
         self.chain_name = chain_name
 
 
-class TransactionNotRecordedError(ChainTransactionError):
-    """Transaction succeeded (status 1) but the contract did not emit the expected events.
+class TransactionUnconfirmedError(ChainTransactionError):
+    """Transaction was mined (status 1), but the write is not confirmed as recorded.
 
-    The transaction was mined, so it cost gas, but the write was not recorded
-    as asked. For example, the configured address has no contract, or a batch
-    recorded fewer items than were sent.
-
-    ``emitted_count`` is None when the receipt's events could not be decoded:
-    the transaction was mined, and whether it was recorded is not known.
+    Base class for TransactionNotRecordedError and TransactionNotVerifiedError.
+    Catch the subclass to decide whether a retry is safe.
     """
 
     def __init__(
@@ -105,16 +101,78 @@ class TransactionNotRecordedError(ChainTransactionError):
         tx_hash: str = None,
         event_name: str = None,
         expected_count: int = None,
-        emitted_count: int = None,
         contract_address: str = None,
         explorer_url: str = None,
     ):
         super().__init__(message, tx_hash=tx_hash)
         self.event_name = event_name
         self.expected_count = expected_count
-        self.emitted_count = emitted_count
         self.contract_address = contract_address
         self.explorer_url = explorer_url
+
+
+class TransactionNotRecordedError(TransactionUnconfirmedError):
+    """Transaction succeeded, but the contract did not emit the expected events.
+
+    The write did not happen as asked: for example, the configured address has
+    no contract, or a batch recorded fewer items than were sent.
+    ``expected_count`` and ``emitted_count`` are always ints.
+
+    Retry: safe for the items that were not recorded, after fixing the cause
+    (contract address, chain). The transaction itself cost gas.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        tx_hash: str = None,
+        event_name: str = None,
+        expected_count: int = 0,
+        emitted_count: int = 0,
+        contract_address: str = None,
+        explorer_url: str = None,
+    ):
+        super().__init__(
+            message,
+            tx_hash=tx_hash,
+            event_name=event_name,
+            expected_count=expected_count,
+            contract_address=contract_address,
+            explorer_url=explorer_url,
+        )
+        self.emitted_count = emitted_count
+
+
+class TransactionNotVerifiedError(TransactionUnconfirmedError):
+    """Transaction was mined, but its events could not be decoded.
+
+    It is not known whether the write was recorded. ``reason`` is the decode
+    error.
+
+    Retry: NOT safe without checking first. The write may have happened, so
+    sending it again may record it twice. Check the transaction in the block
+    explorer, or read the record back, before you send it again.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        tx_hash: str = None,
+        event_name: str = None,
+        expected_count: int = None,
+        contract_address: str = None,
+        explorer_url: str = None,
+        reason: str = None,
+    ):
+        super().__init__(
+            message,
+            tx_hash=tx_hash,
+            event_name=event_name,
+            expected_count=expected_count,
+            contract_address=contract_address,
+            explorer_url=explorer_url,
+        )
+        self.reason = reason
 
 
 class TransformationAlreadyExistsError(ChainError):

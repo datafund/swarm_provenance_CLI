@@ -2677,17 +2677,23 @@ class TestWriteConfirmation:
     )
     def test_events_not_verifiable(self, mock_chain_deps, error):
         """If the events cannot be decoded, the mined tx is not reported as failed."""
-        from swarm_provenance_uploader.exceptions import TransactionNotRecordedError
+        from swarm_provenance_uploader.exceptions import (
+            TransactionNotRecordedError,
+            TransactionNotVerifiedError,
+        )
 
         client = _write_client(mock_chain_deps, [_log("DataAccessed")])
         mock_chain_deps["contract"].events.DataAccessed.return_value.process_receipt.side_effect = error
 
-        with pytest.raises(TransactionNotRecordedError) as exc_info:
+        with pytest.raises(TransactionNotVerifiedError) as exc_info:
             client.access(swarm_hash=DUMMY_HASH)
 
         err = exc_info.value
+        assert not isinstance(err, TransactionNotRecordedError)
+        assert not hasattr(err, "emitted_count")
+        assert err.reason == str(error)
         assert err.tx_hash == DUMMY_TX_HASH_BYTES.hex()
-        assert err.emitted_count is None
+        assert DUMMY_TX_HASH_BYTES.hex() in err.explorer_url
         assert err.expected_count == 1
         assert "was mined" in str(err)
         assert "could not be verified" in str(err)
@@ -2707,6 +2713,29 @@ class TestWriteConfirmation:
         err = TransactionNotRecordedError("Not recorded", tx_hash="0xab")
         assert isinstance(err, ChainTransactionError)
         assert err.tx_hash == "0xab"
+        assert isinstance(err.emitted_count, int)
+        assert isinstance(err.expected_count, int)
+
+    def test_unconfirmed_hierarchy(self):
+        """Not recorded and not verified share a base class but are told apart by type."""
+        from swarm_provenance_uploader import chain
+        from swarm_provenance_uploader.exceptions import (
+            TransactionNotRecordedError,
+            TransactionNotVerifiedError,
+            TransactionUnconfirmedError,
+        )
+
+        assert issubclass(TransactionUnconfirmedError, ChainTransactionError)
+        assert issubclass(TransactionNotRecordedError, TransactionUnconfirmedError)
+        assert issubclass(TransactionNotVerifiedError, TransactionUnconfirmedError)
+        assert not issubclass(TransactionNotVerifiedError, TransactionNotRecordedError)
+        assert not issubclass(TransactionNotRecordedError, TransactionNotVerifiedError)
+        for name in (
+            "TransactionUnconfirmedError",
+            "TransactionNotRecordedError",
+            "TransactionNotVerifiedError",
+        ):
+            assert name in chain.__all__ or not chain.BLOCKCHAIN_AVAILABLE
 
     @pytest.mark.parametrize("empty_code", [b"", bytes()])
     def test_empty_bytecode_refused_before_signing(self, mock_chain_deps, empty_code):
