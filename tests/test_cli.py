@@ -5569,7 +5569,8 @@ class TestChainCompositeNotRecorded:
 
         assert result.exit_code == 1, result.output
         output = json.loads(result.output)
-        assert output["partial_failure"] is True
+        # Partial only when an earlier step was recorded
+        assert output["partial_failure"] is (step != "anchor")
         assert output["unconfirmed"]["tx_hash"] == self.STEP_TX
         assert output["unconfirmed"]["event"] == event
         assert output["restrict"] is None

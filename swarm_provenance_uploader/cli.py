@@ -3025,7 +3025,8 @@ def chain_protect(
                 output["anchor"] = results["anchor"].model_dump()
             output["transform"] = results["transform"].model_dump() if "transform" in results else None
             output["restrict"] = None
-            output["partial_failure"] = True
+            # Partial only if an earlier step was recorded
+            output["partial_failure"] = bool(results)
             output["unconfirmed"] = _not_recorded_json(e)
             typer.echo(json.dumps(output, indent=2))
         else:
