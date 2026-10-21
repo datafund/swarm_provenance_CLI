@@ -6295,3 +6295,64 @@ class TestChainErrorRedaction:
         output = json.loads(result.output)
         assert RPC_KEY not in output["reason"]
         assert output["reason"].startswith("504 Server Error: Gateway Timeout for url: https://base-sepolia.g.alchemy.com/")
+
+
+@pytest.fixture
+def echo_rpc_server():
+    """A local "RPC" that answers HTTP 200 with an HTML page quoting the request path."""
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = f"<html><body>The requested URL {self.path} was not found</body></html>".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server.server_port
+    server.shutdown()
+    server.server_close()
+
+
+class TestChainErrorRedactionRealProvider:
+    """The real provider and web3 with RPC URLs whose errors repeat the key without a usable URL."""
+
+    @pytest.mark.parametrize("args", [
+        ["chain", "get", DUMMY_SWARM_REF],
+        ["chain", "balance", "--json"],
+    ], ids=["get", "balance-json"])
+    @pytest.mark.parametrize("kind", ["no-scheme", "htps", "body-echo"])
+    def test_key_never_shown(self, monkeypatch, echo_rpc_server, args, kind):
+        pytest.importorskip("web3")
+        rpc_url = {
+            "no-scheme": f"127.0.0.1:{echo_rpc_server}/v2/{RPC_KEY}",
+            "htps": f"htps://127.0.0.1:{echo_rpc_server}/v2/{RPC_KEY}",
+            "body-echo": f"http://127.0.0.1:{echo_rpc_server}/v2/{RPC_KEY}",
+        }[kind]
+        monkeypatch.setenv("PROVENANCE_WALLET_KEY", "0x" + "a" * 64)
+        monkeypatch.setitem(_chain_config, "chain", "base-sepolia")
+        monkeypatch.setitem(_chain_config, "rpc_url", rpc_url)
+        monkeypatch.setitem(_chain_config, "contract", None)
+        monkeypatch.setitem(_chain_config, "wallet_key_env", "PROVENANCE_WALLET_KEY")
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert "ERROR: Cannot connect to chain" in result.output
+        assert RPC_KEY not in result.output
+        if kind == "body-echo":
+            assert "The requested URL /\u2026 was not found" in result.output
+        else:
+            assert "No connection adapters were found for '" in result.output
+            assert "127.0.0.1:" in result.output

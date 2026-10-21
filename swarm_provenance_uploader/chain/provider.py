@@ -11,7 +11,7 @@ import logging
 from typing import List, Optional
 
 from .exceptions import ChainConfigurationError, ChainConnectionError
-from .redact import redact_url
+from .redact import redact_url, register_url_secrets
 from .._requirements import INSTALL_SIGNING_DEPS
 
 logger = logging.getLogger(__name__)
@@ -135,6 +135,9 @@ class ChainProvider:
         else:
             # Custom RPC with no explicit fallbacks — primary only
             self._rpc_urls = [self.rpc_url]
+        # Error texts can repeat parts of these URLs without the URL around
+        # them (an HTML page quoting the path): remember them for redaction
+        register_url_secrets(self._rpc_urls)
 
         if not self.contract_address:
             raise ChainConfigurationError(
