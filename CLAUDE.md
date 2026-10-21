@@ -40,6 +40,7 @@ All sub-branches merge into `feature/x402-support`, which only merges to `main` 
 
 - Keep commit messages focused on what changed and why
 - Use conventional commit style when appropriate
+- Follow the "Writing style" section below for tense, mood, and wording
 
 ## Version Management
 
@@ -473,12 +474,15 @@ When recalling facts that will drive actions:
 
 ## Writing style
 
-Write all communication in the style of the [Microsoft Writing Style Guide](https://learn.microsoft.com/en-us/style-guide/welcome/). This covers issues, pull requests, review and issue comments, commit messages, and documentation.
+Write all communication in the style of the [Microsoft Writing Style Guide](https://learn.microsoft.com/en-us/style-guide/welcome/). This covers issues, pull requests, review and issue comments, commit messages, documentation, and user-facing CLI text such as help text and error messages. For the rules that apply only to commits, see "Commit Messages" under "Git Workflow".
 
 - Use plain, direct language, with one idea per sentence. State what happened and why. Don't use figurative or clever phrasing.
 - Use active voice and present tense. In documentation, address the reader as "you".
+- Write commit subjects in the imperative mood, in conventional-commit style, for example "fix(download): enforce notary signatures instead of reporting them".
+- Use past tense when you describe earlier behavior, for example in bug reports and `CHANGELOG.md` entries.
 - Use sentence-case headings, and keep paragraphs short.
-- Use the exact technical terms: endpoint, flag, field and function names as they appear in the code. Define any term the reader might not know, and use one term per concept.
+- Use the exact technical terms: endpoint, flag, field, and function names as they appear in the code. Define any term the reader might not know, and use one term per concept.
+- Format exact technical names as code with backticks, for example `--usePool`, `GatewayClient`, and `PROVENANCE_GATEWAY_URL`.
 - Spell out an abbreviation the first time you use it. Don't use slang or filler.
 - Use bulleted lists for parallel items, numbered lists for steps, and tables for comparisons.
-- Say whether each claim is verified, and how, or whether it is a hypothesis.
+- When you report findings, root causes, or analysis in an issue, a pull request description, or a review comment, say for each finding whether you verified it and how. If you did not verify it, call it a hypothesis.
