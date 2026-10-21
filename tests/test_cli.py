@@ -6402,3 +6402,44 @@ class TestNonSecretUrlsKept:
 
         result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
         assert json.loads(result.output)[key] == url
+
+
+class TestJsonStdoutOnChainErrors:
+    """With --json, error and hint lines go to stderr, so stdout is empty or valid JSON."""
+
+    @staticmethod
+    def _assert_stdout_empty_or_json(result):
+        if result.stdout.strip():
+            json.loads(result.stdout)
+
+    def test_anchor_without_wallet_key(self, monkeypatch):
+        """No wallet key ("Check PROVENANCE_WALLET_KEY..."), or no blockchain extra ("Install with:")."""
+        from typer.testing import CliRunner as _Runner
+
+        monkeypatch.delenv("PROVENANCE_WALLET_KEY", raising=False)
+        monkeypatch.setitem(_chain_config, "wallet_key_env", "PROVENANCE_WALLET_KEY_UNSET_FOR_TEST")
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
+
+        assert result.exit_code == 1
+        self._assert_stdout_empty_or_json(result)
+        assert "PROVENANCE_WALLET_KEY" in result.stderr or "Install with:" in result.stderr
+
+    @pytest.mark.parametrize("args,method,error", [
+        (["chain", "transform", DUMMY_SWARM_REF, "b" * 64, "--description", "d", "--json"],
+         "transform", "DataNotRegisteredError"),
+        (["chain", "anchor", DUMMY_SWARM_REF, "--json"], "anchor", "ChainTransactionError"),
+    ], ids=["transform-not-registered", "anchor-transaction-failed"])
+    def test_hint_lines(self, mocker, args, method, error):
+        from typer.testing import CliRunner as _Runner
+
+        kwargs = {"tx_hash": DUMMY_TX_HASH} if error == "ChainTransactionError" else {}
+        mock_client = mocker.MagicMock()
+        getattr(mock_client, method).side_effect = getattr(exceptions, error)("failed", **kwargs)
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = _Runner(mix_stderr=False).invoke(app, args)
+
+        assert result.exit_code == 1
+        self._assert_stdout_empty_or_json(result)
+        assert "ERROR" in result.stderr

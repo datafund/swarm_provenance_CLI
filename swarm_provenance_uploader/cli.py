@@ -112,7 +112,7 @@ def _get_chain_client(verbose: bool = False):
             "ERROR: Blockchain dependencies not installed.",
             fg=typer.colors.RED, err=True,
         )
-        typer.echo(f"Install with: {INSTALL_SIGNING_DEPS}")
+        typer.echo(f"Install with: {INSTALL_SIGNING_DEPS}", err=True)
         raise typer.Exit(code=1)
 
     try:
@@ -126,7 +126,7 @@ def _get_chain_client(verbose: bool = False):
         )
     except exceptions.ChainConfigurationError as e:
         typer.secho(f"ERROR: Chain configuration invalid: {e}", fg=typer.colors.RED, err=True)
-        typer.echo("Check PROVENANCE_WALLET_KEY environment variable and chain settings.")
+        typer.echo("Check PROVENANCE_WALLET_KEY environment variable and chain settings.", err=True)
         raise typer.Exit(code=1)
 
 
@@ -2643,7 +2643,7 @@ def chain_anchor(
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
-            typer.echo(f"  Transaction: {e.tx_hash}")
+            typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
@@ -2701,7 +2701,7 @@ def chain_set_storage_ref(
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
-            typer.echo(f"  Transaction: {e.tx_hash}")
+            typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
@@ -2802,7 +2802,7 @@ def chain_access(
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
-            typer.echo(f"  Transaction: {e.tx_hash}")
+            typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
@@ -2871,7 +2871,7 @@ def chain_status(
         except exceptions.ChainTransactionError as e:
             typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
             if e.tx_hash:
-                typer.echo(f"  Transaction: {e.tx_hash}")
+                typer.echo(f"  Transaction: {e.tx_hash}", err=True)
             raise typer.Exit(code=1)
         except exceptions.ChainConnectionError as e:
             typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
@@ -2949,7 +2949,7 @@ def chain_transfer(
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
-            typer.echo(f"  Transaction: {e.tx_hash}")
+            typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
@@ -3013,7 +3013,7 @@ def chain_delegate(
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
-            typer.echo(f"  Transaction: {e.tx_hash}")
+            typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
@@ -3073,7 +3073,7 @@ def chain_transform(
         raise
     except exceptions.DataNotRegisteredError as e:
         typer.secho(f"ERROR: Original hash is not registered on-chain.", fg=typer.colors.RED, err=True)
-        typer.echo(f"  Anchor it first: swarm-prov-upload chain anchor {e.data_hash or original_hash}")
+        typer.echo(f"  Anchor it first: swarm-prov-upload chain anchor {e.data_hash or original_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
@@ -3084,7 +3084,7 @@ def chain_transform(
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
-            typer.echo(f"  Transaction: {e.tx_hash}")
+            typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
@@ -3169,7 +3169,7 @@ def chain_protect(
             _composite_step_failed(e, "verify", results, output_json=True)
         if isinstance(e, exceptions.DataNotRegisteredError):
             typer.secho(f"ERROR: Original hash is not registered on-chain.", fg=typer.colors.RED, err=True)
-            typer.echo(f"  Anchor it first: swarm-prov-upload chain anchor {original_hash}")
+            typer.echo(f"  Anchor it first: swarm-prov-upload chain anchor {original_hash}", err=True)
         else:
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -3279,7 +3279,7 @@ def chain_merge(
         typer.secho(f"ERROR: Source hash is not registered on-chain.", fg=typer.colors.RED, err=True)
         if e.data_hash:
             typer.echo(f"  Hash: {e.data_hash}")
-        typer.echo(f"  Anchor source hashes first: swarm-prov-upload chain anchor <hash>")
+        typer.echo(f"  Anchor source hashes first: swarm-prov-upload chain anchor <hash>", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainValidationError as e:
         typer.secho(f"ERROR: Validation failed: {e}", fg=typer.colors.RED, err=True)
@@ -3293,7 +3293,7 @@ def chain_merge(
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
-            typer.echo(f"  Transaction: {e.tx_hash}")
+            typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
