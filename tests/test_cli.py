@@ -6443,3 +6443,37 @@ class TestJsonStdoutOnChainErrors:
         assert result.exit_code == 1
         self._assert_stdout_empty_or_json(result)
         assert "ERROR" in result.stderr
+
+
+class TestUnexpectedChainErrorVerbose:
+    """An error no chain handler catches: one line by default, a redacted traceback with -v."""
+
+    def _invoke(self, mocker, args):
+        from typer.testing import CliRunner as _Runner
+
+        def fail(*a, **kw):
+            raise KeyError(f"no field in answer from {RPC_URLS_WITH_KEY[0]}")
+
+        mock_client = mocker.MagicMock()
+        mock_client.verify.side_effect = fail
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+        return _Runner(mix_stderr=False).invoke(app, args)
+
+    def test_default_is_one_line(self, mocker):
+        result = self._invoke(mocker, ["chain", "verify", DUMMY_SWARM_REF])
+        assert result.exit_code == 1
+        assert "Traceback" not in result.stderr
+        assert result.stderr.strip().count("\n") == 0
+        assert "ERROR: Chain command failed: KeyError" in result.stderr
+        assert RPC_KEY not in result.stderr
+
+    @pytest.mark.parametrize("flag", ["-v", "--verbose"])
+    def test_verbose_prints_redacted_traceback(self, mocker, flag):
+        result = self._invoke(mocker, ["chain", "verify", DUMMY_SWARM_REF, flag])
+        assert result.exit_code == 1
+        assert "Traceback (most recent call last)" in result.stderr
+        assert "in fail" in result.stderr
+        assert "KeyError" in result.stderr
+        assert "https://base-sepolia.g.alchemy.com/" in result.stderr
+        assert RPC_KEY not in result.stderr
+        assert "ERROR: Chain command failed: KeyError" in result.stderr

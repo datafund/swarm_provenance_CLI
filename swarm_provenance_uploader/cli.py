@@ -2153,13 +2153,19 @@ def _insufficient_funds_json(e: "exceptions.InsufficientFundsError") -> dict:
     return data
 
 
-def _report_unexpected_chain_error(e: Exception) -> None:
+def _report_unexpected_chain_error(e: Exception, verbose: bool = False) -> None:
     """Print an error that no chain command handles, without the RPC URL.
 
     Raw requests and web3 errors repeat the RPC URL, which can carry a
     provider API key. Uncaught, they reached the user in a traceback that
-    also lists local variables (#169).
+    also lists local variables (#169). With verbose, the traceback is
+    printed without local variables and with URLs redacted.
     """
+    if verbose:
+        import traceback
+
+        trace = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+        typer.echo(redact_urls(trace), err=True)
     try:
         from .core.chain_client import _is_rpc_failure
         rpc_failure = _is_rpc_failure(e)
@@ -2185,7 +2191,7 @@ def _chain_command(name: str):
             except (click.exceptions.Exit, click.exceptions.Abort, click.ClickException):
                 raise
             except Exception as e:
-                _report_unexpected_chain_error(e)
+                _report_unexpected_chain_error(e, verbose=bool(kwargs.get("verbose")))
                 raise typer.Exit(code=1)
         return register(wrapper)
 
