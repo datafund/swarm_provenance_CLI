@@ -95,7 +95,7 @@ def _error_reason(error: Exception) -> str:
     str() of a ContractLogicError is the (message, data) tuple, and a
     Web3RPCError's message is often the repr of the JSON-RPC error object,
     such as "{'code': -32000, 'message': 'nonce too low'}". Return only the
-    message in both cases.
+    message in both cases. Never empty: falls back to the class name.
     """
     rpc_error = (getattr(error, "rpc_response", None) or {})
     rpc_error = rpc_error.get("error") if isinstance(rpc_error, dict) else None
@@ -111,7 +111,8 @@ def _error_reason(error: Exception) -> str:
         return str(message["message"])
     if isinstance(message, str) and message:
         return message
-    return str(error)
+    # An exception with no arguments has an empty str(): name its class
+    return str(error) or type(error).__name__
 
 class ChainClient:
     """High-level client for DataProvenance smart contract operations.
@@ -314,7 +315,7 @@ class ChainClient:
                     rpc_url=self._provider.rpc_url,
                 ) from e
             # No "Transaction failed:" prefix: the CLI adds its own
-            raise ChainTransactionError(f"Could not build the transaction: {e}") from e
+            raise ChainTransactionError(f"Could not build the transaction: {_error_reason(e)}") from e
 
     def _send_transaction(
         self,

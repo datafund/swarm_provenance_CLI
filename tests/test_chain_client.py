@@ -3126,6 +3126,31 @@ class TestSendTransactionRevertReason:
 
         assert str(exc_info.value) == "Insufficient funds for gas: insufficient funds for gas * price + value"
 
+    def test_send_error_without_arguments(self, mock_chain_deps):
+        """An exception with no arguments is named, not reported as an empty message."""
+        class Boom(Exception):
+            pass
+
+        client = _write_client(mock_chain_deps, [])
+        mock_chain_deps["web3_instance"].eth.estimate_gas.side_effect = Boom()
+
+        with pytest.raises(ChainTransactionError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert str(exc_info.value) == "Boom"
+
+    def test_build_error_without_arguments(self, mock_chain_deps):
+        class Boom(Exception):
+            pass
+
+        client = _write_client(mock_chain_deps, [])
+        mock_chain_deps["contract"].functions.setDataStatus.return_value.build_transaction.side_effect = Boom()
+
+        with pytest.raises(ChainTransactionError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert str(exc_info.value) == "Could not build the transaction: Boom"
+
     def test_other_send_error_has_no_prefix(self, mock_chain_deps):
         client = _write_client(mock_chain_deps, [])
         mock_chain_deps["web3_instance"].eth.send_raw_transaction.side_effect = Exception("nonce too low")
