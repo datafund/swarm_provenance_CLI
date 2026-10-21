@@ -2949,7 +2949,7 @@ def chain_transform(
                     "transform": result.model_dump(),
                     "restrict": None,
                     "partial_failure": True,
-                    "not_recorded": _not_recorded_json(e),
+                    "unconfirmed": _not_recorded_json(e),
                 }, indent=2))
             else:
                 _handle_not_recorded(e)
@@ -3026,7 +3026,7 @@ def chain_protect(
             output["transform"] = results["transform"].model_dump() if "transform" in results else None
             output["restrict"] = None
             output["partial_failure"] = True
-            output["not_recorded"] = _not_recorded_json(e)
+            output["unconfirmed"] = _not_recorded_json(e)
             typer.echo(json.dumps(output, indent=2))
         else:
             _handle_not_recorded(e)

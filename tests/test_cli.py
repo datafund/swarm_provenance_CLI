@@ -5526,8 +5526,8 @@ class TestChainCompositeNotRecorded:
         assert output["transform"]["tx_hash"] == self.TRANSFORM_TX
         assert output["restrict"] is None
         assert output["partial_failure"] is True
-        assert output["not_recorded"]["error"] == "not_recorded"
-        assert output["not_recorded"]["tx_hash"] == self.STEP_TX
+        assert output["unconfirmed"]["error"] == "not_recorded"
+        assert output["unconfirmed"]["tx_hash"] == self.STEP_TX
 
     @pytest.mark.parametrize(
         "step,method,event,done",
@@ -5570,8 +5570,8 @@ class TestChainCompositeNotRecorded:
         assert result.exit_code == 1, result.output
         output = json.loads(result.output)
         assert output["partial_failure"] is True
-        assert output["not_recorded"]["tx_hash"] == self.STEP_TX
-        assert output["not_recorded"]["event"] == event
+        assert output["unconfirmed"]["tx_hash"] == self.STEP_TX
+        assert output["unconfirmed"]["event"] == event
         assert output["restrict"] is None
         if step == "anchor":
             assert "anchor" not in output
@@ -5582,6 +5582,30 @@ class TestChainCompositeNotRecorded:
             assert output["transform"]["tx_hash"] == self.TRANSFORM_TX
         if step == "transform":
             assert output["transform"] is None
+
+    def test_not_verified_step_json(self, mocker):
+        """A not-verified step is reported under the neutral "unconfirmed" key."""
+        from swarm_provenance_uploader.exceptions import TransactionNotVerifiedError
+
+        client = self._client(mocker)
+        client.set_status.side_effect = TransactionNotVerifiedError(
+            f"Not verified: transaction {self.STEP_TX} was mined",
+            tx_hash=self.STEP_TX,
+            event_name="DataStatusChanged",
+            expected_count=1,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=self.STEP_EXPLORER,
+            reason="boom",
+        )
+
+        for args in (self.PROTECT, self.TRANSFORM):
+            result = runner.invoke(app, args + ["--json"])
+            assert result.exit_code == 1, result.output
+            output = json.loads(result.output)
+            assert "not_recorded" not in output
+            assert output["unconfirmed"]["error"] == "not_verified"
+            assert output["unconfirmed"]["tx_hash"] == self.STEP_TX
+            assert output["partial_failure"] is True
 
     def test_protect_restrict_other_error_unchanged(self, mocker):
         """Other restrict errors keep the existing partial-success behavior (exit 0)."""
