@@ -2793,8 +2793,26 @@ class TestWriteConfirmation:
         web3.eth.get_code.side_effect = ConnectionError("rpc down")
         client = _write_client(mock_chain_deps, [_log("DataAccessed")])
 
-        with pytest.raises(ChainConnectionError):
+        with pytest.raises(ChainConnectionError) as exc_info:
             client.access(swarm_hash=DUMMY_HASH)
+        assert exc_info.value.rpc_url == client._provider.rpc_url
+        assert exc_info.value.rpc_url
+        web3.eth.send_raw_transaction.assert_not_called()
+
+    def test_code_check_non_json_response_is_connection_error(self, mock_chain_deps):
+        """An HTTP 200 page that is not JSON-RPC is blamed on the RPC, not the contract."""
+        import json as json_module
+
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.get_code.side_effect = json_module.JSONDecodeError(
+            "Expecting value", "<html>Bad gateway</html>", 0
+        )
+        client = _write_client(mock_chain_deps, [_log("DataAccessed")])
+
+        with pytest.raises(ChainConnectionError) as exc_info:
+            client.access(swarm_hash=DUMMY_HASH)
+        assert exc_info.value.rpc_url == client._provider.rpc_url
+        assert "RPC endpoint" in str(exc_info.value)
         web3.eth.send_raw_transaction.assert_not_called()
 
     def test_code_check_input_error_is_not_connection_error(self, mock_chain_deps):
@@ -2832,6 +2850,7 @@ class TestWriteConfirmation:
 
         assert _is_rpc_failure(web3_exceptions.Web3RPCError("boom"))
         assert _is_rpc_failure(web3_exceptions.ProviderConnectionError("down"))
+        assert _is_rpc_failure(web3_exceptions.BadResponseFormat("not JSON-RPC"))
         assert _is_rpc_failure(ConnectionError("refused"))
         assert not _is_rpc_failure(web3_exceptions.InvalidAddress("bad"))
         assert not _is_rpc_failure(ValueError("bad"))

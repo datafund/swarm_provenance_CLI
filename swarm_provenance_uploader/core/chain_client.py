@@ -8,6 +8,7 @@ gas estimation, signing, broadcasting, and receipt parsing.
 Requires optional dependencies (the `blockchain` extra): web3 and eth-account.
 """
 
+import json
 import logging
 from typing import List, Optional
 
@@ -45,6 +46,9 @@ def _is_rpc_failure(error: Exception) -> bool:
     """True if an error comes from reaching the RPC, not from bad input."""
     if isinstance(error, OSError):  # includes requests' connection errors and timeouts
         return True
+    if isinstance(error, json.JSONDecodeError):
+        # The endpoint answered, but not with JSON-RPC (an HTML or proxy error page)
+        return True
     try:
         from web3 import exceptions as web3_exceptions
     except ImportError:
@@ -55,6 +59,7 @@ def _is_rpc_failure(error: Exception) -> bool:
             getattr(web3_exceptions, "Web3RPCError", None),
             getattr(web3_exceptions, "ProviderConnectionError", None),
             getattr(web3_exceptions, "TimeExhausted", None),
+            getattr(web3_exceptions, "BadResponseFormat", None),
         )
         if isinstance(cls, type)
     )
@@ -197,8 +202,10 @@ class ChainClient:
             code = self._provider.web3.eth.get_code(address)
         except Exception as e:
             if _is_rpc_failure(e):
+                # The RPC is at fault, not the contract address
                 raise ChainConnectionError(
-                    f"Could not check the contract code at {address}: {e}"
+                    f"The RPC endpoint did not answer the contract code check: {e}",
+                    rpc_url=self._provider.rpc_url,
                 ) from e
             raise ChainConfigurationError(
                 f"Could not check the contract code at {address}: {e}"

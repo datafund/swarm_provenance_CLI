@@ -5620,3 +5620,24 @@ class TestChainCompositeNotRecorded:
         assert result.exit_code == 0, result.output
         assert "Protect partially complete" in result.output
         assert "Not recorded" not in result.output
+
+
+class TestChainCodeCheckRpcError:
+    """A failed contract code check that is the RPC's fault prints the RPC URL (#166)."""
+
+    def test_access_prints_rpc_url(self, mocker):
+        from swarm_provenance_uploader.exceptions import ChainConnectionError
+
+        rpc = "https://rpc.example.invalid"
+        mock_client = mocker.MagicMock()
+        mock_client.access.side_effect = ChainConnectionError(
+            "The RPC endpoint did not answer the contract code check: Expecting value",
+            rpc_url=rpc,
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1, result.output
+        assert "Cannot connect to chain" in result.output
+        assert f"RPC URL: {rpc}" in result.output
