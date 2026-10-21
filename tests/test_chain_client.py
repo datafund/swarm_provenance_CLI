@@ -2896,3 +2896,103 @@ class TestCountReceiptEventsWithWeb3:
 
         assert contract.count_receipt_events("DataAccessed", receipt) == 2
         assert contract.count_receipt_events("DataRegistered", receipt) == 0
+
+
+# Contract functions that build write transactions (build_transaction runs eth_estimateGas)
+WRITE_FUNCTIONS = [
+    "registerData", "registerDataFor", "batchRegisterData", "setStorageRef",
+    "recordTransformation", "recordAccess", "batchRecordAccess", "setDataStatus",
+    "batchSetDataStatus", "transferDataOwnership", "setDelegate",
+    "recordMergeTransformation",
+]
+
+
+class ContractLogicError(Exception):
+    """Stand-in for web3.exceptions.ContractLogicError (web3 is mocked here)."""
+
+
+class TestBuildTransactionErrors:
+    """Errors while building a write (gas estimation) become chain errors (#175)."""
+
+    def _fail_build(self, mock_chain_deps, error):
+        client = _write_client(mock_chain_deps, [])
+        for name in WRITE_FUNCTIONS:
+            getattr(mock_chain_deps["contract"].functions, name).return_value.build_transaction.side_effect = error
+        return client
+
+    @pytest.mark.parametrize("method,kwargs,event", WRITES, ids=[w[0] for w in WRITES])
+    def test_revert_in_gas_estimation(self, mock_chain_deps, method, kwargs, event):
+        client = self._fail_build(
+            mock_chain_deps, ContractLogicError("execution reverted: Not the owner")
+        )
+
+        with pytest.raises(ChainTransactionError) as exc_info:
+            getattr(client, method)(**kwargs)
+
+        assert type(exc_info.value) is ChainTransactionError
+        assert exc_info.value.tx_hash is None
+        assert "Transaction reverted: execution reverted: Not the owner" in str(exc_info.value)
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    @pytest.mark.parametrize("method,kwargs,event", WRITES, ids=[w[0] for w in WRITES])
+    def test_rpc_failure_in_gas_estimation(self, mock_chain_deps, method, kwargs, event):
+        client = self._fail_build(mock_chain_deps, ConnectionError("connection refused"))
+
+        with pytest.raises(ChainConnectionError) as exc_info:
+            getattr(client, method)(**kwargs)
+
+        assert "connection refused" in str(exc_info.value)
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    def test_insufficient_funds_in_gas_estimation(self, mock_chain_deps):
+        client = self._fail_build(
+            mock_chain_deps, Exception("insufficient funds for gas * price + value")
+        )
+
+        with pytest.raises(InsufficientFundsError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert exc_info.value.wallet_address == DUMMY_ADDRESS
+        assert exc_info.value.tx_hash is None
+
+    def test_validation_error_unchanged(self, mock_chain_deps):
+        """A chain error raised while building passes through as it is."""
+        client = _write_client(mock_chain_deps, [])
+
+        with pytest.raises(ChainValidationError):
+            client.set_status(swarm_hash="not-a-hash", status=1)
+
+    def test_anchor_already_registered_in_gas_estimation(self, mock_chain_deps):
+        """An "already registered" revert during gas estimation is still detected."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        records = iter([
+            (DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0),
+            (DUMMY_HASH_BYTES, DUMMY_ADDRESS, 1700000000, "swarm-provenance", b"\x00" * 32, [], [], 0),
+        ])
+
+        def get_data_record(data_hash):
+            call = MagicMock()
+            call.call.return_value = next(records)
+            return call
+
+        mock_chain_deps["contract"].functions.getDataRecord = get_data_record
+        mock_chain_deps["contract"].functions.registerData.return_value.build_transaction.side_effect = (
+            ContractLogicError("execution reverted: Data already registered")
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(DataAlreadyRegisteredError) as exc_info:
+            client.anchor(swarm_hash=DUMMY_HASH)
+        assert exc_info.value.owner == DUMMY_ADDRESS
+
+
+def test_is_contract_revert_with_web3_classes():
+    """The real web3 revert classes are recognized, and other errors are not."""
+    web3_exceptions = pytest.importorskip("web3.exceptions")
+    from swarm_provenance_uploader.core.chain_client import _is_contract_revert
+
+    assert _is_contract_revert(web3_exceptions.ContractLogicError("execution reverted"))
+    assert _is_contract_revert(web3_exceptions.ContractCustomError("0x1234"))
+    assert _is_contract_revert(web3_exceptions.ContractPanicError("panic"))
+    assert not _is_contract_revert(ValueError("execution reverted"))

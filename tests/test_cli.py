@@ -5849,6 +5849,46 @@ class TestChainCompositeStepFailures:
         assert protect["partial_failure"] is False
         assert transform["partial_failure"] is False
 
+    def _revert_in_gas_estimation(self, mocker, client):
+        """Run the real ChainClient.set_status with a build that reverts in eth_estimateGas."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        try:
+            from web3.exceptions import ContractLogicError
+        except ImportError:  # the [testing] extra has no web3
+            class ContractLogicError(Exception):
+                pass
+
+        inner = mocker.MagicMock()
+        inner._build_tx = lambda build, *a, **k: ChainClient._build_tx(inner, build, *a, **k)
+        inner._contract.build_set_data_status_tx.side_effect = ContractLogicError(
+            "execution reverted: Not the owner"
+        )
+        client.set_status.side_effect = lambda *a, **k: ChainClient.set_status(inner, *a, **k)
+
+    @pytest.mark.parametrize("args", [PROTECT, TRANSFORM], ids=["protect", "transform"])
+    def test_restrict_reverts_in_gas_estimation(self, mocker, args):
+        """A revert raised by building the transaction keeps the completed hashes (#175)."""
+        client = self._client(mocker)
+        self._revert_in_gas_estimation(mocker, client)
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        error_at = result.output.index("ERROR: Failed to restrict original")
+        assert "execution reverted: Not the owner" in result.output
+        assert -1 < result.output.find(self.TRANSFORM_TX) < error_at
+
+        result = runner.invoke(app, args + ["--json"])
+
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.output)
+        assert output["failed_step"] == "restrict"
+        assert output["transform"]["tx_hash"] == self.TRANSFORM_TX
+        assert output["error"]["error"] == "transaction_failed"
+        assert output["error"]["tx_hash"] is None
+
     def test_transform_without_restrict_unchanged(self, mocker):
         """Plain transform is not a composite command and keeps its output."""
         client = self._client(mocker)
