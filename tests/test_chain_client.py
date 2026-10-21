@@ -2700,6 +2700,34 @@ class TestWriteConfirmation:
         mock_chain_deps["account"].sign_transaction.assert_not_called()
         web3.eth.send_raw_transaction.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "method,kwargs",
+        [
+            ("anchor", {"swarm_hash": DUMMY_HASH}),
+            ("anchor_for", {"swarm_hash": DUMMY_HASH, "owner": DUMMY_ADDRESS}),
+        ],
+        ids=["anchor", "anchor_for"],
+    )
+    def test_anchor_empty_bytecode_reported_before_pre_read(self, mock_chain_deps, method, kwargs):
+        """anchor's duplicate pre-read does not hide the "No contract code" error."""
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.get_code.return_value = b""
+        client = _write_client(mock_chain_deps, [])
+        # What a read from an address without code does: nothing to decode
+        functions = mock_chain_deps["contract"].functions
+        functions.getDataRecord.return_value.call.side_effect = Exception(
+            "Could not decode contract function call to getDataRecord with return data: b''"
+        )
+        functions.getTransformationLinks.return_value.call.side_effect = Exception("no code")
+        functions.dataRecords.return_value.call.side_effect = Exception("no code")
+
+        with pytest.raises(ChainConfigurationError) as exc_info:
+            getattr(client, method)(**kwargs)
+
+        assert "no contract code" in str(exc_info.value).lower()
+        functions.getDataRecord.return_value.call.assert_not_called()
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+
     def test_code_check_runs_once_per_client(self, mock_chain_deps):
         """The contract code is read once, before the first write only."""
         client = _write_client(mock_chain_deps, [_log("DataAccessed")])

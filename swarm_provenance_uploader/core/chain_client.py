@@ -362,6 +362,10 @@ class ChainClient:
         """
         logger.debug("Anchor: hash=%s type=%s storage_ref=%s", swarm_hash, data_type, storage_ref)
 
+        # A read from an address without code fails with an unclear error:
+        # check the code first so the user gets "No contract code"
+        self._check_contract_code()
+
         # Pre-check: avoid wasting gas on already-registered hashes
         try:
             record = self.get(swarm_hash, verbose=verbose)
@@ -435,6 +439,10 @@ class ChainClient:
             AnchorResult with transaction details.
         """
         logger.debug("Anchor for: hash=%s owner=%s", swarm_hash, owner)
+
+        # A read from an address without code fails with an unclear error:
+        # check the code first so the user gets "No contract code"
+        self._check_contract_code()
 
         # Pre-check: avoid wasting gas on already-registered hashes
         try:
