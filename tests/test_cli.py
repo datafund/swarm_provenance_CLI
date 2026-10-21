@@ -6477,3 +6477,31 @@ class TestUnexpectedChainErrorVerbose:
         assert "https://base-sepolia.g.alchemy.com/" in result.stderr
         assert RPC_KEY not in result.stderr
         assert "ERROR: Chain command failed: KeyError" in result.stderr
+
+
+class TestMergeErrorLinesOnStderr:
+    """chain merge: the Usage line and the not-registered Hash line go to stderr with the ERROR."""
+
+    def test_usage_line(self):
+        from typer.testing import CliRunner as _Runner
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "merge", "a" * 64, "b" * 64])
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert "Usage: swarm-prov-upload chain merge" in result.stderr
+
+    def test_not_registered_hash_line(self, mocker):
+        from typer.testing import CliRunner as _Runner
+
+        mock_client = mocker.MagicMock()
+        mock_client.merge_transform.side_effect = exceptions.DataNotRegisteredError(
+            "not registered", data_hash="a" * 64
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = _Runner(mix_stderr=False).invoke(
+            app, ["chain", "merge", "a" * 64, "b" * 64, "c" * 64, "--json"]
+        )
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert f"Hash: {'a' * 64}" in result.stderr

@@ -3262,7 +3262,7 @@ def chain_merge(
             "ERROR: Need at least 3 hashes: 2+ source hashes and 1 new hash.",
             fg=typer.colors.RED, err=True,
         )
-        typer.echo("Usage: swarm-prov-upload chain merge <source1> <source2> [<source3>...] <new_hash>")
+        typer.echo("Usage: swarm-prov-upload chain merge <source1> <source2> [<source3>...] <new_hash>", err=True)
         raise typer.Exit(code=1)
 
     source_hashes = hashes[:-1]
@@ -3284,7 +3284,7 @@ def chain_merge(
     except exceptions.DataNotRegisteredError as e:
         typer.secho(f"ERROR: Source hash is not registered on-chain.", fg=typer.colors.RED, err=True)
         if e.data_hash:
-            typer.echo(f"  Hash: {e.data_hash}")
+            typer.echo(f"  Hash: {e.data_hash}", err=True)
         typer.echo(f"  Anchor source hashes first: swarm-prov-upload chain anchor <hash>", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainValidationError as e:
