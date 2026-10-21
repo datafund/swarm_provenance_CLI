@@ -6356,3 +6356,49 @@ class TestChainErrorRedactionRealProvider:
         else:
             assert "No connection adapters were found for '" in result.output
             assert "127.0.0.1:" in result.output
+
+
+class TestNonSecretUrlsKept:
+    """Guard (#169): explorer, faucet and bridge links are shown in full, not redacted."""
+
+    @pytest.mark.parametrize("error_cls", ["TransactionNotRecordedError", "TransactionNotVerifiedError"])
+    def test_explorer_url(self, mocker, error_cls):
+        error = getattr(exceptions, error_cls)(
+            "Not confirmed",
+            tx_hash=DUMMY_TX_HASH,
+            event_name="DataAccessed",
+            expected_count=1,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=DUMMY_EXPLORER_URL,
+        )
+        assert error.explorer_url == DUMMY_EXPLORER_URL
+        mock_client = mocker.MagicMock()
+        mock_client.access.side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+        assert f"Explorer:    {DUMMY_EXPLORER_URL}" in result.output
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF, "--json"])
+        assert json.loads(result.output)["explorer_url"] == DUMMY_EXPLORER_URL
+
+    @pytest.mark.parametrize("chain,key", [("base-sepolia", "faucet_url"), ("base", "bridge_url")])
+    def test_faucet_and_bridge_urls(self, mocker, chain, key):
+        from swarm_provenance_uploader.chain.provider import CHAIN_PRESETS
+
+        url = CHAIN_PRESETS[chain][key]
+        mock_client = mocker.MagicMock()
+        mock_client.anchor.side_effect = exceptions.InsufficientFundsError(
+            "Insufficient funds",
+            wallet_address=DUMMY_ADDRESS,
+            balance_wei=0,
+            estimated_cost_wei=1,
+            chain_name=chain,
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF])
+        assert url in result.output
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
+        assert json.loads(result.output)[key] == url
