@@ -94,6 +94,9 @@ class TransactionNotRecordedError(ChainTransactionError):
     The transaction was mined, so it cost gas, but the write was not recorded
     as asked. For example, the configured address has no contract, or a batch
     recorded fewer items than were sent.
+
+    ``emitted_count`` is None when the receipt's events could not be decoded:
+    the transaction was mined, and whether it was recorded is not known.
     """
 
     def __init__(

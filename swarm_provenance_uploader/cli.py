@@ -2173,37 +2173,53 @@ def _handle_insufficient_funds(
         typer.echo(f"\n  Bridge ETH to Base: {bridge}", err=True)
 
 
+def _not_recorded_json(e: "exceptions.TransactionNotRecordedError") -> dict:
+    """JSON fields for a TransactionNotRecordedError."""
+    return {
+        "error": "not_recorded" if e.emitted_count is not None else "not_verified",
+        "tx_hash": e.tx_hash,
+        "explorer_url": e.explorer_url,
+        "contract_address": e.contract_address,
+        "event": e.event_name,
+        "expected_count": e.expected_count,
+        "emitted_count": e.emitted_count,
+    }
+
+
 def _handle_not_recorded(
     e: "exceptions.TransactionNotRecordedError",
     output_json: bool = False,
 ) -> None:
     """Report a transaction that succeeded without the contract's expected events."""
+    verified = e.emitted_count is not None
     if output_json:
-        typer.echo(json.dumps({
-            "error": "not_recorded",
-            "tx_hash": e.tx_hash,
-            "explorer_url": e.explorer_url,
-            "contract_address": e.contract_address,
-            "event": e.event_name,
-            "expected_count": e.expected_count,
-            "emitted_count": e.emitted_count,
-        }, indent=2))
+        typer.echo(json.dumps(_not_recorded_json(e), indent=2))
         return
 
-    typer.secho(
-        "ERROR: Not recorded. The transaction succeeded, but the contract did not "
-        "emit the expected events.",
-        fg=typer.colors.RED, err=True,
-    )
+    if verified:
+        typer.secho(
+            "ERROR: Not recorded. The transaction succeeded, but the contract did not "
+            "emit the expected events.",
+            fg=typer.colors.RED, err=True,
+        )
+    else:
+        typer.secho(
+            "ERROR: Not verified. The transaction was mined, but its events could not "
+            "be read, so it is not known whether it was recorded. Check it in the "
+            "explorer before you try again.",
+            fg=typer.colors.RED, err=True,
+        )
+        typer.echo(f"  Reason:      {e}", err=True)
     typer.echo(f"  Transaction: {e.tx_hash}", err=True)
     if e.explorer_url:
         typer.echo(f"  Explorer:    {e.explorer_url}", err=True)
     typer.echo(f"  Contract:    {e.contract_address}", err=True)
-    typer.echo(
-        f"  Events:      {e.emitted_count} of {e.expected_count} {e.event_name}",
-        err=True,
-    )
-    typer.echo("  Check the contract address and chain before you try again.", err=True)
+    if verified:
+        typer.echo(
+            f"  Events:      {e.emitted_count} of {e.expected_count} {e.event_name}",
+            err=True,
+        )
+        typer.echo("  Check the contract address and chain before you try again.", err=True)
 
 
 @chain_app.command("balance")

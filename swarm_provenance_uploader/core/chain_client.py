@@ -281,7 +281,20 @@ class ChainClient:
 
             # Status 1 is not enough: a call to an address without the
             # contract also succeeds. Require the contract's own events.
-            emitted = self._contract.count_receipt_events(expected_event, receipt)
+            try:
+                emitted = self._contract.count_receipt_events(expected_event, receipt)
+            except Exception as e:
+                # Mined, so not "Transaction failed": say what is unknown
+                raise TransactionNotRecordedError(
+                    f"Not verified: transaction {tx_hash.hex()} was mined, but its "
+                    f"{expected_event} events could not be verified: {e}",
+                    tx_hash=tx_hash.hex(),
+                    event_name=expected_event,
+                    expected_count=expected_count,
+                    emitted_count=None,
+                    contract_address=self._contract.address,
+                    explorer_url=self._provider.get_explorer_tx_url(tx_hash.hex()),
+                ) from e
             if emitted != expected_count:
                 raise TransactionNotRecordedError(
                     f"Not recorded: transaction {tx_hash.hex()} succeeded, but the "

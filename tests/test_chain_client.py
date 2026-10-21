@@ -2670,6 +2670,29 @@ class TestWriteConfirmation:
         assert exc_info.value.expected_count == 3
         assert exc_info.value.emitted_count == 2
 
+    @pytest.mark.parametrize(
+        "error",
+        [Exception("could not decode log"), AttributeError("no event DataAccessed in the ABI")],
+        ids=["decode_error", "event_missing_from_abi"],
+    )
+    def test_events_not_verifiable(self, mock_chain_deps, error):
+        """If the events cannot be decoded, the mined tx is not reported as failed."""
+        from swarm_provenance_uploader.exceptions import TransactionNotRecordedError
+
+        client = _write_client(mock_chain_deps, [_log("DataAccessed")])
+        mock_chain_deps["contract"].events.DataAccessed.return_value.process_receipt.side_effect = error
+
+        with pytest.raises(TransactionNotRecordedError) as exc_info:
+            client.access(swarm_hash=DUMMY_HASH)
+
+        err = exc_info.value
+        assert err.tx_hash == DUMMY_TX_HASH_BYTES.hex()
+        assert err.emitted_count is None
+        assert err.expected_count == 1
+        assert "was mined" in str(err)
+        assert "could not be verified" in str(err)
+        assert "Transaction failed" not in str(err)
+
     def test_full_batch_succeeds(self, mock_chain_deps):
         """A batch with one event per item succeeds."""
         hashes = [DUMMY_HASH, "b" * 64, "c" * 64]

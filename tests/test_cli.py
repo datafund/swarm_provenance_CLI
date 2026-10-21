@@ -5418,3 +5418,34 @@ class TestChainNotRecorded:
         assert output["explorer_url"] == DUMMY_EXPLORER_URL
         assert output["expected_count"] == 1
         assert output["emitted_count"] == 0
+
+    def test_not_verified_output(self, mocker):
+        """Events that could not be decoded are reported as not verified, not as not recorded."""
+        from swarm_provenance_uploader.exceptions import TransactionNotRecordedError
+
+        error = TransactionNotRecordedError(
+            f"Not verified: transaction {DUMMY_TX_HASH} was mined, but its DataAccessed events could not be verified: boom",
+            tx_hash=DUMMY_TX_HASH,
+            event_name="DataAccessed",
+            expected_count=1,
+            emitted_count=None,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=DUMMY_EXPLORER_URL,
+        )
+        mock_client = mocker.MagicMock()
+        mock_client.access.side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+        assert result.exit_code == 1, result.output
+        assert "Not verified" in result.output
+        assert "Not recorded." not in result.output
+        assert DUMMY_TX_HASH in result.output
+        assert DUMMY_EXPLORER_URL in result.output
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF, "--json"])
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.output)
+        assert output["error"] == "not_verified"
+        assert output["tx_hash"] == DUMMY_TX_HASH
+        assert output["emitted_count"] is None
