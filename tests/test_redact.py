@@ -287,3 +287,28 @@ class TestRegisteredSecretsDoNotOverRedact:
                              public=["https://base-sepolia-archive1.example.org"])
         assert redact_urls("on base-sepolia-archive1") == "on base-sepolia-archive1"
         assert KEY not in redact_urls(f"key {KEY}")
+
+
+class TestAlwaysRegisteredParts:
+    """The last path segment and credential-named query values are registered whatever their shape."""
+
+    TOKEN = "abcdefghijklmno"
+
+    @pytest.mark.parametrize("url", [
+        f"https://rpc.example.org/rpc/{TOKEN}",
+        f"https://rpc.example.org/rpc/{TOKEN}/",
+        f"https://rpc.example.org/?apikey={TOKEN}",
+        f"https://rpc.example.org/?API_KEY={TOKEN}",
+        f"https://rpc.example.org/?network=base&Access_Token={TOKEN}",
+    ])
+    def test_short_letters_only_token(self, url):
+        register_url_secrets([url])
+        assert redact_urls(f"invalid api key: {self.TOKEN}") == f"invalid api key: {PLACEHOLDER}"
+
+    def test_other_query_values_still_need_a_key_shape(self):
+        register_url_secrets([f"https://rpc.example.org/?region={self.TOKEN}"])
+        assert redact_urls(f"region {self.TOKEN}") == f"region {self.TOKEN}"
+
+    def test_last_segment_that_is_a_preset_string_is_skipped(self):
+        register_url_secrets(["https://rpc.example.org/base-sepolia"], public=["base-sepolia"])
+        assert redact_urls("on base-sepolia") == "on base-sepolia"

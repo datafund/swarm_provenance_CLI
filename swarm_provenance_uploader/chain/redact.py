@@ -132,16 +132,26 @@ def _looks_like_credential(piece: str) -> bool:
     )
 
 
+# Query parameter names whose value is a credential, whatever it looks like
+_CREDENTIAL_PARAMS = frozenset({
+    "key", "apikey", "api_key", "api-key", "token", "access_token", "accesstoken",
+    "dkey", "auth", "secret", "password",
+})
+
+
 def _secret_parts(url: str) -> Tuple[List[str], List[str]]:
     """
     The parts of a URL that may hold a credential: everything but the scheme and host.
 
     Returns:
         (whole, pieces): ``whole`` holds the path with query and fragment, the
-        path, query, fragment, ``user:password`` and password, which are
-        registered when long enough. ``pieces`` holds the user name, each path
-        segment and each query value, which are registered only when they look
-        like a credential. Query keys are never returned.
+        path, query, fragment, ``user:password``, password, the last non-empty
+        path segment (where providers put the key) and the values of
+        credential-named query parameters (``apikey=``, ``token=`` and so on).
+        These are registered when long enough, whatever they look like.
+        ``pieces`` holds the user name, the other path segments and the other
+        query values, which are registered only when they look like a
+        credential. Query keys are never returned.
     """
     rest_of_url = _SCHEME_RE.sub("", url.strip(), count=1)
     authority, rest = re.match(r"([^/?#]*)(.*)", rest_of_url, re.DOTALL).groups()
@@ -156,9 +166,16 @@ def _secret_parts(url: str) -> Tuple[List[str], List[str]]:
         before_fragment, _, fragment = rest.partition("#")
         path, _, query = before_fragment.partition("?")
         whole.extend([rest, before_fragment, path, query, fragment])
-        pieces.extend(path.split("/"))
+        segments = [seg for seg in path.split("/") if seg]
+        if segments:
+            whole.append(segments[-1])
+            pieces.extend(segments[:-1])
         for pair in query.split("&"):
-            pieces.append(pair.partition("=")[2])
+            name, _, value = pair.partition("=")
+            if unquote(name).strip().lower() in _CREDENTIAL_PARAMS:
+                whole.append(value)
+            else:
+                pieces.append(value)
     return whole, pieces
 
 
@@ -166,10 +183,13 @@ def register_url_secrets(urls: Iterable[Optional[str]], public: Iterable[str] = 
     """
     Remember the secret parts of RPC URLs, so :func:`redact_urls` removes them.
 
-    For each URL, the path, query, fragment, ``user:password`` and password
-    are registered when they are at least MIN_SECRET_LENGTH characters long.
-    The user name, each path segment and each query value are registered only
-    when they look like a credential: at least 16 characters, or at least
+    For each URL, the path, query, fragment, ``user:password``, password, last
+    non-empty path segment, and the values of credential-named query
+    parameters (key, apikey, api_key, api-key, token, access_token,
+    accesstoken, dkey, auth, secret, password) are registered when they are at
+    least MIN_SECRET_LENGTH characters long. The user name, the other path
+    segments and the other query values are registered only when they look
+    like a credential: at least 16 characters, or at least
     MIN_SECRET_LENGTH characters with both a letter and a digit. Query keys,
     the scheme, the host and the port are never registered. Percent-encoded,
     decoded and HTML-escaped forms are registered too.

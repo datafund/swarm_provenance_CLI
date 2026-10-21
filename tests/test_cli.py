@@ -6540,3 +6540,63 @@ class TestRpcRejectionIsNotConnectionError:
         result = self._invoke(mocker, web3_exceptions.RequestTimedOut("timed out"))
         assert result.exit_code == 1
         assert "ERROR: Cannot connect to chain: timed out" in result.output
+
+
+SHORT_TOKEN = "abcdefghijklmno"  # 15 letters, no digit: not "credential-like" by shape alone
+
+
+@pytest.fixture
+def token_echo_rpc_server():
+    """A local RPC that answers every call with a JSON-RPC error quoting only the bare token."""
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            body = json.dumps({
+                "jsonrpc": "2.0",
+                "id": request.get("id", 1) if isinstance(request, dict) else 1,
+                "error": {"code": -32001, "message": f"invalid api key: {SHORT_TOKEN}"},
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server.server_port
+    server.shutdown()
+    server.server_close()
+
+
+class TestShortTokenEcho:
+    """A short letters-only key in the last path segment or a credential-named query value."""
+
+    @pytest.mark.parametrize("args", [
+        ["chain", "get", DUMMY_SWARM_REF],
+        ["chain", "balance", "--json"],
+    ], ids=["get", "balance-json"])
+    @pytest.mark.parametrize("form", ["path", "query"])
+    def test_bare_token_echo_is_redacted(self, monkeypatch, token_echo_rpc_server, args, form):
+        pytest.importorskip("web3")
+        base = f"http://127.0.0.1:{token_echo_rpc_server}"
+        rpc_url = f"{base}/rpc/{SHORT_TOKEN}" if form == "path" else f"{base}/?apikey={SHORT_TOKEN}"
+        monkeypatch.setenv("PROVENANCE_WALLET_KEY", "0x" + "a" * 64)
+        monkeypatch.setitem(_chain_config, "chain", "base-sepolia")
+        monkeypatch.setitem(_chain_config, "contract", None)
+        monkeypatch.setitem(_chain_config, "wallet_key_env", "PROVENANCE_WALLET_KEY")
+        monkeypatch.setitem(_chain_config, "rpc_url", _chain_config["rpc_url"])
+
+        result = runner.invoke(app, ["--chain-rpc", rpc_url] + args)
+
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert "invalid api key: …" in result.output
+        assert SHORT_TOKEN not in result.output
