@@ -2919,6 +2919,14 @@ class ContractLogicError(Exception):
         self.data = data
 
 
+class Web3RPCError(Exception):
+    """Stand-in for web3.exceptions.Web3RPCError: the node answered with an error."""
+
+    def __init__(self, message):
+        super().__init__(message)
+        self.message = message
+
+
 class TestBuildTransactionErrors:
     """Errors while building a write (gas estimation) become chain errors (#175)."""
 
@@ -2945,12 +2953,29 @@ class TestBuildTransactionErrors:
 
     @pytest.mark.parametrize("method,kwargs,event", WRITES, ids=[w[0] for w in WRITES])
     def test_rpc_failure_in_gas_estimation(self, mock_chain_deps, method, kwargs, event):
-        client = self._fail_build(mock_chain_deps, ConnectionError("connection refused"))
+        import requests
+
+        client = self._fail_build(
+            mock_chain_deps, requests.exceptions.ConnectionError("connection refused")
+        )
 
         with pytest.raises(ChainConnectionError) as exc_info:
             getattr(client, method)(**kwargs)
 
         assert "connection refused" in str(exc_info.value)
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    @pytest.mark.parametrize("method,kwargs,event", WRITES, ids=[w[0] for w in WRITES])
+    def test_rpc_rejection_in_gas_estimation(self, mock_chain_deps, method, kwargs, event):
+        """A JSON-RPC error answer is a rejected transaction, not a connection failure."""
+        client = self._fail_build(mock_chain_deps, Web3RPCError("nonce too low"))
+
+        with pytest.raises(ChainTransactionError) as exc_info:
+            getattr(client, method)(**kwargs)
+
+        assert type(exc_info.value) is ChainTransactionError
+        assert exc_info.value.tx_hash is None
+        assert str(exc_info.value) == "The RPC rejected the transaction: nonce too low"
         mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
 
     def test_insufficient_funds_in_gas_estimation(self, mock_chain_deps):
@@ -3022,3 +3047,31 @@ def test_build_tx_revert_reason_with_web3_class():
 
     assert "Not owner" in str(exc_info.value)
     assert "0x08c379a0" not in str(exc_info.value)
+
+
+def test_build_tx_rpc_errors_with_web3_classes():
+    """With the real web3 classes, a JSON-RPC error is a rejection and a transport error is not."""
+    web3_exceptions = pytest.importorskip("web3.exceptions")
+    from swarm_provenance_uploader.core.chain_client import ChainClient
+
+    def failing(error):
+        def build():
+            raise error
+        return build
+
+    rejection = web3_exceptions.Web3RPCError(
+        "nonce too low", rpc_response={"error": {"code": -32000, "message": "nonce too low"}}
+    )
+    with pytest.raises(ChainTransactionError) as exc_info:
+        ChainClient._build_tx(MagicMock(), failing(rejection))
+    assert type(exc_info.value) is ChainTransactionError
+    assert "The RPC rejected the transaction: nonce too low" in str(exc_info.value)
+
+    for transport in (
+        web3_exceptions.ProviderConnectionError("refused"),
+        web3_exceptions.TimeExhausted("timeout"),
+        web3_exceptions.BadResponseFormat("bad"),
+        json.JSONDecodeError("Expecting value", "<html>", 0),
+    ):
+        with pytest.raises(ChainConnectionError):
+            ChainClient._build_tx(MagicMock(), failing(transport))

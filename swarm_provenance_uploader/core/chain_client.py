@@ -76,6 +76,15 @@ def _is_contract_revert(error: Exception) -> bool:
     """
     return any(cls.__name__ == "ContractLogicError" for cls in type(error).__mro__)
 
+
+def _is_rpc_rejection(error: Exception) -> bool:
+    """True if the node answered with a JSON-RPC error (web3 Web3RPCError).
+
+    The connection worked; the node refused the request, for example
+    "nonce too low". Matched by class name, like _is_contract_revert.
+    """
+    return any(cls.__name__ == "Web3RPCError" for cls in type(error).__mro__)
+
 class ChainClient:
     """High-level client for DataProvenance smart contract operations.
 
@@ -237,9 +246,10 @@ class ChainClient:
 
         Raises:
             InsufficientFundsError: If the RPC reports insufficient funds.
-            ChainTransactionError: If the contract reverts, or building fails
-                for another reason.
-            ChainConnectionError: If the RPC cannot be reached.
+            ChainTransactionError: If the contract reverts, the RPC answers
+                with a JSON-RPC error, or building fails for another reason.
+            ChainConnectionError: If the RPC cannot be reached or its answer
+                is not JSON-RPC.
         """
         try:
             return build(*args, **kwargs)
@@ -263,7 +273,13 @@ class ChainClient:
                     estimated_cost_wei=0,
                     chain_name=self._provider.chain,
                 ) from e
+            if _is_rpc_rejection(e):
+                # Checked before _is_rpc_failure, which also counts a JSON-RPC
+                # error answer as an RPC failure
+                reason = getattr(e, "message", None) or str(e)
+                raise ChainTransactionError(f"The RPC rejected the transaction: {reason}") from e
             if _is_rpc_failure(e):
+                # Transport only: connection, timeout, or an answer that is not JSON-RPC
                 raise ChainConnectionError(
                     f"The RPC endpoint failed while building the transaction: {e}",
                     rpc_url=self._provider.rpc_url,
