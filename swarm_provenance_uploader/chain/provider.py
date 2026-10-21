@@ -11,6 +11,7 @@ import logging
 from typing import List, Optional
 
 from .exceptions import ChainConfigurationError, ChainConnectionError
+from .redact import redact_url
 from .._requirements import INSTALL_SIGNING_DEPS
 
 logger = logging.getLogger(__name__)
@@ -201,8 +202,8 @@ class ChainProvider:
                 if candidate.is_connected():
                     logger.info(
                         "RPC fallback: switched from %s to %s",
-                        self.rpc_url,
-                        url,
+                        redact_url(self.rpc_url),
+                        redact_url(url),
                     )
                     self._web3 = candidate
                     self.rpc_url = url
@@ -226,7 +227,7 @@ class ChainProvider:
             try:
                 if not self._web3.is_connected():
                     raise ChainConnectionError(
-                        f"Cannot connect to RPC endpoint: {self.rpc_url}",
+                        f"Cannot connect to RPC endpoint: {redact_url(self.rpc_url)}",
                         rpc_url=self.rpc_url,
                     )
                 actual_chain_id = self._web3.eth.chain_id

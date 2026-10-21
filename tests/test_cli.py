@@ -6151,3 +6151,147 @@ class TestChainCodeCheckRpcError:
         assert result.exit_code == 1, result.output
         assert "Cannot connect to chain" in result.output
         assert f"RPC URL: {rpc}" in result.output
+
+
+# RPC URL redaction in chain error output (#169)
+
+RPC_KEY = "SECRETKEYSECRETKEY"
+RPC_URLS_WITH_KEY = [
+    f"https://base-sepolia.g.alchemy.com/v2/{RPC_KEY}",
+    f"https://rpc.example.org/base?apikey={RPC_KEY}",
+    f"https://rpcuser:{RPC_KEY}@rpc.example.org",
+]
+RPC_URL_IDS = ["path", "query", "basic-auth"]
+RPC_HOST = {0: "https://base-sepolia.g.alchemy.com/", 1: "https://rpc.example.org/", 2: "https://rpc.example.org/"}
+
+# (command line, client method that raises)
+CHAIN_COMMANDS = [
+    (["chain", "balance"], "balance"),
+    (["chain", "balance", "--json"], "balance"),
+    (["chain", "get", DUMMY_SWARM_REF], "get"),
+    (["chain", "get", DUMMY_SWARM_REF, "--json"], "get"),
+    (["chain", "anchor", DUMMY_SWARM_REF], "anchor"),
+    (["chain", "anchor", DUMMY_SWARM_REF, "--json"], "anchor"),
+    (["chain", "access", DUMMY_SWARM_REF, "--json"], "access"),
+]
+CHAIN_COMMAND_IDS = [" ".join(c[0][1:]).replace(DUMMY_SWARM_REF, "<hash>") for c in CHAIN_COMMANDS]
+
+
+class TestChainErrorRedaction:
+    """Chain error output never shows the path, query or credentials of the RPC URL."""
+
+    @pytest.mark.parametrize("args,method", CHAIN_COMMANDS, ids=CHAIN_COMMAND_IDS)
+    @pytest.mark.parametrize("url_index", range(3), ids=RPC_URL_IDS)
+    def test_connection_error_from_code_check(self, mocker, args, method, url_index):
+        """The ChainConnectionError of the contract code check (#166): message and RPC URL line."""
+        rpc_url = RPC_URLS_WITH_KEY[url_index]
+        error = exceptions.ChainConnectionError(
+            "The RPC endpoint did not answer the contract code check: "
+            f"401 Client Error: Unauthorized for url: {rpc_url}",
+            rpc_url=rpc_url,
+        )
+        mock_client = mocker.MagicMock()
+        getattr(mock_client, method).side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        assert RPC_KEY not in result.output
+        assert "ERROR: Cannot connect to chain" in result.output
+        assert "401 Client Error: Unauthorized" in result.output
+        assert f"RPC URL: {RPC_HOST[url_index]}" in result.output
+
+    @pytest.mark.parametrize("args,method", CHAIN_COMMANDS, ids=CHAIN_COMMAND_IDS)
+    def test_raw_rpc_error(self, mocker, args, method):
+        """A requests error that no handler wrapped: it was an uncaught traceback with the URL."""
+        import requests
+
+        mock_client = mocker.MagicMock()
+        getattr(mock_client, method).side_effect = requests.exceptions.HTTPError(
+            f"429 Client Error: Too Many Requests for url: {RPC_URLS_WITH_KEY[0]}"
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert RPC_KEY not in result.output
+        assert "ERROR: Cannot connect to chain: 429 Client Error: Too Many Requests" in result.output
+        assert "https://base-sepolia.g.alchemy.com/" in result.output
+
+    def test_raw_connection_error_path_only(self, mocker):
+        """urllib3's "Max retries exceeded with url: /v2/<key>" has no scheme or host."""
+        import requests
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.side_effect = requests.exceptions.ConnectionError(
+            "HTTPSConnectionPool(host='base-sepolia.g.alchemy.com', port=443): Max retries "
+            f"exceeded with url: /v2/{RPC_KEY} (Caused by NewConnectionError('refused'))"
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "get", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1, result.output
+        assert RPC_KEY not in result.output
+        assert "base-sepolia.g.alchemy.com" in result.output
+
+    def test_unexpected_error_is_not_a_traceback(self, mocker):
+        """An error that is not an RPC failure exits 1 with its redacted text."""
+        mock_client = mocker.MagicMock()
+        mock_client.verify.side_effect = ValueError(f"bad answer from {RPC_URLS_WITH_KEY[1]}")
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert RPC_KEY not in result.output
+        assert "ERROR: Chain command failed: ValueError: bad answer from https://rpc.example.org/" in result.output
+
+    def test_json_stdout_has_no_error_text(self, mocker):
+        """With --json, the error and the RPC URL line go to stderr, not into the JSON stream."""
+        from typer.testing import CliRunner as _Runner
+
+        error = exceptions.ChainConnectionError("RPC health check failed", rpc_url=RPC_URLS_WITH_KEY[0])
+        mock_client = mocker.MagicMock()
+        mock_client.balance.side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "balance", "--json"])
+
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert "RPC URL: https://base-sepolia.g.alchemy.com/" in result.stderr
+        assert RPC_KEY not in result.stderr
+
+    def test_not_verified_reason(self, mocker):
+        """The "reason" of a not-verified write, in text and in --json."""
+        from swarm_provenance_uploader.exceptions import TransactionNotVerifiedError
+
+        reason = f"504 Server Error: Gateway Timeout for url: {RPC_URLS_WITH_KEY[0]}"
+        error = TransactionNotVerifiedError(
+            f"Not verified: {reason}",
+            tx_hash=DUMMY_TX_HASH,
+            event_name="DataAccessed",
+            expected_count=1,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=DUMMY_EXPLORER_URL,
+            reason=reason,
+        )
+        mock_client = mocker.MagicMock()
+        mock_client.access.side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+        assert result.exit_code == 1, result.output
+        assert RPC_KEY not in result.output
+        assert "504 Server Error: Gateway Timeout" in result.output
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF, "--json"])
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.output)
+        assert RPC_KEY not in output["reason"]
+        assert output["reason"].startswith("504 Server Error: Gateway Timeout for url: https://base-sepolia.g.alchemy.com/")

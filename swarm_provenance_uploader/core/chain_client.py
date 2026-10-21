@@ -14,6 +14,7 @@ import logging
 from typing import List, Optional
 
 from ..chain.contract import DataStatus
+from ..chain.redact import redact_url, redact_urls
 from ..chain.exceptions import (
     ChainError,
     ChainConfigurationError,
@@ -762,7 +763,7 @@ class ChainClient:
             except TransformationAlreadyExistsError:
                 raise
             except Exception as e:
-                logger.warning("State-based duplicate check failed: %s", e)
+                logger.warning("State-based duplicate check failed: %s", redact_urls(str(e)))
         else:
             deploy_block = self._provider.deploy_block
             if deploy_block is not None:
@@ -787,7 +788,7 @@ class ChainClient:
                 except TransformationAlreadyExistsError:
                     raise
                 except Exception as e:
-                    logger.warning("Duplicate check failed, proceeding: %s", e)
+                    logger.warning("Duplicate check failed, proceeding: %s", redact_urls(str(e)))
 
         tx = self._build_tx(
             self._contract.build_record_transformation_tx,
@@ -1243,7 +1244,7 @@ class ChainClient:
         logger.debug(
             "Chain health check: chain=%s rpc=%s",
             self._provider.chain,
-            self._provider.rpc_url,
+            redact_url(self._provider.rpc_url),
         )
 
         result = self._provider.health_check()
@@ -1312,7 +1313,7 @@ class ChainClient:
             except Exception as e:
                 logger.warning(
                     "Full event scan failed, falling back to per-node queries: %s",
-                    e,
+                    redact_urls(str(e)),
                 )
 
         chain = []
@@ -1356,7 +1357,7 @@ class ChainClient:
                     logger.warning(
                         "State-based forward read failed for %s: %s",
                         current_hash,
-                        e,
+                        redact_urls(str(e)),
                     )
                 # Reverse: parents via state
                 try:
@@ -1369,7 +1370,7 @@ class ChainClient:
                     logger.warning(
                         "State-based reverse read failed for %s: %s",
                         current_hash,
-                        e,
+                        redact_urls(str(e)),
                     )
             elif use_local_index:
                 # V1 contract: use pre-built event cache index
@@ -1408,7 +1409,7 @@ class ChainClient:
                     if enriched:
                         record.transformations = enriched
                 except Exception as e:
-                    logger.warning("Event query failed for %s: %s", current_hash, e)
+                    logger.warning("Event query failed for %s: %s", current_hash, redact_urls(str(e)))
                     for t in record.transformations:
                         if t.new_data_hash and t.new_data_hash not in visited:
                             to_visit.append((t.new_data_hash, current_depth + 1))
@@ -1427,7 +1428,7 @@ class ChainClient:
                     logger.warning(
                         "Reverse event query failed for %s: %s",
                         current_hash,
-                        e,
+                        redact_urls(str(e)),
                     )
 
             chain.append(record)
