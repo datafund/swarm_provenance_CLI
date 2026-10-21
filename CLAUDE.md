@@ -8,11 +8,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Never use `upstream` for issues, PRs, or any GitHub operations
 - When running `gh` commands, always specify `--repo datafund/swarm_provenance_CLI`
 
-## Git Workflow
+## Git workflow
 
 **IMPORTANT**: Always create a feature branch before making changes. Never commit directly to `main`.
 
-### x402 Feature Development (Active)
+### x402 feature development (active)
 
 **DO NOT MERGE `feature/x402-support` TO `main` UNTIL EXPLICITLY AGREED WITH USER.**
 
@@ -25,16 +25,16 @@ The x402 implementation uses a branching strategy:
 
 All sub-branches merge into `feature/x402-support`, which only merges to `main` after explicit approval.
 
-### Branch Naming
-- `fix/` - Bug fixes (e.g., `fix/stamp-usability-check`)
-- `feature/` - New features (e.g., `feature/add-stamp-purchase-command`)
-- `docs/` - Documentation only (e.g., `docs/update-readme`)
+### Branch naming
+- `fix/` - Bug fixes (for example, `fix/stamp-usability-check`)
+- `feature/` - New features (for example, `feature/add-stamp-purchase-command`)
+- `docs/` - Documentation only (for example, `docs/update-readme`)
 
 ### Secrets
 - Never commit keys, `.env*` files or per-developer editor settings (`.claude/settings.local.json` is ignored). CI's secret scan (gitleaks, `.gitleaks.toml`) fails the build on a finding.
-- A false positive (e.g. a variable *named* like a key) is allowed with a trailing `# gitleaks:allow` comment on that line, never by weakening the rules.
+- A false positive (for example, a variable *named* like a key) is allowed with a trailing `# gitleaks:allow` comment on that line, never by weakening the rules.
 
-### Commit Messages
+### Commit messages
 
 **CRITICAL: NEVER mention "Claude", "AI", "Generated with", "Co-Authored-By: Claude", or any AI attribution in commits, PRs, or issues. This is a strict requirement - no exceptions.**
 
@@ -42,38 +42,38 @@ All sub-branches merge into `feature/x402-support`, which only merges to `main` 
 - Use conventional commit style when appropriate
 - Follow the "Writing style" section below for tense, mood, and wording
 
-## Version Management
+## Version management
 
 **IMPORTANT**: Increment the version number with each change that modifies functionality.
 
-### Version Location
+### Version location
 - Single source: `__version_base__` in `swarm_provenance_uploader/__init__.py`
 - `pyproject.toml` reads it (`dynamic = ["version"]`, `[tool.setuptools.dynamic]`); do not add a `version` field there
 
-### Version Format
+### Version format
 Uses semantic versioning with optional git hash: `MAJOR.MINOR.PATCH[+git.SHORT_HASH]`
 
 - **Release versions**: `0.1.0`, `1.0.0` (clean semver, tagged `vX.Y.Z`; the package is installed from git tags, not PyPI)
 - **Development versions**: `0.1.1+git.abc1234` (includes git hash for traceability)
 
-### When to Increment
+### When to increment
 - **PATCH** (0.0.X): Bug fixes, documentation updates, minor improvements
 - **MINOR** (0.X.0): New features, new CLI commands, new API endpoints
 - **MAJOR** (X.0.0): Breaking changes, incompatible API changes
 
-### How to Update Version
+### How to update version
 1. Update `__version_base__` in `swarm_provenance_uploader/__init__.py`
 2. Add the release to `CHANGELOG.md`
 3. The git hash suffix is added automatically at runtime (see below)
 
-## Project Overview
+## Project overview
 
 The Swarm Provenance Uploader is a Python CLI toolkit that wraps provenance data files within metadata structures and uploads them to the Swarm decentralized storage network. It supports two backends:
 
 - **Gateway** (default): Uses `provenance-gateway.datafund.io` - no local Bee node required
 - **Local**: Direct Bee node communication for development/self-hosted setups
 
-## Development Commands
+## Development commands
 
 ### Setup
 ```bash
@@ -104,7 +104,7 @@ pytest -m integration  # All integration tests
 RUN_LIVE_TESTS=1 pytest tests/test_examples.py -m integration  # Live example demos (upload real data)
 ```
 
-### CLI Usage
+### CLI usage
 ```bash
 # Check version
 swarm-prov-upload --version
@@ -207,7 +207,7 @@ swarm-prov-upload upload-collection /path/to/directory --redundancy          # W
 
 ## Architecture
 
-### Core Workflow
+### Core workflow
 The application follows a modular architecture with clear separation of concerns:
 
 1. **CLI Layer** (`cli.py`): Typer-based command interface with commands for upload, download, stamps, wallet, health, x402
@@ -231,7 +231,7 @@ The application follows a modular architecture with clear separation of concerns
 5. **Exceptions** (`exceptions.py`): Custom exception hierarchy for unified error handling
 6. **Configuration** (`config.py`): Environment-based configuration management
 
-### Backend Clients
+### Backend clients
 
 **GatewayClient** (`core/gateway_client.py`):
 - Default backend, requires no local infrastructure
@@ -262,7 +262,7 @@ The application follows a modular architecture with clear separation of concerns
 - Duplicate transformation pre-checks to avoid wasting gas
 - RPC failover support via `rpc_fallbacks` parameter
 
-### Key Components
+### Key components
 
 **ProvenanceMetadata Model**: The central data structure containing:
 - `data`: Base64-encoded original file content
@@ -321,7 +321,7 @@ The application follows a modular architecture with clear separation of concerns
 3. SHA256 integrity verification
 4. File output with metadata preservation
 
-### Error Handling Strategy
+### Error handling strategy
 The codebase implements comprehensive error handling:
 - HTTP request failures with detailed error messages
 - Postage stamp validation with retry logic
@@ -331,7 +331,7 @@ The codebase implements comprehensive error handling:
 - Idempotency-Key (#124): `_make_paid_request` sends one key per paid operation (the CLI passes one per command, `--idempotency-key` to reuse a failed run's) resending the same authorization after IN_PROGRESS / UNAVAILABLE (the gateway releases it) and signing a new one (no new prompt, at most `MAX_SIGNATURES_PER_OPERATION`) only after an attempt with no answer. While such an attempt is outstanding, any answer other than an IDEMPOTENCY_* code or a success is reported as an unknown outcome naming it. It retries only `IDEMPOTENCY_KEY_IN_PROGRESS` / `IDEMPOTENCY_UNAVAILABLE`, and a timeout only once the gateway has answered with such a code; `_raise_for_idempotency_answer` maps SETTLEMENT_UNKNOWN / SETTLED_PENDING / DELIVERED_NOT_STORED / REUSED / INVALID to exceptions. `PaymentDeliveredNotStoredError` is a success: the CLI exits 0 when it is the command's last step
 - Chain pre-flight balance check: `_send_transaction()` estimates gas cost and raises `InsufficientFundsError` with actionable guidance (wallet address, balance, estimated cost, faucet/bridge URL) before broadcasting
 
-### Configuration Management
+### Configuration management
 Uses python-dotenv for environment configuration:
 
 **Backend Selection**:
@@ -365,11 +365,11 @@ Uses python-dotenv for environment configuration:
 - `CHAIN_GAS_LIMIT`: Explicit gas limit (optional, skips RPC estimation when set)
 - `PROVENANCE_WALLET_KEY`: Wallet private key for signing transactions
 
-## Testing Approach
+## Testing approach
 
 The test suite has two layers:
 
-### Unit Tests (Mocked)
+### Unit tests (mocked)
 - `test_cli.py`: CLI command tests with mocked backends
 - `test_gateway_client.py`: GatewayClient tests with mocked HTTP
 - `test_file_utils.py`: TAR creation and directory hashing tests
@@ -380,16 +380,16 @@ The test suite has two layers:
 - File I/O operations mocked with `pytest-mock`
 - Do not require live services
 
-### Integration Tests (Real Backends)
+### Integration tests (real backends)
 - `test_integration.py`: Tests against real services
 - Auto-skip when backends unavailable
 - Markers: `@pytest.mark.integration`, `@pytest.mark.local_bee`, `@pytest.mark.gateway`, `@pytest.mark.blockchain`
 - Require: Local Bee at `localhost:1633` and/or gateway at `provenance-gateway.datafund.io`
 - Blockchain: Local Hardhat at `localhost:8545` with DataProvenance deployed, or Base Sepolia with funded wallet
 
-## Development Guidelines
+## Development guidelines
 
-### Documentation Requirements
+### Documentation requirements
 When adding features or making implementation changes:
 - Update README.md with new CLI options or usage patterns
 - Add docstrings to new functions and classes following existing patterns
@@ -407,17 +407,17 @@ When adding features or making implementation changes:
 - **Requests**: HTTP client for Bee gateway communication
 - **Python-dotenv**: Environment configuration management
 
-### Code Patterns
+### Code patterns
 - Type hints throughout the codebase
 - Pydantic models for data validation
 - Comprehensive logging with verbose mode support
 - Modular design with single responsibility principle
 - Error handling with user-friendly messages
 
-### File Structure Importance
+### File structure importance
 The `core/` directory contains the business logic modules that should be modified when extending functionality. The CLI layer should remain focused on command interface and delegate to core modules.
 
-## PLUR Domain Scoping
+## PLUR domain scoping
 
 When calling `plur_learn`, always set:
 - `domain`: `provenance.cli`
@@ -425,13 +425,13 @@ When calling `plur_learn`, always set:
 
 This ensures engrams are tagged for retrieval in the right context across the global store.
 
-## PLUR Memory
+## PLUR memory
 
 You have persistent memory via PLUR. Corrections, preferences, and conventions persist across sessions as engrams.
 
-> **PLUR is its own MCP server.** The tools below come from the `plur` MCP server registered by `plur init` — `plur_session_start`, `plur_learn`, `plur_recall_hybrid`, `plur_feedback`, `plur_session_end`. If you do not see these exact tool names, **PLUR is not connected**: stop and run `plur doctor` to diagnose. Do **not** substitute tools from other MCP servers (e.g. `datacore_*`) — those belong to a different system and will not persist anything for PLUR.
+> **PLUR is its own MCP server.** The tools below come from the `plur` MCP server registered by `plur init` — `plur_session_start`, `plur_learn`, `plur_recall_hybrid`, `plur_feedback`, `plur_session_end`. If you do not see these exact tool names, **PLUR is not connected**: stop and run `plur doctor` to diagnose. Do **not** substitute tools from other MCP servers (for example, `datacore_*`) — those belong to a different system and will not persist anything for PLUR.
 
-### Session Workflow
+### Session workflow
 
 1. **Start**: Call `plur_session_start` with task description — injects relevant engrams
 2. **Learn**: When corrected or discovering something new, call `plur_learn` immediately
@@ -474,7 +474,7 @@ When recalling facts that will drive actions:
 
 ## Writing style
 
-Write all communication in the style of the [Microsoft Writing Style Guide](https://learn.microsoft.com/en-us/style-guide/welcome/). This covers issues, pull requests, review and issue comments, commit messages, documentation, and user-facing CLI text such as help text and error messages. For the rules that apply only to commits, see "Commit Messages" under "Git Workflow".
+Write all communication in the style of the [Microsoft Writing Style Guide](https://learn.microsoft.com/en-us/style-guide/welcome/). This covers issues, pull requests, review and issue comments, commit messages, documentation, and user-facing CLI text such as help text and error messages. For the rules that apply only to commits, see "Commit messages" under "Git workflow".
 
 - Use plain, direct language, with one idea per sentence. State what happened and why. Don't use figurative or clever phrasing.
 - Use active voice and present tense. In documentation, address the reader as "you".
