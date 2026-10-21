@@ -5799,7 +5799,9 @@ class TestChainCompositeStepFailures:
         assert result.exit_code == 1, result.output
         error_at = result.output.index("ERROR:")
         assert -1 < result.output.find(self.ANCHOR_TX) < error_at
-        assert "Insufficient funds for gas" in result.output
+        # One error line, naming the step
+        assert "ERROR: Failed to record transformation: insufficient funds for gas." in result.output
+        assert result.output.count("ERROR:") == 1
         assert DUMMY_ADDRESS in result.output[error_at:]
 
         result = runner.invoke(app, self.PROTECT + ["--json"])
@@ -5830,6 +5832,37 @@ class TestChainCompositeStepFailures:
             assert output["failed_step"] == "restrict"
             assert output["unconfirmed"]["error"] == "not_recorded"
             assert "error" not in output
+
+    @pytest.mark.parametrize(
+        "args,method,event,label",
+        [
+            (PROTECT, "anchor", "DataRegistered", "Failed to anchor new hash"),
+            (PROTECT, "transform", "DataTransformed", "Failed to record transformation"),
+            (PROTECT, "set_status", "DataStatusChanged", "Failed to restrict original"),
+            (TRANSFORM, "transform", "DataTransformed", "Failed to record transformation"),
+            (TRANSFORM, "set_status", "DataStatusChanged", "Failed to restrict original"),
+        ],
+        ids=["protect-anchor", "protect-transform", "protect-restrict", "transform-transform", "transform-restrict"],
+    )
+    def test_not_recorded_names_the_step(self, mocker, args, method, event, label):
+        from swarm_provenance_uploader.exceptions import TransactionNotRecordedError
+
+        client = self._client(mocker)
+        getattr(client, method).side_effect = TransactionNotRecordedError(
+            "Not recorded",
+            tx_hash=self.REVERT_TX,
+            event_name=event,
+            expected_count=1,
+            emitted_count=0,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=None,
+        )
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        assert f"ERROR: {label}. Not recorded." in result.output
+        assert result.output.count("ERROR:") == 1
 
     def test_same_keys_on_success(self, mocker):
         """Both commands print the same keys when every step succeeds."""

@@ -2154,8 +2154,12 @@ def _insufficient_funds_json(e: "exceptions.InsufficientFundsError") -> dict:
 def _handle_insufficient_funds(
     e: "exceptions.InsufficientFundsError",
     output_json: bool = False,
+    label: Optional[str] = None,
 ) -> None:
-    """Show actionable guidance when wallet balance is too low for gas."""
+    """Show actionable guidance when wallet balance is too low for gas.
+
+    `label` names the failed step of a composite command in the error line.
+    """
     from .chain.provider import CHAIN_PRESETS
 
     balance_eth = (e.balance_wei or 0) / 1e18
@@ -2165,7 +2169,10 @@ def _handle_insufficient_funds(
         typer.echo(json.dumps(_insufficient_funds_json(e), indent=2))
         return
 
-    typer.secho("ERROR: Insufficient funds for gas.", fg=typer.colors.RED, err=True)
+    if label:
+        typer.secho(f"ERROR: {label}: insufficient funds for gas.", fg=typer.colors.RED, err=True)
+    else:
+        typer.secho("ERROR: Insufficient funds for gas.", fg=typer.colors.RED, err=True)
     typer.echo(f"  Wallet:         {e.wallet_address}", err=True)
     typer.echo(f"  Balance:        {balance_eth:.6f} ETH", err=True)
     if e.estimated_cost_wei:
@@ -2200,22 +2207,27 @@ def _not_recorded_json(e: "exceptions.TransactionUnconfirmedError") -> dict:
 def _handle_not_recorded(
     e: "exceptions.TransactionUnconfirmedError",
     output_json: bool = False,
+    label: Optional[str] = None,
 ) -> None:
-    """Report a mined transaction that is not confirmed as recorded."""
+    """Report a mined transaction that is not confirmed as recorded.
+
+    `label` names the failed step of a composite command in the error line.
+    """
     verified = isinstance(e, exceptions.TransactionNotRecordedError)
     if output_json:
         typer.echo(json.dumps(_not_recorded_json(e), indent=2))
         return
 
+    prefix = f"ERROR: {label}. " if label else "ERROR: "
     if verified:
         typer.secho(
-            "ERROR: Not recorded. The transaction succeeded, but the contract did not "
+            prefix + "Not recorded. The transaction succeeded, but the contract did not "
             "emit the expected events.",
             fg=typer.colors.RED, err=True,
         )
     else:
         typer.secho(
-            "ERROR: Not verified. The transaction was mined, but its events could not "
+            prefix + "Not verified. The transaction was mined, but its events could not "
             "be read, so it is not known whether it was recorded. Check it in the "
             "explorer before you try again.",
             fg=typer.colors.RED, err=True,
@@ -2318,10 +2330,9 @@ def _composite_step_failed(
     _print_completed_steps(steps)
     label = _COMPOSITE_STEP_LABELS[step]
     if unconfirmed:
-        _handle_not_recorded(e)
+        _handle_not_recorded(e, label=label)
     elif isinstance(e, exceptions.InsufficientFundsError):
-        typer.secho(f"ERROR: {label}.", fg=typer.colors.RED, err=True)
-        _handle_insufficient_funds(e)
+        _handle_insufficient_funds(e, label=label)
     elif isinstance(e, exceptions.ChainConnectionError):
         typer.secho(f"ERROR: {label}. Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
     else:
