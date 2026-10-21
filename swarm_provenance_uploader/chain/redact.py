@@ -65,13 +65,17 @@ def redact_url(url: Optional[str]) -> Optional[str]:
     entirely, since it cannot be shortened safely.
 
     Args:
-        url: The URL to redact. None and "" are returned as they are.
+        url: The URL to redact. None and "" are returned as they are; any
+            other non-string value is converted with str() first.
 
     Returns:
         The redacted URL.
     """
     if not url:
         return url
+    if not isinstance(url, str):
+        # A caller may hold a non-string (a mock, a URL object): redact its text
+        url = str(url)
     try:
         parts = urlsplit(url.strip())
         host = parts.hostname

@@ -220,3 +220,17 @@ class TestRedactUrlsSpeed:
         assert KEY not in out
         assert out.endswith(")" * 1_000_000)
         assert elapsed < 1.0, f"took {elapsed:.2f} s"
+
+
+class TestRedactUrlNonString:
+    def test_non_string_value_is_converted(self):
+        """A non-string rpc_url (for example a mock provider attribute) does not raise."""
+        from unittest.mock import MagicMock
+
+        class UrlObject:
+            def __str__(self):
+                return PATH_KEY_URL
+
+        assert redact_url(UrlObject()) == f"https://base-sepolia.g.alchemy.com/{PLACEHOLDER}"
+        assert isinstance(redact_url(MagicMock()), str)
+        assert ChainConnectionError("failed", rpc_url=MagicMock()).rpc_url
