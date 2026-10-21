@@ -247,7 +247,10 @@ class ChainClient:
             raise
         except Exception as e:
             if _is_contract_revert(e):
-                raise ChainTransactionError(f"Transaction reverted: {e}") from e
+                # str() of web3's ContractLogicError is the (message, data)
+                # tuple; .message is the readable revert reason
+                reason = getattr(e, "message", None) or str(e)
+                raise ChainTransactionError(f"Transaction reverted: {reason}") from e
             if "insufficient funds" in str(e).lower():
                 try:
                     balance_wei = self._wallet.get_balance(self._provider.web3)

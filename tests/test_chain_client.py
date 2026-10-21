@@ -2908,7 +2908,15 @@ WRITE_FUNCTIONS = [
 
 
 class ContractLogicError(Exception):
-    """Stand-in for web3.exceptions.ContractLogicError (web3 is mocked here)."""
+    """Stand-in for web3.exceptions.ContractLogicError (web3 is mocked here).
+
+    Like web3's, str() is the (message, data) tuple and .message the reason.
+    """
+
+    def __init__(self, message, data="0x08c379a0" + "00" * 100):
+        super().__init__(message, data)
+        self.message = message
+        self.data = data
 
 
 class TestBuildTransactionErrors:
@@ -2923,7 +2931,7 @@ class TestBuildTransactionErrors:
     @pytest.mark.parametrize("method,kwargs,event", WRITES, ids=[w[0] for w in WRITES])
     def test_revert_in_gas_estimation(self, mock_chain_deps, method, kwargs, event):
         client = self._fail_build(
-            mock_chain_deps, ContractLogicError("execution reverted: Not the owner")
+            mock_chain_deps, ContractLogicError("execution reverted: Not owner")
         )
 
         with pytest.raises(ChainTransactionError) as exc_info:
@@ -2931,7 +2939,8 @@ class TestBuildTransactionErrors:
 
         assert type(exc_info.value) is ChainTransactionError
         assert exc_info.value.tx_hash is None
-        assert "Transaction reverted: execution reverted: Not the owner" in str(exc_info.value)
+        assert str(exc_info.value) == "Transaction reverted: execution reverted: Not owner"
+        assert "0x08c379a0" not in str(exc_info.value)
         mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
 
     @pytest.mark.parametrize("method,kwargs,event", WRITES, ids=[w[0] for w in WRITES])
@@ -2996,3 +3005,20 @@ def test_is_contract_revert_with_web3_classes():
     assert _is_contract_revert(web3_exceptions.ContractCustomError("0x1234"))
     assert _is_contract_revert(web3_exceptions.ContractPanicError("panic"))
     assert not _is_contract_revert(ValueError("execution reverted"))
+
+
+def test_build_tx_revert_reason_with_web3_class():
+    """The real ContractLogicError reports its reason, not the (message, data) tuple."""
+    web3_exceptions = pytest.importorskip("web3.exceptions")
+    from swarm_provenance_uploader.core.chain_client import ChainClient
+
+    def build():
+        raise web3_exceptions.ContractLogicError(
+            "execution reverted: Not owner", data="0x08c379a0" + "00" * 100
+        )
+
+    with pytest.raises(ChainTransactionError) as exc_info:
+        ChainClient._build_tx(MagicMock(), build)
+
+    assert "Not owner" in str(exc_info.value)
+    assert "0x08c379a0" not in str(exc_info.value)

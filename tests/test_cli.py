@@ -5890,12 +5890,14 @@ class TestChainCompositeStepFailures:
             from web3.exceptions import ContractLogicError
         except ImportError:  # the [testing] extra has no web3
             class ContractLogicError(Exception):
-                pass
+                def __init__(self, message, data):
+                    super().__init__(message, data)  # str() is the tuple, as in web3
+                    self.message = message
 
         inner = mocker.MagicMock()
         inner._build_tx = lambda build, *a, **k: ChainClient._build_tx(inner, build, *a, **k)
         inner._contract.build_set_data_status_tx.side_effect = ContractLogicError(
-            "execution reverted: Not the owner"
+            "execution reverted: Not owner", "0x08c379a0" + "00" * 100
         )
         client.set_status.side_effect = lambda *a, **k: ChainClient.set_status(inner, *a, **k)
 
@@ -5910,7 +5912,8 @@ class TestChainCompositeStepFailures:
         assert result.exit_code == 1, result.output
         assert result.exception is None or isinstance(result.exception, SystemExit)
         error_at = result.output.index("ERROR: Failed to restrict original")
-        assert "execution reverted: Not the owner" in result.output
+        assert "execution reverted: Not owner" in result.output
+        assert "0x08c379a0" not in result.output
         assert -1 < result.output.find(self.TRANSFORM_TX) < error_at
 
         result = runner.invoke(app, args + ["--json"])
@@ -5921,6 +5924,7 @@ class TestChainCompositeStepFailures:
         assert output["transform"]["tx_hash"] == self.TRANSFORM_TX
         assert output["error"]["error"] == "transaction_failed"
         assert output["error"]["tx_hash"] is None
+        assert output["error"]["message"] == "Transaction reverted: execution reverted: Not owner"
 
     def test_transform_not_registered_json(self, mocker):
         """With --json, "not registered" is reported in the composite format."""
