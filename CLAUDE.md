@@ -39,7 +39,7 @@ All sub-branches merge into `feature/x402-support`, which only merges to `main` 
 **CRITICAL: NEVER mention "Claude", "AI", "Generated with", "Co-Authored-By: Claude", or any AI attribution in commits, PRs, or issues. This is a strict requirement - no exceptions.**
 
 - Keep commit messages focused on what changed and why
-- Use conventional commit style when appropriate
+- Use conventional commit style, with the subject in the imperative mood
 - Follow the "Writing style" section below for tense, mood, and wording
 
 ## Version management
@@ -474,7 +474,7 @@ When recalling facts that will drive actions:
 
 ## Writing style
 
-Write all communication in the style of the [Microsoft Writing Style Guide](https://learn.microsoft.com/en-us/style-guide/welcome/). This covers issues, pull requests, review and issue comments, commit messages, documentation, and user-facing CLI text such as help text and error messages. For the rules that apply only to commits, see "Commit messages" under "Git workflow".
+Write all communication in the style of the [Microsoft Writing Style Guide](https://learn.microsoft.com/en-us/style-guide/welcome/). This covers issues, pull requests, review and issue comments, commit messages, documentation, and user-facing CLI text such as help text and error messages. For commit messages, also see "Commit messages" under "Git workflow".
 
 - Use plain, direct language, with one idea per sentence. State what happened and why. Don't use figurative or clever phrasing.
 - Use active voice and present tense. In documentation, address the reader as "you".
