@@ -5968,18 +5968,128 @@ class TestChainCompositeStepFailures:
         assert "expected ACTIVE" in output["error"]["message"]
         client.anchor.assert_not_called()
 
-    def test_transform_without_restrict_unchanged(self, mocker):
-        """Plain transform is not a composite command and keeps its output."""
-        client = self._client(mocker)
-        client.transform.side_effect = self._revert()
+    def _insufficient_funds(self):
+        from swarm_provenance_uploader.exceptions import InsufficientFundsError
 
-        result = runner.invoke(
-            app, ["chain", "transform", DUMMY_SWARM_REF, "c" * 64, "--json"]
+        return InsufficientFundsError(
+            "Insufficient funds",
+            wallet_address=DUMMY_ADDRESS,
+            balance_wei=0,
+            estimated_cost_wei=10**15,
+            chain_name="base-sepolia",
         )
 
+    @pytest.mark.parametrize("step,method,done", TRANSFORM_STEPS, ids=[s[0] for s in TRANSFORM_STEPS])
+    def test_transform_insufficient_funds(self, mocker, step, method, done):
+        client = self._client(mocker)
+        getattr(client, method).side_effect = self._insufficient_funds()
+
+        result = runner.invoke(app, self.TRANSFORM)
+
         assert result.exit_code == 1, result.output
-        assert "Transaction failed: Transaction reverted" in result.output
+        error_at = result.output.index("ERROR:")
+        assert "insufficient funds for gas" in result.output[error_at:]
+        assert result.output.count("ERROR:") == 1
+        for name in done:
+            assert -1 < result.output.find(getattr(self, name)) < error_at
+
+        result = runner.invoke(app, self.TRANSFORM + ["--json"])
+
+        output = self._assert_json(result, step, done, "insufficient_funds")
+        assert output["error"]["wallet_address"] == DUMMY_ADDRESS
+
+    @pytest.mark.parametrize(
+        "args,method,step,done",
+        [
+            (PROTECT, "transform", "transform", ["ANCHOR_TX"]),
+            (TRANSFORM, "set_status", "restrict", ["TRANSFORM_TX"]),
+        ],
+        ids=["protect-transform", "transform-restrict"],
+    )
+    @pytest.mark.parametrize("error_cls", ["ChainConfigurationError", "ChainValidationError"])
+    def test_other_chain_error_mid_flow(self, mocker, args, method, step, done, error_cls):
+        from swarm_provenance_uploader import exceptions as exc
+
+        client = self._client(mocker)
+        getattr(client, method).side_effect = getattr(exc, error_cls)("bad input")
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        error_at = result.output.index("ERROR:")
+        assert ": bad input" in result.output[error_at:]
+        for name in done:
+            assert -1 < result.output.find(getattr(self, name)) < error_at
+
+        result = runner.invoke(app, args + ["--json"])
+
+        output = self._assert_json(result, step, done, "chain_error")
+        assert output["error"]["message"] == "bad input"
+
+    @pytest.mark.parametrize(
+        "args,method,step,event",
+        [
+            (PROTECT, "anchor", "anchor", "DataRegistered"),
+            (PROTECT, "transform", "transform", "DataTransformed"),
+            (TRANSFORM, "transform", "transform", "DataTransformed"),
+            (TRANSFORM, "set_status", "restrict", "DataStatusChanged"),
+        ],
+        ids=["protect-anchor", "protect-transform", "transform-transform", "transform-restrict"],
+    )
+    def test_not_verified_failed_step(self, mocker, args, method, step, event):
+        from swarm_provenance_uploader.exceptions import TransactionNotVerifiedError
+
+        client = self._client(mocker)
+        getattr(client, method).side_effect = TransactionNotVerifiedError(
+            "Not verified",
+            tx_hash=self.REVERT_TX,
+            event_name=event,
+            expected_count=1,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=None,
+            reason="boom",
+        )
+
+        result = runner.invoke(app, args + ["--json"])
+
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.output)
+        assert output["failed_step"] == step
+        assert output["unconfirmed"]["error"] == "not_verified"
+        assert "error" not in output
+
+    @pytest.mark.parametrize("output_json", [False, True], ids=["text", "json"])
+    @pytest.mark.parametrize("kind", ["revert", "connection", "insufficient_funds"])
+    def test_transform_without_restrict_unchanged(self, mocker, kind, output_json):
+        """Plain transform is not a composite command and keeps its output."""
+        from swarm_provenance_uploader.exceptions import ChainConnectionError
+
+        client = self._client(mocker)
+        client.transform.side_effect = {
+            "revert": self._revert(),
+            "connection": ChainConnectionError("connection refused"),
+            "insufficient_funds": self._insufficient_funds(),
+        }[kind]
+
+        args = ["chain", "transform", DUMMY_SWARM_REF, "c" * 64]
+        result = runner.invoke(app, args + (["--json"] if output_json else []))
+
+        assert result.exit_code == 1, result.output
         assert "failed_step" not in result.output
+        assert "Completed before the failure" not in result.output
+        assert "Failed to record transformation" not in result.output
+        if kind == "revert":
+            assert "ERROR: Transaction failed: Transaction reverted" in result.output
+            assert f"Transaction: {self.REVERT_TX}" in result.output
+        elif kind == "connection":
+            assert "ERROR: Cannot connect to chain: connection refused" in result.output
+        elif output_json:
+            # The standalone top-level insufficient-funds object
+            output = json.loads(result.output)
+            assert output["error"] == "insufficient_funds"
+            assert output["wallet_address"] == DUMMY_ADDRESS
+        else:
+            assert "ERROR: Insufficient funds for gas." in result.output
 
 
 class TestChainCodeCheckRpcError:
