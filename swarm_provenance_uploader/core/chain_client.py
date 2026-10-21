@@ -8,6 +8,7 @@ gas estimation, signing, broadcasting, and receipt parsing.
 Requires optional dependencies (the `blockchain` extra): web3 and eth-account.
 """
 
+import ast
 import json
 import logging
 from typing import List, Optional
@@ -82,8 +83,35 @@ def _is_rpc_rejection(error: Exception) -> bool:
 
     The connection worked; the node refused the request, for example
     "nonce too low". Matched by class name, like _is_contract_revert.
+    RequestTimedOut subclasses Web3RPCError but is a timeout, not a refusal.
     """
-    return any(cls.__name__ == "Web3RPCError" for cls in type(error).__mro__)
+    names = {cls.__name__ for cls in type(error).__mro__}
+    return "Web3RPCError" in names and "RequestTimedOut" not in names
+
+
+def _error_reason(error: Exception) -> str:
+    """The readable reason of a web3 error.
+
+    str() of a ContractLogicError is the (message, data) tuple, and a
+    Web3RPCError's message is often the repr of the JSON-RPC error object,
+    such as "{'code': -32000, 'message': 'nonce too low'}". Return only the
+    message in both cases.
+    """
+    rpc_error = (getattr(error, "rpc_response", None) or {})
+    rpc_error = rpc_error.get("error") if isinstance(rpc_error, dict) else None
+    if isinstance(rpc_error, dict) and rpc_error.get("message"):
+        return str(rpc_error["message"])
+    message = getattr(error, "message", None)
+    if isinstance(message, str) and message.startswith("{"):
+        try:
+            message = ast.literal_eval(message)
+        except (ValueError, SyntaxError):
+            pass
+    if isinstance(message, dict) and message.get("message"):
+        return str(message["message"])
+    if isinstance(message, str) and message:
+        return message
+    return str(error)
 
 class ChainClient:
     """High-level client for DataProvenance smart contract operations.
@@ -258,8 +286,8 @@ class ChainClient:
         except Exception as e:
             if _is_contract_revert(e):
                 # str() of web3's ContractLogicError is the (message, data)
-                # tuple; .message is the readable revert reason
-                reason = getattr(e, "message", None) or str(e)
+                # tuple; _error_reason returns the readable revert reason
+                reason = _error_reason(e)
                 raise ChainTransactionError(f"Transaction reverted: {reason}") from e
             if "insufficient funds" in str(e).lower():
                 try:
@@ -276,7 +304,7 @@ class ChainClient:
             if _is_rpc_rejection(e):
                 # Checked before _is_rpc_failure, which also counts a JSON-RPC
                 # error answer as an RPC failure
-                reason = getattr(e, "message", None) or str(e)
+                reason = _error_reason(e)
                 raise ChainTransactionError(f"The RPC rejected the transaction: {reason}") from e
             if _is_rpc_failure(e):
                 # Transport only: connection, timeout, or an answer that is not JSON-RPC
@@ -420,7 +448,7 @@ class ChainClient:
             if "tx_hash" in dir():
                 tx_hash_str = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
             raise ChainTransactionError(
-                f"Transaction failed: {e}",
+                f"Transaction failed: {_error_reason(e)}",
                 tx_hash=tx_hash_str,
             ) from e
 

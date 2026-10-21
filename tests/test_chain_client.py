@@ -3085,3 +3085,83 @@ def test_build_tx_rpc_errors_with_web3_classes():
     ):
         with pytest.raises(ChainConnectionError):
             ChainClient._build_tx(MagicMock(), failing(transport))
+
+
+class TestSendTransactionRevertReason:
+    """A revert in _send_transaction's own gas estimation shows the reason (#175)."""
+
+    def test_estimate_gas_revert_reason(self, mock_chain_deps):
+        client = _write_client(mock_chain_deps, [])
+        mock_chain_deps["web3_instance"].eth.estimate_gas.side_effect = ContractLogicError(
+            "execution reverted: Not owner"
+        )
+
+        with pytest.raises(ChainTransactionError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert str(exc_info.value) == "Transaction failed: execution reverted: Not owner"
+        assert "0x08c379a0" not in str(exc_info.value)
+
+    def test_estimate_gas_already_registered(self, mock_chain_deps):
+        """anchor still detects an "already registered" revert from estimate_gas."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        records = iter([
+            (DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0),
+            (DUMMY_HASH_BYTES, DUMMY_ADDRESS, 1700000000, "swarm-provenance", b"\x00" * 32, [], [], 0),
+        ])
+
+        def get_data_record(data_hash):
+            call = MagicMock()
+            call.call.return_value = next(records)
+            return call
+
+        mock_chain_deps["contract"].functions.getDataRecord = get_data_record
+        mock_chain_deps["web3_instance"].eth.estimate_gas.side_effect = ContractLogicError(
+            "execution reverted: Data already registered"
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(DataAlreadyRegisteredError):
+            client.anchor(swarm_hash=DUMMY_HASH)
+
+
+def test_error_reason_with_web3_classes():
+    """_error_reason returns the message of web3's revert and JSON-RPC errors."""
+    web3_exceptions = pytest.importorskip("web3.exceptions")
+    from swarm_provenance_uploader.core.chain_client import _error_reason
+
+    revert = web3_exceptions.ContractLogicError(
+        "execution reverted: Not owner", data="0x08c379a0" + "00" * 100
+    )
+    assert _error_reason(revert) == "execution reverted: Not owner"
+
+    # As web3 raises it: the message is the repr of the JSON-RPC error object
+    error = {"code": -32000, "message": "nonce too low"}
+    with_response = web3_exceptions.Web3RPCError(str(error), rpc_response={"error": error})
+    assert _error_reason(with_response) == "nonce too low"
+    without_response = web3_exceptions.Web3RPCError(str(error))
+    assert _error_reason(without_response) == "nonce too low"
+
+    assert _error_reason(ValueError("plain")) == "plain"
+
+
+def test_build_tx_rejection_text_and_timeout_with_web3_classes():
+    """A rejection shows only the node's message; RequestTimedOut is a connection problem."""
+    web3_exceptions = pytest.importorskip("web3.exceptions")
+    from swarm_provenance_uploader.core.chain_client import ChainClient
+
+    def failing(error):
+        def build():
+            raise error
+        return build
+
+    error = {"code": -32000, "message": "nonce too low"}
+    rejection = web3_exceptions.Web3RPCError(str(error), rpc_response={"error": error})
+    with pytest.raises(ChainTransactionError) as exc_info:
+        ChainClient._build_tx(MagicMock(), failing(rejection))
+    assert str(exc_info.value) == "The RPC rejected the transaction: nonce too low"
+
+    timeout = web3_exceptions.RequestTimedOut("request timed out")
+    with pytest.raises(ChainConnectionError):
+        ChainClient._build_tx(MagicMock(), failing(timeout))
