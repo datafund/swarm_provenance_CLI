@@ -64,7 +64,7 @@ x402 is a payment protocol that uses HTTP 402 "Payment Required" responses to en
 
 ## Prerequisites
 
-- Python 3.8+
+- Python 3.9+
 - An Ethereum wallet (MetaMask, hardware wallet, etc.)
 - Base Sepolia ETH (for gas, testnet only)
 - Base Sepolia USDC (for payments, testnet only)

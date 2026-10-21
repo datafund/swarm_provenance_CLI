@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/datafund/swarm_provenance_CLI/actions/workflows/ci.yml/badge.svg)](https://github.com/datafund/swarm_provenance_CLI/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.txt)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 
 A CLI toolkit to wrap data files within a metadata structure
 and upload them to the Swarm decentralized storage network.
@@ -1030,7 +1030,7 @@ See [examples/README.md](examples/README.md) for the full guide with walkthrough
 │                               TECHNOLOGY STACK                                 │
 │                                                                                 │
 │  🐍 CORE TECHNOLOGIES              📚 KEY LIBRARIES                            │
-│  • Python 3.8+                    • Typer - CLI framework                     │
+│  • Python 3.9+                    • Typer - CLI framework                     │
 │  • Modular architecture           • Pydantic v2 - Data validation             │
 │  • Type hints throughout          • Requests - HTTP client                    │
 │  • Async-ready design             • Python-dotenv - Config management         │
