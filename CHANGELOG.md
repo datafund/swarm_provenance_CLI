@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Known issues in 0.11.0
-- Base mainnet x402 payments do not work yet: the gateway refuses them until it ships the release carrying datafund/swarm_connect#467 (fix merged to swarm_connect `dev` in datafund/swarm_connect#500, not yet on `main`, checked 2026-10-21). The released gateway still advertises `"USDC"` as the EIP-712 name for `base`, and CLI 0.11.0 declines that mismatched option before signing. Base mainnet x402 also needs CLI 0.11.0 or later: older versions sign with `"USDC"`, which the Base mainnet USDC contract rejects (#126)
+- Base mainnet x402 payments do not work yet. The gateway on swarm_connect `main` still advertises `"USDC"` as the EIP-712 name for `base`, so CLI 0.11.0 declines that option before it signs. The fix (datafund/swarm_connect#467) is merged to swarm_connect `dev` in datafund/swarm_connect#500 and is not on `main` yet (checked 2026-10-21). Base mainnet x402 also needs CLI 0.11.0 or later: older versions sign with `"USDC"`, which the Base mainnet USDC contract rejects (#126)
 - The 0.11.0 notes say `Idempotency-Key` needs datafund/swarm_connect#422 "on `dev`": it (`app/x402/idempotency.py`) is on swarm_connect `main` too as of 2026-10-21 (#124)
 
 ### Fixed
