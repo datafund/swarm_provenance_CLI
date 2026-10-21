@@ -114,6 +114,124 @@ class PaymentTransactionFailedError(X402Error):
         self.payer = payer
 
 
+class PaymentRequirementsError(X402Error):
+    """The gateway's 402 payment request was refused before anything was signed.
+
+    Raised when no offered option is safe to sign: an unsupported scheme, an
+    asset that is not USDC on the network, a malformed amount or recipient,
+    or a recipient other than the pinned X402_EXPECTED_PAY_TO.
+    """
+
+    def __init__(self, message: str, reasons: list = None):
+        super().__init__(message)
+        self.reasons = reasons or []
+
+
+class InsecureGatewayWarning(UserWarning):
+    """x402 payments are enabled against a plain-http (non-loopback) gateway.
+
+    Anyone on the network path can then rewrite the 402 payment request,
+    including the amount and the recipient.
+    """
+
+
+class PaymentOutcomeUnknownError(X402Error):
+    """A signed payment was sent, but whether it was collected is not known.
+
+    Raised when a paid request times out, drops, or fails with a server error
+    after the X-PAYMENT header went out. The gateway settles before doing the
+    work and does not undo it when the client disconnects, so the payment may
+    have been taken and the request may even have completed. Re-running the
+    command signs a new authorization and can pay a second time.
+
+    The attributes identify the payment so the user can check it on-chain or
+    cite it to the operator: `nonce` is the EIP-3009 authorization nonce,
+    `transaction` the settlement transaction hash when the gateway sent one,
+    and `valid_before` the unix time after which the authorization can no
+    longer be collected.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        payer: str = None,
+        nonce: str = None,
+        amount: str = None,
+        amount_usd: str = None,
+        pay_to: str = None,
+        network: str = None,
+        transaction: str = None,
+        status_code: int = None,
+        code: str = None,
+        valid_before: int = None,
+        idempotency_key: str = None,
+    ):
+        super().__init__(message)
+        self.payer = payer
+        self.nonce = nonce
+        self.amount = amount
+        self.amount_usd = amount_usd
+        self.pay_to = pay_to
+        self.network = network
+        self.transaction = transaction
+        self.status_code = status_code
+        self.code = code
+        self.valid_before = valid_before
+        self.idempotency_key = idempotency_key
+
+    # Whether the gateway confirmed the payment was collected.
+    settled = False
+
+
+class PaymentSettledNotDeliveredError(PaymentOutcomeUnknownError):
+    """The gateway collected the payment but did not deliver the result.
+
+    The gateway reports this with `X-Payment-Status: settled_not_delivered`
+    or the `DELIVERY_FAILED_AFTER_PAYMENT` code. The operator needs the
+    `transaction` to deliver the result or refund it.
+    """
+
+    settled = True
+
+
+class PaymentDeliveredNotStoredError(PaymentSettledNotDeliveredError):
+    """The first request with this Idempotency-Key succeeded and was paid once.
+
+    The gateway answers a retry with IDEMPOTENCY_KEY_DELIVERED_NOT_STORED when
+    the first response was too large to keep. The operation worked; only its
+    result cannot be returned again, so it must be looked up through the
+    resource itself. This is not a failure.
+    """
+
+
+class IdempotencyKeyError(X402Error):
+    """The gateway refused the Idempotency-Key itself; nothing was charged.
+
+    `code` is IDEMPOTENCY_KEY_REUSED (the key was used for a different
+    request) or IDEMPOTENCY_KEY_INVALID (malformed key).
+    """
+
+    def __init__(self, message: str, code: str = None, idempotency_key: str = None):
+        super().__init__(message)
+        self.code = code
+        self.idempotency_key = idempotency_key
+
+
+class StampPurchasePendingError(PaymentSettledNotDeliveredError):
+    """A paid stamp purchase was accepted but not yet confirmed (HTTP 202).
+
+    The payment has settled; the gateway registers the batch to the payer's
+    wallet once the Bee node reports it. Buying again would pay twice.
+    """
+
+    def __init__(self, message: str, label: str = None, depth: int = None,
+                 lookup: str = None, **kwargs):
+        super().__init__(message, **kwargs)
+        self.label = label
+        self.depth = depth
+        self.lookup = lookup
+
+
 # --- Stamp Pool Exceptions ---
 
 class PoolError(ProvenanceError):

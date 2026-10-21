@@ -30,6 +30,10 @@ All sub-branches merge into `feature/x402-support`, which only merges to `main` 
 - `feature/` - New features (e.g., `feature/add-stamp-purchase-command`)
 - `docs/` - Documentation only (e.g., `docs/update-readme`)
 
+### Secrets
+- Never commit keys, `.env*` files or per-developer editor settings (`.claude/settings.local.json` is ignored). CI's secret scan (gitleaks, `.gitleaks.toml`) fails the build on a finding.
+- A false positive (e.g. a variable *named* like a key) is allowed with a trailing `# gitleaks:allow` comment on that line, never by weakening the rules.
+
 ### Commit Messages
 
 **CRITICAL: NEVER mention "Claude", "AI", "Generated with", "Co-Authored-By: Claude", or any AI attribution in commits, PRs, or issues. This is a strict requirement - no exceptions.**
@@ -42,15 +46,13 @@ All sub-branches merge into `feature/x402-support`, which only merges to `main` 
 **IMPORTANT**: Increment the version number with each change that modifies functionality.
 
 ### Version Location
-- Primary: `swarm_provenance_uploader/__init__.py` (`__version__`)
-- Mirror: `pyproject.toml` (`version` field)
-
-Both files MUST be kept in sync.
+- Single source: `__version_base__` in `swarm_provenance_uploader/__init__.py`
+- `pyproject.toml` reads it (`dynamic = ["version"]`, `[tool.setuptools.dynamic]`); do not add a `version` field there
 
 ### Version Format
 Uses semantic versioning with optional git hash: `MAJOR.MINOR.PATCH[+git.SHORT_HASH]`
 
-- **Release versions**: `0.1.0`, `1.0.0` (clean semver for PyPI releases)
+- **Release versions**: `0.1.0`, `1.0.0` (clean semver, tagged `vX.Y.Z`; the package is installed from git tags, not PyPI)
 - **Development versions**: `0.1.1+git.abc1234` (includes git hash for traceability)
 
 ### When to Increment
@@ -59,8 +61,8 @@ Uses semantic versioning with optional git hash: `MAJOR.MINOR.PATCH[+git.SHORT_H
 - **MAJOR** (X.0.0): Breaking changes, incompatible API changes
 
 ### How to Update Version
-1. Update `__version__` in `swarm_provenance_uploader/__init__.py`
-2. Update `version` in `pyproject.toml`
+1. Update `__version_base__` in `swarm_provenance_uploader/__init__.py`
+2. Add the release to `CHANGELOG.md`
 3. The git hash suffix is added automatically at runtime (see below)
 
 ## Project Overview
@@ -85,8 +87,11 @@ pip install -e .[testing]
 # Run all tests (unit + integration)
 pytest
 
-# Run only unit tests (skip integration)
-pytest --ignore=tests/test_integration.py
+# Run only unit tests (what CI runs; nothing talks to real services)
+pytest --ignore=tests/test_integration.py -m "not integration"
+
+# Payment and chain tests need the real signing libraries, or they skip
+pip install -e .[x402,blockchain,testing]
 
 # Run only integration tests (requires real backends)
 pytest tests/test_integration.py -v
@@ -95,6 +100,7 @@ pytest tests/test_integration.py -v
 pytest -m local_bee    # Local Bee tests only
 pytest -m gateway      # Gateway tests only
 pytest -m integration  # All integration tests
+RUN_LIVE_TESTS=1 pytest tests/test_examples.py -m integration  # Live example demos (upload real data)
 ```
 
 ### CLI Usage
@@ -123,11 +129,12 @@ swarm-prov-upload upload --file /path/to/data.txt --usePool
 # Upload with local Bee backend (uses legacy amount)
 swarm-prov-upload --backend local upload --file /path/to/data.txt --amount 1000000000
 
-# Download and verify data
+# Download data (checks content hash and notary signature, not the reference: #134)
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads
 
 # Stamp management (gateway only)
 swarm-prov-upload stamps list
+swarm-prov-upload stamps list --full --wallet <address>   # Full IDs + labels, one wallet's stamps
 swarm-prov-upload stamps info <stamp_id>
 swarm-prov-upload stamps extend <stamp_id> --amount 1000000
 swarm-prov-upload stamps check <stamp_id>     # Health check
@@ -158,7 +165,8 @@ swarm-prov-upload notary verify --file signed.json      # Verify local file sign
 swarm-prov-upload upload --file data.txt --sign notary  # Upload with notary signing
 swarm-prov-upload download <hash>                       # Download with signature verification (default)
 swarm-prov-upload download <hash> --no-verify           # Skip signature verification
-swarm-prov-upload download <hash> --strict              # Fail if signature verification fails
+swarm-prov-upload download <hash> --require-signature   # Also fail when unsigned (--strict is an alias)
+swarm-prov-upload download <hash> --notary-address 0x.. # Pin the expected notary (or NOTARY_ADDRESS)
 
 # Chain commands (optional, requires blockchain dependencies)
 swarm-prov-upload chain balance                                              # Wallet balance and chain info
@@ -208,6 +216,7 @@ The application follows a modular architecture with clear separation of concerns
    - `x402_client.py`: Client for x402 payment handling (optional)
    - `chain_client.py`: High-level facade for on-chain operations (optional)
    - `notary_utils.py`: Notary signature verification utilities
+   - `swarm_verify.py`: Checks content against a Swarm reference from raw chunks (BMT addresses, mantaray manifest, redundancy-aware file tree); used by `download` on the local backend
    - `file_utils.py`: File I/O and encoding utilities
    - `metadata_builder.py`: Metadata construction
 3. **Chain Subpackage** (`chain/`): Low-level blockchain components
@@ -317,6 +326,8 @@ The codebase implements comprehensive error handling:
 - Postage stamp validation with retry logic
 - File I/O error handling with clear user feedback
 - JSON parsing errors with context
+- Paid requests: once `X-PAYMENT` has been sent, `GatewayClient._make_paid_request` reports a timeout, dropped connection, Ctrl-C or 5xx as `PaymentOutcomeUnknownError`, not a plain `ConnectionError`; `PaymentSettledNotDeliveredError` / `StampPurchasePendingError` when the gateway confirms it collected the payment, and also (via `_reading_paid_result`) when a paid 2xx body cannot be parsed. They carry payer, nonce, amount, pay-to, `valid_before` and transaction; the CLI prints them via `_report_payment_outcome`. Ordinary errors remain for a `ConnectTimeout` (never connected, so never sent), a 4xx the gateway refused before settling, and the 5xx answers that state nothing was charged (`_says_not_charged`). Paid calls use `GatewayClient.PAID_REQUEST_TIMEOUT` ((10, 240) s connect/read)
+- Idempotency-Key (#124): `_make_paid_request` sends one key per paid operation (the CLI passes one per command, `--idempotency-key` to reuse a failed run's) resending the same authorization after IN_PROGRESS / UNAVAILABLE (the gateway releases it) and signing a new one (no new prompt, at most `MAX_SIGNATURES_PER_OPERATION`) only after an attempt with no answer. While such an attempt is outstanding, any answer other than an IDEMPOTENCY_* code or a success is reported as an unknown outcome naming it. It retries only `IDEMPOTENCY_KEY_IN_PROGRESS` / `IDEMPOTENCY_UNAVAILABLE`, and a timeout only once the gateway has answered with such a code; `_raise_for_idempotency_answer` maps SETTLEMENT_UNKNOWN / SETTLED_PENDING / DELIVERED_NOT_STORED / REUSED / INVALID to exceptions. `PaymentDeliveredNotStoredError` is a success: the CLI exits 0 when it is the command's last step
 - Chain pre-flight balance check: `_send_transaction()` estimates gas cost and raises `InsufficientFundsError` with actionable guidance (wallet address, balance, estimated cost, faucet/bridge URL) before broadcasting
 
 ### Configuration Management
@@ -339,8 +350,9 @@ Uses python-dotenv for environment configuration:
 - `X402_ENABLED`: Enable x402 payment support (default: false)
 - `X402_PRIVATE_KEY`: Wallet private key for signing payments
 - `X402_NETWORK`: `base-sepolia` (testnet) or `base` (mainnet)
-- `X402_AUTO_PAY`: Enable auto-pay without prompts (default: false)
-- `X402_MAX_AUTO_PAY_USD`: Maximum auto-pay amount per request (default: 1.00)
+- `X402_AUTO_PAY`: Enable auto-pay without prompts (default: false; `--no-auto-pay` overrides it per command)
+- `X402_MAX_AUTO_PAY_USD`: Maximum auto-pay amount per request (default: 1.00). A hard cap: above it the CLI prompts (default No) and library use without a callback refuses before signing
+- `X402_EXPECTED_PAY_TO`: Only sign payments to this address (optional). Independently of it, `X402Client.refusal_reason()` refuses non-`exact` schemes, a non-USDC `asset` and malformed amounts or recipients before signing
 
 **Chain / Blockchain Configuration**:
 - `CHAIN_ENABLED`: Enable on-chain anchoring (default: false)

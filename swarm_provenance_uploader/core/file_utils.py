@@ -1,8 +1,39 @@
 import hashlib
 import base64
+import re
 import tarfile
 from pathlib import Path
 from typing import List, Tuple
+
+# A Swarm reference: 32 bytes, or 64 for an encrypted reference, as hex.
+_SWARM_REFERENCE_RE = re.compile(r"[0-9a-fA-F]{64}(?:[0-9a-fA-F]{64})?")
+
+
+def is_swarm_reference(value: str) -> bool:
+    """True for a Swarm reference (64 or 128 hex characters).
+
+    References become file names and URL path segments, so anything else
+    (e.g. "../x") must be refused before it is used as either.
+    """
+    return isinstance(value, str) and _SWARM_REFERENCE_RE.fullmatch(value) is not None
+
+
+_STAMP_ID_RE = re.compile(r"[0-9a-fA-F]{64}")
+
+
+def is_stamp_id(value: str) -> bool:
+    """True for a postage stamp batch ID (64 hex characters).
+
+    Stamp IDs go into URL paths (/stamps/{id}), so anything else is refused
+    rather than sent.
+    """
+    return isinstance(value, str) and _STAMP_ID_RE.fullmatch(value) is not None
+
+
+def strip_hex_prefix(value: str) -> str:
+    """Drop a leading 0x, as chain tools print hashes and IDs."""
+    return value[2:] if isinstance(value, str) and value[:2] in ("0x", "0X") else value
+
 
 def read_file_content(file_path: Path) -> bytes:
     """Reads a file and returns its raw byte content."""

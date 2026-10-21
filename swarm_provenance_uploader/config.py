@@ -41,7 +41,7 @@ X402_ENABLED = os.getenv("X402_ENABLED", "false").lower() == "true"
 
 # Environment variable name that contains the private key
 # The actual private key should be in this env var, not in config
-X402_PRIVATE_KEY_ENV = os.getenv("X402_PRIVATE_KEY_ENV", "X402_PRIVATE_KEY")
+X402_PRIVATE_KEY_ENV = os.getenv("X402_PRIVATE_KEY_ENV", "X402_PRIVATE_KEY")  # gitleaks:allow (a variable name, not a key)
 
 # Network: "base-sepolia" (testnet, default) or "base" (mainnet)
 X402_NETWORK = os.getenv("X402_NETWORK", "base-sepolia")
@@ -57,6 +57,11 @@ except (ValueError, TypeError):
 
 # Custom RPC URL (optional, uses default if not set)
 X402_RPC_URL = os.getenv("X402_RPC_URL")
+
+# Only sign payments to this address (optional). Pin it to the gateway
+# operator's published pay-to address so a misconfigured or hostile gateway
+# cannot redirect payments.
+X402_EXPECTED_PAY_TO = os.getenv("X402_EXPECTED_PAY_TO") or None
 
 # --- Free Tier Mode ---
 # Sends X-Payment-Mode: free header (rate-limited to 3 req/min)

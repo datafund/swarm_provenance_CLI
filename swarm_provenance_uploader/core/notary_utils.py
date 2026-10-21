@@ -32,16 +32,13 @@ def verify_notary_signature(
     5. Verify EIP-191 signature using eth_account
     """
     # 1. Find notary signature
-    signatures = document.get("signatures", [])
-    if not signatures:
+    malformed = malformed_signatures_reason(document)
+    if malformed:
+        return False, f"Malformed signatures: {malformed}"
+    if not (isinstance(document, dict) and document.get("signatures")):
         return False, "No signatures found in document"
 
-    notary_sig = None
-    for sig in signatures:
-        if sig.get("type") == "notary":
-            notary_sig = sig
-            break
-
+    notary_sig = extract_notary_signature(document)
     if not notary_sig:
         return False, "No notary signature found in document"
 
@@ -74,7 +71,8 @@ def verify_notary_signature(
         from eth_account import Account
         from eth_account.messages import encode_defunct
     except ImportError:
-        return False, "eth_account not installed (pip install swarm-provenance-uploader[blockchain])"
+        from .._requirements import INSTALL_ETH_ACCOUNT
+        return False, f"eth_account not installed ({INSTALL_ETH_ACCOUNT})"
 
     signable = encode_defunct(text=message)
     signature = notary_sig.get("signature", "")
@@ -104,10 +102,37 @@ def extract_notary_signature(document: dict) -> Optional[dict]:
     Returns:
         The notary signature dict, or None if not found
     """
-    signatures = document.get("signatures", [])
+    if not isinstance(document, dict):
+        return None
+    signatures = document.get("signatures") or []
+    if not isinstance(signatures, list):
+        return None
+    for sig in signatures:
+        if isinstance(sig, dict) and sig.get("type") == "notary":
+            return sig
+    return None
+
+
+def malformed_signatures_reason(document) -> Optional[str]:
+    """
+    Why a document's `signatures` field cannot be checked, or None if it is well formed.
+
+    A present `signatures` field must be a list of objects, and a notary entry
+    must not carry non-text `signer`, `signature`, `data_hash` or `timestamp`
+    (missing ones are reported by verify_notary_signature). Anything else is
+    reported rather than treated as "unsigned" or crashing.
+    """
+    if not isinstance(document, dict) or "signatures" not in document:
+        return None
+    signatures = document["signatures"]
+    if not isinstance(signatures, list) or not all(isinstance(s, dict) for s in signatures):
+        return "'signatures' is not a list of objects"
     for sig in signatures:
         if sig.get("type") == "notary":
-            return sig
+            bad = [f for f in ("signer", "signature", "data_hash", "timestamp")
+                   if f in sig and not isinstance(sig[f], str)]
+            if bad:
+                return f"notary signature field(s) {', '.join(bad)} not text"
     return None
 
 

@@ -4,13 +4,14 @@ Chain provider for connecting to EVM-compatible networks.
 Manages Web3 connections to Base Sepolia (testnet) and Base (mainnet)
 for interacting with the DataProvenance smart contract.
 
-Requires optional dependencies: pip install swarm-provenance-uploader[blockchain]
+Requires optional dependencies (the `blockchain` extra): web3 and eth-account.
 """
 
 import logging
 from typing import List, Optional
 
 from .exceptions import ChainConfigurationError, ChainConnectionError
+from .._requirements import INSTALL_SIGNING_DEPS
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ def _import_web3():
         except ImportError as e:
             raise ChainConfigurationError(
                 "Blockchain dependencies not installed. "
-                "Run: pip install swarm-provenance-uploader[blockchain]"
+                f"Run: {INSTALL_SIGNING_DEPS}"
             ) from e
     return _Web3
 
@@ -163,22 +164,33 @@ class ChainProvider:
         """Get the Web3 instance."""
         return self._web3
 
-    def _try_fallback(self) -> bool:
+    def _try_fallback(self, tried: Optional[set] = None) -> bool:
         """
         Try fallback RPC URLs when the current one fails.
 
         Iterates through remaining URLs in ``_rpc_urls`` (skipping the
-        current ``rpc_url``), attempts ``is_connected()``, and switches
-        ``_web3`` and ``rpc_url`` on the first success.
+        current ``rpc_url`` and any in ``tried``), attempts
+        ``is_connected()``, and switches ``_web3`` and ``rpc_url`` on the
+        first success.
+
+        Args:
+            tried: URLs already tried by the caller in this attempt. Every
+                candidate probed here is added to it, so a dead endpoint is
+                probed once per call, and two endpoints that connect but fail
+                the caller's check are not switched between forever.
 
         Returns:
             True if a working fallback was found and switched to.
         """
         Web3 = _import_web3()
+        if tried is None:
+            tried = set()
+        tried.add(self.rpc_url)
 
         for url in self._rpc_urls:
-            if url == self.rpc_url:
+            if url in tried:
                 continue
+            tried.add(url)
             try:
                 candidate = Web3(
                     Web3.HTTPProvider(
@@ -209,30 +221,32 @@ class ChainProvider:
         Raises:
             ChainConnectionError: If connection fails (after trying fallbacks).
         """
-        try:
-            if not self._web3.is_connected():
+        tried = set()
+        while True:
+            try:
+                if not self._web3.is_connected():
+                    raise ChainConnectionError(
+                        f"Cannot connect to RPC endpoint: {self.rpc_url}",
+                        rpc_url=self.rpc_url,
+                    )
+                actual_chain_id = self._web3.eth.chain_id
+                if actual_chain_id != self.chain_id:
+                    raise ChainConnectionError(
+                        f"Chain ID mismatch: expected {self.chain_id}, got {actual_chain_id}",
+                        rpc_url=self.rpc_url,
+                    )
+                return True
+            except Exception as e:
+                # Each URL is tried at most once per call
+                tried.add(self.rpc_url)
+                if self._try_fallback(tried):
+                    continue
+                if isinstance(e, ChainConnectionError):
+                    raise
                 raise ChainConnectionError(
-                    f"Cannot connect to RPC endpoint: {self.rpc_url}",
+                    f"RPC health check failed: {e}",
                     rpc_url=self.rpc_url,
-                )
-            actual_chain_id = self._web3.eth.chain_id
-            if actual_chain_id != self.chain_id:
-                raise ChainConnectionError(
-                    f"Chain ID mismatch: expected {self.chain_id}, got {actual_chain_id}",
-                    rpc_url=self.rpc_url,
-                )
-            return True
-        except ChainConnectionError:
-            if self._try_fallback():
-                return self.health_check()
-            raise
-        except Exception as e:
-            if self._try_fallback():
-                return self.health_check()
-            raise ChainConnectionError(
-                f"RPC health check failed: {e}",
-                rpc_url=self.rpc_url,
-            ) from e
+                ) from e
 
     def get_block_number(self) -> int:
         """
@@ -244,15 +258,18 @@ class ChainProvider:
         Raises:
             ChainConnectionError: If RPC call fails (after trying fallbacks).
         """
-        try:
-            return self._web3.eth.block_number
-        except Exception as e:
-            if self._try_fallback():
-                return self.get_block_number()
-            raise ChainConnectionError(
-                f"Failed to get block number: {e}",
-                rpc_url=self.rpc_url,
-            ) from e
+        tried = set()
+        while True:
+            try:
+                return self._web3.eth.block_number
+            except Exception as e:
+                tried.add(self.rpc_url)
+                if self._try_fallback(tried):
+                    continue
+                raise ChainConnectionError(
+                    f"Failed to get block number: {e}",
+                    rpc_url=self.rpc_url,
+                ) from e
 
     def get_explorer_tx_url(self, tx_hash: str) -> Optional[str]:
         """
