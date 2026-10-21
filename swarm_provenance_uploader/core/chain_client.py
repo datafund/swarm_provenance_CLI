@@ -284,7 +284,8 @@ class ChainClient:
                     f"The RPC endpoint failed while building the transaction: {e}",
                     rpc_url=self._provider.rpc_url,
                 ) from e
-            raise ChainTransactionError(f"Transaction failed: {e}") from e
+            # No "Transaction failed:" prefix: the CLI adds its own
+            raise ChainTransactionError(f"Could not build the transaction: {e}") from e
 
     def _send_transaction(
         self,

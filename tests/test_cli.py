@@ -5901,6 +5901,23 @@ class TestChainCompositeStepFailures:
         )
         client.set_status.side_effect = lambda *a, **k: ChainClient.set_status(inner, *a, **k)
 
+    def test_plain_transform_build_error_single_prefix(self, mocker):
+        """An error while building is printed with one "Transaction failed:" prefix."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        client = self._client(mocker)
+        inner = mocker.MagicMock()
+        inner._build_tx = lambda build, *a, **k: ChainClient._build_tx(inner, build, *a, **k)
+        inner._provider.deploy_block = None
+        inner._contract.build_record_transformation_tx.side_effect = TypeError("unexpected argument")
+        client.transform.side_effect = lambda *a, **k: ChainClient.transform(inner, *a, **k)
+
+        result = runner.invoke(app, ["chain", "transform", DUMMY_SWARM_REF, "c" * 64])
+
+        assert result.exit_code == 1, result.output
+        assert "ERROR: Transaction failed: Could not build the transaction: unexpected argument" in result.output
+        assert result.output.count("Transaction failed") == 1
+
     @pytest.mark.parametrize("args", [PROTECT, TRANSFORM], ids=["protect", "transform"])
     def test_restrict_reverts_in_gas_estimation(self, mocker, args):
         """A revert raised by building the transaction keeps the completed hashes (#175)."""

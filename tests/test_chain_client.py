@@ -2989,6 +2989,16 @@ class TestBuildTransactionErrors:
         assert exc_info.value.wallet_address == DUMMY_ADDRESS
         assert exc_info.value.tx_hash is None
 
+    def test_other_error_in_build(self, mock_chain_deps):
+        """Any other error becomes ChainTransactionError, without a doubled prefix."""
+        client = self._fail_build(mock_chain_deps, TypeError("unexpected argument"))
+
+        with pytest.raises(ChainTransactionError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert str(exc_info.value) == "Could not build the transaction: unexpected argument"
+        assert exc_info.value.tx_hash is None
+
     def test_validation_error_unchanged(self, mock_chain_deps):
         """A chain error raised while building passes through as it is."""
         client = _write_client(mock_chain_deps, [])
