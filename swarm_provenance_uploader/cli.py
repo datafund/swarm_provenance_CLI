@@ -2132,6 +2132,25 @@ def notary_verify(
 # --- Chain Subcommands ---
 
 
+def _insufficient_funds_json(e: "exceptions.InsufficientFundsError") -> dict:
+    """JSON fields for an InsufficientFundsError."""
+    from .chain.provider import CHAIN_PRESETS
+
+    data = {
+        "error": "insufficient_funds",
+        "wallet_address": e.wallet_address,
+        "balance_eth": f"{(e.balance_wei or 0) / 1e18:.6f}",
+        "estimated_cost_eth": f"{(e.estimated_cost_wei or 0) / 1e18:.6f}",
+        "chain": e.chain_name,
+    }
+    preset = CHAIN_PRESETS.get(e.chain_name or "", {})
+    if preset.get("faucet_url"):
+        data["faucet_url"] = preset["faucet_url"]
+    if preset.get("bridge_url"):
+        data["bridge_url"] = preset["bridge_url"]
+    return data
+
+
 def _handle_insufficient_funds(
     e: "exceptions.InsufficientFundsError",
     output_json: bool = False,
@@ -2143,19 +2162,7 @@ def _handle_insufficient_funds(
     cost_eth = (e.estimated_cost_wei or 0) / 1e18
 
     if output_json:
-        data = {
-            "error": "insufficient_funds",
-            "wallet_address": e.wallet_address,
-            "balance_eth": f"{balance_eth:.6f}",
-            "estimated_cost_eth": f"{cost_eth:.6f}",
-            "chain": e.chain_name,
-        }
-        preset = CHAIN_PRESETS.get(e.chain_name or "", {})
-        if preset.get("faucet_url"):
-            data["faucet_url"] = preset["faucet_url"]
-        if preset.get("bridge_url"):
-            data["bridge_url"] = preset["bridge_url"]
-        typer.echo(json.dumps(data, indent=2))
+        typer.echo(json.dumps(_insufficient_funds_json(e), indent=2))
         return
 
     typer.secho("ERROR: Insufficient funds for gas.", fg=typer.colors.RED, err=True)
@@ -2235,6 +2242,91 @@ def _print_completed_steps(steps: dict) -> None:
         typer.echo(f"  {name.capitalize()}: tx {step.tx_hash}")
         if step.explorer_url:
             typer.echo(f"    Explorer: {step.explorer_url}")
+
+
+# Steps of the composite commands (`chain protect`, `chain transform
+# --restrict-original`), in order. "anchor" appears in the JSON output only
+# when it was recorded; "transform" and "restrict" always appear (null when
+# not recorded).
+_COMPOSITE_STEPS = ("anchor", "transform", "restrict")
+
+_COMPOSITE_STEP_LABELS = {
+    "anchor": "Failed to anchor new hash",
+    "transform": "Failed to record transformation",
+    "restrict": "Failed to restrict original",
+}
+
+
+def _composite_json(steps: dict) -> dict:
+    """JSON for the steps of a composite command, with partial_failure false."""
+    output = {}
+    for name in _COMPOSITE_STEPS:
+        if name in steps:
+            output[name] = steps[name].model_dump()
+        elif name != "anchor":
+            output[name] = None
+    output["partial_failure"] = False
+    return output
+
+
+def _step_error_json(e: "exceptions.ChainError") -> dict:
+    """JSON fields for a step failure that is not an unconfirmed write."""
+    if isinstance(e, exceptions.InsufficientFundsError):
+        return _insufficient_funds_json(e)
+    if isinstance(e, exceptions.ChainTransactionError):
+        return {"error": "transaction_failed", "message": str(e), "tx_hash": e.tx_hash}
+    if isinstance(e, exceptions.ChainConnectionError):
+        return {"error": "connection_failed", "message": str(e)}
+    return {"error": "chain_error", "message": str(e)}
+
+
+def _composite_step_failed(
+    e: "exceptions.ChainError",
+    step: str,
+    steps: dict,
+    output_json: bool = False,
+    hint: Optional[str] = None,
+) -> None:
+    """Report a failed step of a composite command and exit 1.
+
+    `steps` holds the results of the steps that were recorded before the
+    failure. Their transaction hashes are always reported, so a mined
+    transaction is never lost from the output.
+
+    JSON output: the step results (see `_composite_json`), "partial_failure"
+    (true only if an earlier step was recorded), "failed_step", and either
+    "unconfirmed" (the write was mined but is not confirmed as recorded) or
+    "error" (any other failure).
+    """
+    unconfirmed = isinstance(e, exceptions.TransactionUnconfirmedError)
+    if output_json:
+        output = _composite_json(steps)
+        output["partial_failure"] = bool(steps)
+        output["failed_step"] = step
+        if unconfirmed:
+            output["unconfirmed"] = _not_recorded_json(e)
+        else:
+            output["error"] = _step_error_json(e)
+        typer.echo(json.dumps(output, indent=2))
+        raise typer.Exit(code=1)
+
+    _print_completed_steps(steps)
+    label = _COMPOSITE_STEP_LABELS[step]
+    if unconfirmed:
+        _handle_not_recorded(e)
+    elif isinstance(e, exceptions.InsufficientFundsError):
+        typer.secho(f"ERROR: {label}.", fg=typer.colors.RED, err=True)
+        _handle_insufficient_funds(e)
+    elif isinstance(e, exceptions.ChainConnectionError):
+        typer.secho(f"ERROR: {label}. Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+    else:
+        typer.secho(f"ERROR: {label}: {e}", fg=typer.colors.RED, err=True)
+        tx_hash = getattr(e, "tx_hash", None)
+        if tx_hash:
+            typer.echo(f"  Transaction: {tx_hash}", err=True)
+    if hint:
+        typer.echo(hint, err=True)
+    raise typer.Exit(code=1)
 
 
 @chain_app.command("balance")
@@ -2910,7 +3002,15 @@ def chain_transform(
         _chain_config["gas_limit"] = gas
     try:
         client = _get_chain_client(verbose=verbose)
-        result = client.transform(original_hash, new_hash, description=description, verbose=verbose)
+        try:
+            result = client.transform(original_hash, new_hash, description=description, verbose=verbose)
+        except exceptions.DataNotRegisteredError:
+            raise
+        except exceptions.ChainError as e:
+            # With --restrict-original this is the first step of a composite command
+            if restrict_original:
+                _composite_step_failed(e, "transform", {}, output_json=output_json)
+            raise
     except typer.Exit:
         raise
     except exceptions.DataNotRegisteredError as e:
@@ -2942,29 +3042,15 @@ def chain_transform(
     if restrict_original:
         try:
             status_result = client.set_status(original_hash, status=1, verbose=verbose)
-        except exceptions.TransactionUnconfirmedError as e:
-            # The restrict step was not recorded: report it and exit 1
-            if output_json:
-                typer.echo(json.dumps({
-                    "transform": result.model_dump(),
-                    "restrict": None,
-                    "partial_failure": True,
-                    "unconfirmed": _not_recorded_json(e),
-                }, indent=2))
-            else:
-                _handle_not_recorded(e)
-                typer.echo(f"  Restrict manually: swarm-prov-upload chain status {original_hash} --set restricted", err=True)
-                _print_completed_steps({"transform": result})
-            raise typer.Exit(code=1)
         except exceptions.ChainError as e:
-            typer.secho(f"\nWARNING: Transform succeeded but failed to restrict original: {e}", fg=typer.colors.YELLOW, err=True)
+            _composite_step_failed(
+                e, "restrict", {"transform": result}, output_json=output_json,
+                hint=f"  Restrict manually: swarm-prov-upload chain status {original_hash} --set restricted",
+            )
 
     if output_json:
         if restrict_original:
-            combined = {
-                "transform": result.model_dump(),
-                "restrict": status_result.model_dump() if status_result else None,
-            }
+            combined = _composite_json({"transform": result, "restrict": status_result})
             typer.echo(json.dumps(combined, indent=2))
         else:
             typer.echo(json.dumps(result.model_dump(), indent=2))
@@ -3017,25 +3103,6 @@ def chain_protect(
 
     results = {}
 
-    def not_recorded_exit(e: "exceptions.TransactionUnconfirmedError", hint: Optional[str] = None):
-        """A step was not recorded: report it and the completed steps, exit 1."""
-        if output_json:
-            output = {}
-            if "anchor" in results:
-                output["anchor"] = results["anchor"].model_dump()
-            output["transform"] = results["transform"].model_dump() if "transform" in results else None
-            output["restrict"] = None
-            # Partial only if an earlier step was recorded
-            output["partial_failure"] = bool(results)
-            output["unconfirmed"] = _not_recorded_json(e)
-            typer.echo(json.dumps(output, indent=2))
-        else:
-            _handle_not_recorded(e)
-            if hint:
-                typer.echo(hint, err=True)
-            _print_completed_steps(results)
-        raise typer.Exit(code=1)
-
     # Step 1: Verify original is registered and ACTIVE
     try:
         record = client.get(original_hash, verbose=verbose)
@@ -3066,14 +3133,8 @@ def chain_protect(
             # Already anchored is fine for protect — continue with transform
             if not output_json:
                 typer.secho(f"New hash already anchored, continuing.", fg=typer.colors.YELLOW)
-        except exceptions.TransactionUnconfirmedError as e:
-            not_recorded_exit(e)
-        except exceptions.InsufficientFundsError as e:
-            _handle_insufficient_funds(e, output_json=output_json)
-            raise typer.Exit(code=1)
         except exceptions.ChainError as e:
-            typer.secho(f"ERROR: Failed to anchor new hash: {e}", fg=typer.colors.RED, err=True)
-            raise typer.Exit(code=1)
+            _composite_step_failed(e, "anchor", results, output_json=output_json)
 
     # Step 3: Record transformation
     try:
@@ -3081,51 +3142,27 @@ def chain_protect(
         results["transform"] = transform_result
         if not output_json:
             typer.secho(f"Transformation recorded.", fg=typer.colors.GREEN)
-    except exceptions.TransactionUnconfirmedError as e:
-        not_recorded_exit(e)
-    except exceptions.InsufficientFundsError as e:
-        _handle_insufficient_funds(e, output_json=output_json)
-        raise typer.Exit(code=1)
     except exceptions.ChainError as e:
-        typer.secho(f"ERROR: Failed to record transformation: {e}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+        _composite_step_failed(e, "transform", results, output_json=output_json)
 
     # Step 4: Restrict original
-    restrict_failed = False
     try:
         status_result = client.set_status(original_hash, status=1, verbose=verbose)
         results["restrict"] = status_result
         if not output_json:
             typer.secho(f"Original hash restricted.", fg=typer.colors.GREEN)
-    except exceptions.TransactionUnconfirmedError as e:
-        not_recorded_exit(
-            e,
+    except exceptions.ChainError as e:
+        _composite_step_failed(
+            e, "restrict", results, output_json=output_json,
             hint=f"  Restrict manually: swarm-prov-upload chain status {original_hash} --set restricted",
         )
-    except exceptions.ChainError as e:
-        restrict_failed = True
-        typer.secho(
-            f"\nWARNING: Transform succeeded but failed to restrict original: {e}",
-            fg=typer.colors.YELLOW, err=True,
-        )
-        typer.echo(f"  Restrict manually: swarm-prov-upload chain status {original_hash} --set restricted", err=True)
 
     if output_json:
-        output = {}
-        if "anchor" in results:
-            output["anchor"] = results["anchor"].model_dump()
-        output["transform"] = results["transform"].model_dump()
-        output["restrict"] = results["restrict"].model_dump() if "restrict" in results else None
-        output["partial_failure"] = restrict_failed
-        typer.echo(json.dumps(output, indent=2))
+        typer.echo(json.dumps(_composite_json(results), indent=2))
         return
 
-    if restrict_failed:
-        typer.secho(f"\nProtect partially complete.", fg=typer.colors.YELLOW, bold=True)
-        typer.echo(f"  Original:  {original_hash} (restrict failed)")
-    else:
-        typer.secho(f"\nProtect complete!", fg=typer.colors.GREEN, bold=True)
-        typer.echo(f"  Original:  {original_hash} -> RESTRICTED")
+    typer.secho(f"\nProtect complete!", fg=typer.colors.GREEN, bold=True)
+    typer.echo(f"  Original:  {original_hash} -> RESTRICTED")
     typer.echo(f"  New:       {new_hash}")
     if description:
         typer.echo(f"  Desc:      {description}")
