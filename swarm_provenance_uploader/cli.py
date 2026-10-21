@@ -2173,6 +2173,39 @@ def _handle_insufficient_funds(
         typer.echo(f"\n  Bridge ETH to Base: {bridge}", err=True)
 
 
+def _handle_not_recorded(
+    e: "exceptions.TransactionNotRecordedError",
+    output_json: bool = False,
+) -> None:
+    """Report a transaction that succeeded without the contract's expected events."""
+    if output_json:
+        typer.echo(json.dumps({
+            "error": "not_recorded",
+            "tx_hash": e.tx_hash,
+            "explorer_url": e.explorer_url,
+            "contract_address": e.contract_address,
+            "event": e.event_name,
+            "expected_count": e.expected_count,
+            "emitted_count": e.emitted_count,
+        }, indent=2))
+        return
+
+    typer.secho(
+        "ERROR: Not recorded. The transaction succeeded, but the contract did not "
+        "emit the expected events.",
+        fg=typer.colors.RED, err=True,
+    )
+    typer.echo(f"  Transaction: {e.tx_hash}", err=True)
+    if e.explorer_url:
+        typer.echo(f"  Explorer:    {e.explorer_url}", err=True)
+    typer.echo(f"  Contract:    {e.contract_address}", err=True)
+    typer.echo(
+        f"  Events:      {e.emitted_count} of {e.expected_count} {e.event_name}",
+        err=True,
+    )
+    typer.echo("  Check the contract address and chain before you try again.", err=True)
+
+
 @chain_app.command("balance")
 def chain_balance(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
@@ -2424,6 +2457,9 @@ def chain_anchor(
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
         raise typer.Exit(code=1)
+    except exceptions.TransactionNotRecordedError as e:
+        _handle_not_recorded(e, output_json=output_json)
+        raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -2478,6 +2514,9 @@ def chain_set_storage_ref(
         raise
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
+        raise typer.Exit(code=1)
+    except exceptions.TransactionNotRecordedError as e:
+        _handle_not_recorded(e, output_json=output_json)
         raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
@@ -2577,6 +2616,9 @@ def chain_access(
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
         raise typer.Exit(code=1)
+    except exceptions.TransactionNotRecordedError as e:
+        _handle_not_recorded(e, output_json=output_json)
+        raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -2642,6 +2684,9 @@ def chain_status(
             raise typer.Exit(code=1)
         except exceptions.InsufficientFundsError as e:
             _handle_insufficient_funds(e, output_json=output_json)
+            raise typer.Exit(code=1)
+        except exceptions.TransactionNotRecordedError as e:
+            _handle_not_recorded(e, output_json=output_json)
             raise typer.Exit(code=1)
         except exceptions.ChainTransactionError as e:
             typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
@@ -2718,6 +2763,9 @@ def chain_transfer(
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
         raise typer.Exit(code=1)
+    except exceptions.TransactionNotRecordedError as e:
+        _handle_not_recorded(e, output_json=output_json)
+        raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -2779,6 +2827,9 @@ def chain_delegate(
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
         raise typer.Exit(code=1)
+    except exceptions.TransactionNotRecordedError as e:
+        _handle_not_recorded(e, output_json=output_json)
+        raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -2837,6 +2888,9 @@ def chain_transform(
         raise typer.Exit(code=1)
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
+        raise typer.Exit(code=1)
+    except exceptions.TransactionNotRecordedError as e:
+        _handle_not_recorded(e, output_json=output_json)
         raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
@@ -3056,6 +3110,9 @@ def chain_merge(
         raise typer.Exit(code=1)
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
+        raise typer.Exit(code=1)
+    except exceptions.TransactionNotRecordedError as e:
+        _handle_not_recorded(e, output_json=output_json)
         raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)

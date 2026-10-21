@@ -5358,3 +5358,63 @@ class TestDownloadWithoutEthAccount:
         assert result.exit_code == 1
         assert "eth-account is not installed" in result.output
         assert "FAILED" not in result.output
+
+
+class TestChainNotRecorded:
+    """A transaction that succeeded without the contract's events is reported as not recorded (#166)."""
+
+    COMMANDS = [
+        ("anchor", ["chain", "anchor", DUMMY_SWARM_REF]),
+        ("set_storage_ref", ["chain", "set-storage-ref", DUMMY_SWARM_REF, "c" * 64]),
+        ("access", ["chain", "access", DUMMY_SWARM_REF]),
+        ("set_status", ["chain", "status", DUMMY_SWARM_REF, "--set", "restricted"]),
+        ("transfer_ownership", ["chain", "transfer", DUMMY_SWARM_REF, "--to", DUMMY_ADDRESS]),
+        ("set_delegate", ["chain", "delegate", DUMMY_ADDRESS, "--authorize"]),
+        ("transform", ["chain", "transform", DUMMY_SWARM_REF, "c" * 64, "--description", "d"]),
+        ("merge_transform", ["chain", "merge", "a" * 64, "b" * 64, "c" * 64, "--description", "d"]),
+    ]
+
+    def _error(self):
+        from swarm_provenance_uploader.exceptions import TransactionNotRecordedError
+
+        return TransactionNotRecordedError(
+            f"Not recorded: transaction {DUMMY_TX_HASH} succeeded",
+            tx_hash=DUMMY_TX_HASH,
+            event_name="DataAccessed",
+            expected_count=1,
+            emitted_count=0,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=DUMMY_EXPLORER_URL,
+        )
+
+    @pytest.mark.parametrize("method,args", COMMANDS, ids=[c[0] for c in COMMANDS])
+    def test_not_recorded_exits_nonzero(self, mocker, method, args):
+        """Each write command prints "not recorded" with the tx hash and exits 1."""
+        mock_client = mocker.MagicMock()
+        getattr(mock_client, method).side_effect = self._error()
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        assert "not recorded" in result.output.lower()
+        assert DUMMY_TX_HASH in result.output
+        assert DUMMY_EXPLORER_URL in result.output
+        assert "Transaction failed" not in result.output
+
+    @pytest.mark.parametrize("method,args", COMMANDS, ids=[c[0] for c in COMMANDS])
+    def test_not_recorded_json(self, mocker, method, args):
+        """With --json, the error is a JSON object with the tx hash."""
+        mock_client = mocker.MagicMock()
+        getattr(mock_client, method).side_effect = self._error()
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, args + ["--json"])
+
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.output)
+        assert output["error"] == "not_recorded"
+        assert output["tx_hash"] == DUMMY_TX_HASH
+        assert output["explorer_url"] == DUMMY_EXPLORER_URL
+        assert output["expected_count"] == 1
+        assert output["emitted_count"] == 0

@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- Chain writes (`anchor`, `access`, `status --set`, `transfer`, `delegate`, `transform`, `merge`, `set-storage-ref`, `protect`, and the batch methods) are no longer reported as recorded on a status-1 receipt alone. Each write now requires the contract's own event, emitted by the configured contract address: `DataRegistered`, `StorageRefLinked`, `DataTransformed`, `DataMerged`, `DataAccessed`, `DataStatusChanged`, `DataOwnershipTransferred` or `DelegateAuthorized`. Batch writes require one event per item. When the events are missing, the CLI prints "Not recorded" with the transaction hash and explorer link, and exits 1; with `--json`, it prints an `{"error": "not_recorded", ...}` object. Library callers get the new `TransactionNotRecordedError`, a subclass of `ChainTransactionError` that carries `tx_hash`, `explorer_url`, `event_name`, `expected_count` and `emitted_count` (#166)
+- Before the first write, the client reads the code at the configured contract address once (`eth_getCode`). If there is no code, it raises `ChainConfigurationError` before anything is signed or sent; a transaction to such an address succeeded and recorded nothing (#166)
+
 ## [0.11.0] - 2026-10-21
 
 Payment safety (epic #145).

@@ -88,6 +88,32 @@ class InsufficientFundsError(ChainTransactionError):
         self.chain_name = chain_name
 
 
+class TransactionNotRecordedError(ChainTransactionError):
+    """Transaction succeeded (status 1) but the contract did not emit the expected events.
+
+    The transaction was mined, so it cost gas, but the write was not recorded
+    as asked. For example, the configured address has no contract, or a batch
+    recorded fewer items than were sent.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        tx_hash: str = None,
+        event_name: str = None,
+        expected_count: int = None,
+        emitted_count: int = None,
+        contract_address: str = None,
+        explorer_url: str = None,
+    ):
+        super().__init__(message, tx_hash=tx_hash)
+        self.event_name = event_name
+        self.expected_count = expected_count
+        self.emitted_count = emitted_count
+        self.contract_address = contract_address
+        self.explorer_url = explorer_url
+
+
 class TransformationAlreadyExistsError(ChainError):
     """Transformation (original -> new) pair is already recorded on-chain."""
 

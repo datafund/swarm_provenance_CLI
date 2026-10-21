@@ -312,6 +312,7 @@ from .chain.exceptions import (  # noqa: F401, E402
     ChainTransactionError,
     ChainValidationError,
     InsufficientFundsError,
+    TransactionNotRecordedError,
     DataNotRegisteredError,
     DataAlreadyRegisteredError,
     TransformationAlreadyExistsError,
