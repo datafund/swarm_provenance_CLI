@@ -3099,8 +3099,41 @@ class TestSendTransactionRevertReason:
         with pytest.raises(ChainTransactionError) as exc_info:
             client.set_status(swarm_hash=DUMMY_HASH, status=1)
 
-        assert str(exc_info.value) == "Transaction failed: execution reverted: Not owner"
+        # No "Transaction failed:" prefix: the CLI adds it
+        assert str(exc_info.value) == "execution reverted: Not owner"
         assert "0x08c379a0" not in str(exc_info.value)
+
+    def test_revert_mentioning_insufficient_funds_stays_a_revert(self, mock_chain_deps):
+        client = _write_client(mock_chain_deps, [])
+        mock_chain_deps["web3_instance"].eth.estimate_gas.side_effect = ContractLogicError(
+            "execution reverted: insufficient funds in vault"
+        )
+
+        with pytest.raises(ChainTransactionError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert not isinstance(exc_info.value, InsufficientFundsError)
+        assert str(exc_info.value) == "execution reverted: insufficient funds in vault"
+
+    def test_insufficient_funds_message_has_no_tuple(self, mock_chain_deps):
+        client = _write_client(mock_chain_deps, [])
+        mock_chain_deps["web3_instance"].eth.estimate_gas.side_effect = Web3RPCError(
+            "{'code': -32000, 'message': 'insufficient funds for gas * price + value'}"
+        )
+
+        with pytest.raises(InsufficientFundsError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert str(exc_info.value) == "Insufficient funds for gas: insufficient funds for gas * price + value"
+
+    def test_other_send_error_has_no_prefix(self, mock_chain_deps):
+        client = _write_client(mock_chain_deps, [])
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.side_effect = Exception("nonce too low")
+
+        with pytest.raises(ChainTransactionError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert str(exc_info.value) == "nonce too low"
 
     def test_estimate_gas_already_registered(self, mock_chain_deps):
         """anchor still detects an "already registered" revert from estimate_gas."""
@@ -3165,3 +3198,42 @@ def test_build_tx_rejection_text_and_timeout_with_web3_classes():
     timeout = web3_exceptions.RequestTimedOut("request timed out")
     with pytest.raises(ChainConnectionError):
         ChainClient._build_tx(MagicMock(), failing(timeout))
+
+
+class _WithMessage(Exception):
+    def __init__(self, message):
+        super().__init__(message)
+        self.message = message
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["{[1]: 2}", "{'message': " + "-" * 100_000 + "1}"],
+    ids=["unhashable key", "long minus chain"],
+)
+def test_error_reason_bounded(message):
+    """A hostile message is returned as a string, quickly, without raising."""
+    import time
+    from swarm_provenance_uploader.core.chain_client import _error_reason
+
+    start = time.monotonic()
+    reason = _error_reason(_WithMessage(message))
+    assert isinstance(reason, str)
+    assert time.monotonic() - start < 1
+
+
+def test_build_tx_timeout_reason_with_web3_classes():
+    """A node timeout reads as the node's message, not the dict repr."""
+    web3_exceptions = pytest.importorskip("web3.exceptions")
+    from swarm_provenance_uploader.core.chain_client import ChainClient
+
+    error = {"code": -32000, "message": "request timed out"}
+    timeout = web3_exceptions.RequestTimedOut(str(error), rpc_response={"error": error})
+
+    def build():
+        raise timeout
+
+    with pytest.raises(ChainConnectionError) as exc_info:
+        ChainClient._build_tx(MagicMock(), build)
+    assert str(exc_info.value).endswith(": request timed out")
+    assert "{" not in str(exc_info.value)

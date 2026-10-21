@@ -102,10 +102,10 @@ def _error_reason(error: Exception) -> str:
     if isinstance(rpc_error, dict) and rpc_error.get("message"):
         return str(rpc_error["message"])
     message = getattr(error, "message", None)
-    if isinstance(message, str) and message.startswith("{"):
+    if isinstance(message, str) and message.startswith("{") and len(message) <= 4096:
         try:
             message = ast.literal_eval(message)
-        except (ValueError, SyntaxError):
+        except Exception:  # SyntaxError, ValueError, TypeError, MemoryError, RecursionError
             pass
     if isinstance(message, dict) and message.get("message"):
         return str(message["message"])
@@ -289,13 +289,14 @@ class ChainClient:
                 # tuple; _error_reason returns the readable revert reason
                 reason = _error_reason(e)
                 raise ChainTransactionError(f"Transaction reverted: {reason}") from e
-            if "insufficient funds" in str(e).lower():
+            reason = _error_reason(e)
+            if "insufficient funds" in reason.lower():
                 try:
                     balance_wei = self._wallet.get_balance(self._provider.web3)
                 except Exception:
                     balance_wei = None
                 raise InsufficientFundsError(
-                    f"Insufficient funds for gas: {e}",
+                    f"Insufficient funds for gas: {reason}",
                     wallet_address=self._wallet.address,
                     balance_wei=balance_wei,
                     estimated_cost_wei=0,
@@ -309,7 +310,7 @@ class ChainClient:
             if _is_rpc_failure(e):
                 # Transport only: connection, timeout, or an answer that is not JSON-RPC
                 raise ChainConnectionError(
-                    f"The RPC endpoint failed while building the transaction: {e}",
+                    f"The RPC endpoint failed while building the transaction: {_error_reason(e)}",
                     rpc_url=self._provider.rpc_url,
                 ) from e
             # No "Transaction failed:" prefix: the CLI adds its own
@@ -429,12 +430,15 @@ class ChainClient:
         except (ChainTransactionError, InsufficientFundsError):
             raise
         except Exception as e:
-            # Detect "insufficient funds" in RPC error messages and convert
-            if "insufficient funds" in str(e).lower():
+            reason = _error_reason(e)
+            # Detect "insufficient funds" in RPC error messages and convert.
+            # A contract revert is checked first, as in _build_tx: its reason
+            # may contain the words without being a funding problem.
+            if not _is_contract_revert(e) and "insufficient funds" in reason.lower():
                 try:
                     balance_wei = self._wallet.get_balance(self._provider.web3)
                     raise InsufficientFundsError(
-                        f"Insufficient funds for gas: {e}",
+                        f"Insufficient funds for gas: {reason}",
                         wallet_address=self._wallet.address,
                         balance_wei=balance_wei,
                         estimated_cost_wei=0,
@@ -447,10 +451,8 @@ class ChainClient:
             tx_hash_str = None
             if "tx_hash" in dir():
                 tx_hash_str = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
-            raise ChainTransactionError(
-                f"Transaction failed: {_error_reason(e)}",
-                tx_hash=tx_hash_str,
-            ) from e
+            # No "Transaction failed:" prefix: the CLI adds its own
+            raise ChainTransactionError(reason, tx_hash=tx_hash_str) from e
 
     def _receipt_to_explorer_url(self, receipt: dict) -> Optional[str]:
         """Get explorer URL from a transaction receipt."""

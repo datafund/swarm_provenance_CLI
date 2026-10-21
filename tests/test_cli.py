@@ -5918,6 +5918,25 @@ class TestChainCompositeStepFailures:
         assert "ERROR: Transaction failed: Could not build the transaction: unexpected argument" in result.output
         assert result.output.count("Transaction failed") == 1
 
+    def test_plain_transform_send_error_single_prefix(self, mocker):
+        """A send-path error is printed with one "Transaction failed:" prefix."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        client = self._client(mocker)
+        inner = mocker.MagicMock()
+        inner._build_tx = lambda build, *a, **k: {"from": DUMMY_ADDRESS}
+        inner._provider.deploy_block = None
+        inner._gas_limit = 100_000
+        inner._provider.web3.eth.send_raw_transaction.side_effect = Exception("nonce too low")
+        inner._send_transaction = lambda *a, **k: ChainClient._send_transaction(inner, *a, **k)
+        client.transform.side_effect = lambda *a, **k: ChainClient.transform(inner, *a, **k)
+
+        result = runner.invoke(app, ["chain", "transform", DUMMY_SWARM_REF, "c" * 64])
+
+        assert result.exit_code == 1, result.output
+        assert "ERROR: Transaction failed: nonce too low" in result.output
+        assert result.output.count("Transaction failed") == 1
+
     @pytest.mark.parametrize("args", [PROTECT, TRANSFORM], ids=["protect", "transform"])
     def test_restrict_reverts_in_gas_estimation(self, mocker, args):
         """A revert raised by building the transaction keeps the completed hashes (#175)."""
