@@ -2153,6 +2153,31 @@ def _insufficient_funds_json(e: "exceptions.InsufficientFundsError") -> dict:
     return data
 
 
+def _rpc_rejection_message(e: Exception) -> Optional[str]:
+    """The node's message if e is a JSON-RPC error answer, else None.
+
+    A Web3RPCError means the node answered and refused the request (for
+    example "nonce too low"), so it is not a connection failure. Its
+    RequestTimedOut subclass is: the node did not answer in time.
+    """
+    try:
+        from web3 import exceptions as web3_exceptions
+    except ImportError:
+        return None
+    rpc_error = getattr(web3_exceptions, "Web3RPCError", None)
+    timed_out = getattr(web3_exceptions, "RequestTimedOut", None)
+    if not isinstance(rpc_error, type) or not isinstance(e, rpc_error):
+        return None
+    if isinstance(timed_out, type) and isinstance(e, timed_out):
+        return None
+    response = getattr(e, "rpc_response", None)
+    if isinstance(response, dict):
+        error = response.get("error")
+        if isinstance(error, dict) and error.get("message"):
+            return str(error["message"])
+    return str(e)
+
+
 def _report_unexpected_chain_error(e: Exception, verbose: bool = False) -> None:
     """Print an error that no chain command handles, without the RPC URL.
 
@@ -2166,6 +2191,11 @@ def _report_unexpected_chain_error(e: Exception, verbose: bool = False) -> None:
 
         trace = "".join(traceback.format_exception(type(e), e, e.__traceback__))
         typer.echo(redact_urls(trace), err=True)
+    rejection = _rpc_rejection_message(e)
+    if rejection is not None:
+        typer.secho(f"ERROR: The RPC rejected the request: {redact_urls(rejection)}",
+                    fg=typer.colors.RED, err=True)
+        return
     try:
         from .core.chain_client import _is_rpc_failure
         rpc_failure = _is_rpc_failure(e)

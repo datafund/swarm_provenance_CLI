@@ -6505,3 +6505,38 @@ class TestMergeErrorLinesOnStderr:
         assert result.exit_code == 1
         assert result.stdout == ""
         assert f"Hash: {'a' * 64}" in result.stderr
+
+
+class TestRpcRejectionIsNotConnectionError:
+    """A JSON-RPC error answer means the node answered: it is not "Cannot connect to chain"."""
+
+    def _invoke(self, mocker, error):
+        mock_client = mocker.MagicMock()
+        mock_client.verify.side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+        return runner.invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
+
+    def test_web3_rpc_error_uses_node_message(self, mocker):
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        error = web3_exceptions.Web3RPCError(
+            "{'code': -32000, 'message': 'nonce too low'}",
+            rpc_response={"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "nonce too low"}},
+        )
+        result = self._invoke(mocker, error)
+        assert result.exit_code == 1
+        assert "ERROR: The RPC rejected the request: nonce too low" in result.output
+        assert "Cannot connect to chain" not in result.output
+
+    def test_web3_rpc_error_without_response_uses_text(self, mocker):
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        error = web3_exceptions.Web3RPCError(f"rejected by {RPC_URLS_WITH_KEY[0]}")
+        result = self._invoke(mocker, error)
+        assert result.exit_code == 1
+        assert "ERROR: The RPC rejected the request: rejected by https://base-sepolia.g.alchemy.com/" in result.output
+        assert RPC_KEY not in result.output
+
+    def test_request_timed_out_is_connection_error(self, mocker):
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        result = self._invoke(mocker, web3_exceptions.RequestTimedOut("timed out"))
+        assert result.exit_code == 1
+        assert "ERROR: Cannot connect to chain: timed out" in result.output
