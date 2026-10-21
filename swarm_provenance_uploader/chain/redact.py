@@ -193,11 +193,8 @@ def redact_urls(text: Optional[str]) -> Optional[str]:
 
     def _full(match: "re.Match") -> str:
         url = match.group(0)
-        tail = ""
-        while url and url[-1] in _TRAILING:
-            tail = url[-1] + tail
-            url = url[:-1]
-        return redact_url(url) + tail
+        stripped = url.rstrip(_TRAILING)
+        return redact_url(stripped) + url[len(stripped):]
 
     text = _QUOTED_URL_RE.sub(lambda m: m.group(1) + _redact_loose(m.group(2)) + m.group(3), text)
     text = _URL_RE.sub(_full, text)

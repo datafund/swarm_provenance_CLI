@@ -206,3 +206,17 @@ class TestMalformedRpcUrls:
     def test_quoted_bare_host_unchanged(self):
         text = "No connection adapters were found for 'localhost:8545'"
         assert redact_urls(text) == text
+
+
+class TestRedactUrlsSpeed:
+    def test_long_run_of_trailing_punctuation(self):
+        """Trailing punctuation is stripped in linear time: a quadratic loop took 24 s here."""
+        import time
+
+        text = f"failed {PATH_KEY_URL}" + ")" * 1_000_000
+        start = time.perf_counter()
+        out = redact_urls(text)
+        elapsed = time.perf_counter() - start
+        assert KEY not in out
+        assert out.endswith(")" * 1_000_000)
+        assert elapsed < 1.0, f"took {elapsed:.2f} s"
