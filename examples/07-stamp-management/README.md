@@ -1,8 +1,8 @@
-# Example 07: Stamp Management
+# Example 07: Stamp management
 
 Demonstrates the full postage stamp lifecycle using the stamps subcommands.
 
-## What This Demonstrates
+## What this demonstrates
 
 - Checking stamp pool availability (`stamps pool-status`)
 - Uploading a file with verbose output to capture a stamp ID
@@ -11,7 +11,7 @@ Demonstrates the full postage stamp lifecycle using the stamps subcommands.
 - Health-checking a stamp (`stamps check <id>`)
 - Extending a stamp (`stamps extend <id>` — requires funded wallet)
 
-## Use Case
+## Use case
 
 Postage stamps are the payment mechanism for Swarm storage. Understanding how to manage stamps is essential for production deployments:
 
@@ -26,7 +26,7 @@ Postage stamps are the payment mechanism for Swarm storage. Understanding how to
 2. Gateway access (default, no setup needed)
 3. For `stamps extend`: a funded wallet with BZZ tokens (optional)
 
-## Quick Start
+## Quick start
 
 ### Shell
 
@@ -41,7 +41,7 @@ chmod +x demo.sh
 python run_demo.py
 ```
 
-## Step-by-Step Walkthrough
+## Step-by-step walkthrough
 
 ### 1. Check pool availability
 
@@ -87,7 +87,7 @@ swarm-prov-upload stamps extend <stamp_id> --amount 1000000
 
 Requires a funded wallet. This tops up the stamp to extend its lifetime.
 
-## Stamp Lifecycle Helper
+## Stamp lifecycle helper
 
 The `stamp_lifecycle.py` script runs the full lifecycle:
 

@@ -1,15 +1,15 @@
-# Example 05: Encrypted Data
+# Example 05: Encrypted data
 
 Demonstrates pre-encryption workflow for sensitive data on Swarm.
 
-## What This Demonstrates
+## What this demonstrates
 
 - Encrypting data locally before upload
 - Using `--enc "AES-256-GCM"` to tag the metadata envelope with encryption info
 - Downloading and verifying the encrypted payload is intact
 - Decrypting and verifying the content matches the original
 
-## Use Case
+## Use case
 
 When storing sensitive data (medical records, financial data, PII) on a decentralized network, the data should be encrypted before upload. The `--enc` flag doesn't perform encryption — it records the encryption method in the metadata envelope so consumers know how to decrypt.
 
@@ -25,7 +25,7 @@ When storing sensitive data (medical records, financial data, PII) on a decentra
 2. Gateway access (default, no setup needed)
 3. For shell demo: `openssl` (pre-installed on macOS/Linux)
 
-## Quick Start
+## Quick start
 
 ### Shell (uses openssl)
 
@@ -40,7 +40,7 @@ chmod +x demo.sh
 python run_demo.py
 ```
 
-## Step-by-Step Walkthrough
+## Step-by-step walkthrough
 
 ### 1. Encrypt the data locally
 
@@ -78,7 +78,7 @@ openssl enc -aes-256-cbc -d -in downloads/*.data -out decrypted.txt -pass file:k
 shasum -a 256 sensitive_data.txt decrypted.txt
 ```
 
-## Metadata Envelope
+## Metadata envelope
 
 When uploaded with `--enc "AES-256-GCM"`, the envelope includes:
 
@@ -93,7 +93,7 @@ When uploaded with `--enc "AES-256-GCM"`, the envelope includes:
 
 The `encryption` field tells consumers what algorithm was used, but the key is not stored on Swarm.
 
-## Security Notes
+## Security notes
 
 - The demo scripts use simplified encryption (openssl CBC / XOR) for illustration only
 - In production, use a proper encryption library with authenticated encryption (e.g., AES-256-GCM via `cryptography` library)

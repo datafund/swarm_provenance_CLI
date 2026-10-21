@@ -1,15 +1,15 @@
-# Example 09: Verification & Integrity
+# Example 09: Verification & integrity
 
 Demonstrates data verification, tamper detection, and integrity reporting.
 
-## What This Demonstrates
+## What this demonstrates
 
 - Uploading a document and verifying download integrity via SHA-256
 - Tamper detection: comparing original vs modified file hashes
 - Using `--verify` flag for notary signature verification
 - Generating a verification report
 
-## Use Case
+## Use case
 
 Content-addressed storage provides built-in integrity guarantees: any change to the data produces a different hash. This example shows how to:
 
@@ -25,7 +25,7 @@ Note: with the gateway backend (the default), `swarm-prov-upload download` does 
 1. Install the CLI: `pip install -e .`
 2. Gateway access (default, no setup needed)
 
-## Quick Start
+## Quick start
 
 ### Shell
 
@@ -40,7 +40,7 @@ chmod +x demo.sh
 python run_demo.py
 ```
 
-## Step-by-Step Walkthrough
+## Step-by-step walkthrough
 
 ### 1. Upload original document
 
@@ -75,9 +75,9 @@ swarm-prov-upload download <swarm_hash> --output-dir ./downloads --verify
 
 The `--verify` flag checks for notary signatures. If no signatures exist, the download still succeeds.
 
-## Helper Tools
+## Helper tools
 
-### Integrity Checker
+### Integrity checker
 
 Verify a Swarm reference against an expected hash:
 
@@ -86,7 +86,7 @@ python integrity_checker.py --ref <swarm_hash> --original-file sample_document.t
 python integrity_checker.py --ref <swarm_hash> --expected-hash <sha256>
 ```
 
-### Tamper Detection
+### Tamper detection
 
 Compare two files and show differences:
 
@@ -94,7 +94,7 @@ Compare two files and show differences:
 python tamper_detection.py --original sample_document.txt --tampered sample_document_tampered.txt
 ```
 
-## Sample Documents
+## Sample documents
 
 | File | Description |
 |------|-------------|

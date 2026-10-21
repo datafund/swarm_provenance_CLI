@@ -33,7 +33,7 @@ Real-world usage examples for the Swarm Provenance CLI toolkit.
 | [08](08-ci-cd-integration/) | **CI/CD Integration** | Archive build artifacts with GitHub Actions / GitLab CI |
 | [09](09-verification/) | **Verification & Integrity** | Tamper detection, SHA-256 verification, `--verify` flag |
 
-## Directory Structure
+## Directory structure
 
 ```
 examples/
@@ -62,7 +62,7 @@ examples/
     README.md, demo.sh, run_demo.py, integrity_checker.py, tamper_detection.py
 ```
 
-## Common Utilities
+## Common utilities
 
 The `common/` package provides shared helpers used across examples:
 
@@ -76,7 +76,7 @@ from common.sample_generator import generate_text_file, generate_json_file
 from common.verify import verify_download, compare_hashes
 ```
 
-## Running Examples
+## Running examples
 
 Each example directory contains:
 

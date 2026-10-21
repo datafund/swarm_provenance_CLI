@@ -1,4 +1,4 @@
-# x402 Payment Setup Guide
+# x402 payment setup guide
 
 This guide walks you through setting up x402 payments for the Swarm Provenance CLI.
 
@@ -12,7 +12,7 @@ x402 is a payment protocol that uses HTTP 402 "Payment Required" responses to en
 - EIP-712 signed messages (no gas required for signing)
 - Testnet support for development
 
-### How It Works
+### How it works
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -69,7 +69,7 @@ x402 is a payment protocol that uses HTTP 402 "Payment Required" responses to en
 - Base Sepolia ETH (for gas, testnet only)
 - Base Sepolia USDC (for payments, testnet only)
 
-## Step 1: Install x402 Dependencies
+## Step 1: Install x402 dependencies
 
 Install the CLI with x402 support:
 
@@ -82,7 +82,7 @@ This installs:
 - `web3` - Blockchain interaction
 - `x402` - x402 protocol library
 
-## Step 2: Create or Export a Wallet
+## Step 2: Create or export a wallet
 
 ### Option A: Use an existing wallet
 
@@ -106,7 +106,7 @@ print(f"Private key: {account.key.hex()}")
 
 **Important:** Store your private key securely. Never commit it to version control.
 
-## Step 3: Get Testnet Funds
+## Step 3: Get testnet funds
 
 For development and testing, use Base Sepolia testnet.
 
@@ -165,7 +165,7 @@ swarm-prov-upload x402 status
 swarm-prov-upload x402 balance
 ```
 
-## Step 5: Make a Payment
+## Step 5: Make a payment
 
 ### Interactive mode (default)
 
@@ -221,7 +221,7 @@ When a command fails with an unknown payment outcome, the error shows its key an
 
 Gateway support: datafund/swarm_connect has it on `dev` (staging) and not yet in production.
 
-## Switching to Mainnet
+## Switching to mainnet
 
 When ready for production:
 
@@ -305,7 +305,7 @@ The gateway's payment request names a different USDC signing domain than the tok
 
 The gateway doesn't support your configured network. Check that `X402_NETWORK` matches what the gateway accepts.
 
-## Security Best Practices
+## Security best practices
 
 1. **Never commit private keys** to version control
 2. **Use a dedicated wallet** for x402 payments, not your main wallet
@@ -314,9 +314,9 @@ The gateway doesn't support your configured network. Check that `X402_NETWORK` m
 5. **Review payment prompts** before confirming
 6. **Use environment files** (`.env`) instead of command line arguments for secrets
 
-## Network Details
+## Network details
 
-### Base Sepolia (Testnet)
+### Base Sepolia (testnet)
 
 | Property | Value |
 |----------|-------|
@@ -325,7 +325,7 @@ The gateway doesn't support your configured network. Check that `X402_NETWORK` m
 | USDC Contract | 0x036CbD53842c5426634e7929541eC2318f3dCF7e |
 | Block Explorer | https://sepolia.basescan.org |
 
-### Base (Mainnet)
+### Base (mainnet)
 
 | Property | Value |
 |----------|-------|
@@ -334,7 +334,7 @@ The gateway doesn't support your configured network. Check that `X402_NETWORK` m
 | USDC Contract | 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 |
 | Block Explorer | https://basescan.org |
 
-## Additional Resources
+## Additional resources
 
 - [x402 Protocol Documentation](https://x402.org)
 - [Base Documentation](https://docs.base.org)
