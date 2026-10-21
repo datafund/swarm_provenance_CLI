@@ -5889,6 +5889,52 @@ class TestChainCompositeStepFailures:
         assert output["error"]["error"] == "transaction_failed"
         assert output["error"]["tx_hash"] is None
 
+    def test_transform_not_registered_json(self, mocker):
+        """With --json, "not registered" is reported in the composite format."""
+        from swarm_provenance_uploader.exceptions import DataNotRegisteredError
+
+        client = self._client(mocker)
+        client.transform.side_effect = DataNotRegisteredError(
+            f"Data hash {DUMMY_SWARM_REF} is not registered on-chain", data_hash=DUMMY_SWARM_REF,
+        )
+
+        result = runner.invoke(app, self.TRANSFORM + ["--json"])
+
+        output = self._assert_json(result, "transform", [], "not_registered")
+        assert output["error"]["data_hash"] == DUMMY_SWARM_REF
+        client.set_status.assert_not_called()
+
+        # Text mode keeps its own message and the anchor hint
+        result = runner.invoke(app, self.TRANSFORM)
+        assert result.exit_code == 1, result.output
+        assert "Original hash is not registered on-chain" in result.output
+        assert "Anchor it first" in result.output
+
+    def test_protect_not_registered_json(self, mocker):
+        from swarm_provenance_uploader.exceptions import DataNotRegisteredError
+
+        client = self._client(mocker)
+        client.get.side_effect = DataNotRegisteredError("not registered", data_hash=DUMMY_SWARM_REF)
+
+        result = runner.invoke(app, self.PROTECT + ["--json"])
+
+        output = self._assert_json(result, "verify", [], "not_registered")
+        assert output["error"]["data_hash"] == DUMMY_SWARM_REF
+        client.anchor.assert_not_called()
+
+    def test_protect_not_active_json(self, mocker):
+        from swarm_provenance_uploader.models import DataStatusEnum
+
+        client = self._client(mocker)
+        client.get.return_value.status = DataStatusEnum.RESTRICTED
+
+        result = runner.invoke(app, self.PROTECT + ["--json"])
+
+        output = self._assert_json(result, "verify", [], "not_active")
+        assert output["error"]["status"] == "RESTRICTED"
+        assert "expected ACTIVE" in output["error"]["message"]
+        client.anchor.assert_not_called()
+
     def test_transform_without_restrict_unchanged(self, mocker):
         """Plain transform is not a composite command and keeps its output."""
         client = self._client(mocker)

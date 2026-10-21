@@ -2245,12 +2245,14 @@ def _print_completed_steps(steps: dict) -> None:
 
 
 # Steps of the composite commands (`chain protect`, `chain transform
-# --restrict-original`), in order. "anchor" appears in the JSON output only
+# --restrict-original`), in order. `protect` first checks the original hash
+# (failed_step "verify"), which writes nothing and has no result. "anchor" appears in the JSON output only
 # when it was recorded; "transform" and "restrict" always appear (null when
 # not recorded).
 _COMPOSITE_STEPS = ("anchor", "transform", "restrict")
 
 _COMPOSITE_STEP_LABELS = {
+    "verify": "Failed to check the original hash",
     "anchor": "Failed to anchor new hash",
     "transform": "Failed to record transformation",
     "restrict": "Failed to restrict original",
@@ -2273,6 +2275,8 @@ def _step_error_json(e: "exceptions.ChainError") -> dict:
     """JSON fields for a step failure that is not an unconfirmed write."""
     if isinstance(e, exceptions.InsufficientFundsError):
         return _insufficient_funds_json(e)
+    if isinstance(e, exceptions.DataNotRegisteredError):
+        return {"error": "not_registered", "message": str(e), "data_hash": e.data_hash}
     if isinstance(e, exceptions.ChainTransactionError):
         return {"error": "transaction_failed", "message": str(e), "tx_hash": e.tx_hash}
     if isinstance(e, exceptions.ChainConnectionError):
@@ -2286,6 +2290,7 @@ def _composite_step_failed(
     steps: dict,
     output_json: bool = False,
     hint: Optional[str] = None,
+    error_json: Optional[dict] = None,
 ) -> None:
     """Report a failed step of a composite command and exit 1.
 
@@ -2296,7 +2301,7 @@ def _composite_step_failed(
     JSON output: the step results (see `_composite_json`), "partial_failure"
     (true only if an earlier step was recorded), "failed_step", and either
     "unconfirmed" (the write was mined but is not confirmed as recorded) or
-    "error" (any other failure).
+    "error" (any other failure; `error_json` replaces the default object).
     """
     unconfirmed = isinstance(e, exceptions.TransactionUnconfirmedError)
     if output_json:
@@ -2306,7 +2311,7 @@ def _composite_step_failed(
         if unconfirmed:
             output["unconfirmed"] = _not_recorded_json(e)
         else:
-            output["error"] = _step_error_json(e)
+            output["error"] = error_json or _step_error_json(e)
         typer.echo(json.dumps(output, indent=2))
         raise typer.Exit(code=1)
 
@@ -3004,11 +3009,12 @@ def chain_transform(
         client = _get_chain_client(verbose=verbose)
         try:
             result = client.transform(original_hash, new_hash, description=description, verbose=verbose)
-        except exceptions.DataNotRegisteredError:
-            raise
         except exceptions.ChainError as e:
-            # With --restrict-original this is the first step of a composite command
-            if restrict_original:
+            # With --restrict-original this is the first step of a composite
+            # command. "Not registered" keeps its own text (with the anchor
+            # hint), but with --json it is reported in the composite format.
+            not_registered = isinstance(e, exceptions.DataNotRegisteredError)
+            if restrict_original and (output_json or not not_registered):
                 _composite_step_failed(e, "transform", {}, output_json=output_json)
             raise
     except typer.Exit:
@@ -3106,16 +3112,24 @@ def chain_protect(
     # Step 1: Verify original is registered and ACTIVE
     try:
         record = client.get(original_hash, verbose=verbose)
-    except exceptions.DataNotRegisteredError:
-        typer.secho(f"ERROR: Original hash is not registered on-chain.", fg=typer.colors.RED, err=True)
-        typer.echo(f"  Anchor it first: swarm-prov-upload chain anchor {original_hash}")
-        raise typer.Exit(code=1)
     except exceptions.ChainError as e:
-        typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        if output_json:
+            _composite_step_failed(e, "verify", results, output_json=True)
+        if isinstance(e, exceptions.DataNotRegisteredError):
+            typer.secho(f"ERROR: Original hash is not registered on-chain.", fg=typer.colors.RED, err=True)
+            typer.echo(f"  Anchor it first: swarm-prov-upload chain anchor {original_hash}")
+        else:
+            typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     from .models import DataStatusEnum
     if record.status != DataStatusEnum.ACTIVE:
+        message = f"Original hash status is {record.status.name}, expected ACTIVE."
+        if output_json:
+            _composite_step_failed(
+                exceptions.ChainValidationError(message), "verify", results, output_json=True,
+                error_json={"error": "not_active", "message": message, "status": record.status.name},
+            )
         typer.secho(
             f"ERROR: Original hash status is {record.status.name}, expected ACTIVE.",
             fg=typer.colors.RED, err=True,
