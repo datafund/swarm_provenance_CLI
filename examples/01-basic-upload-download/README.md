@@ -1,8 +1,8 @@
-# 01 - Basic Upload/Download
+# 01 - Basic upload/download
 
 The fundamental Swarm Provenance workflow: upload a file, get a Swarm reference, download it back, and verify integrity.
 
-## What This Demonstrates
+## What this demonstrates
 
 - Uploading a file with `swarm-prov-upload upload`
 - Understanding the metadata JSON envelope (base64 data + SHA-256 hash + stamp ID)
@@ -15,7 +15,7 @@ The fundamental Swarm Provenance workflow: upload a file, get a Swarm reference,
 pip install -e "."
 ```
 
-## Quick Start
+## Quick start
 
 ### Shell demo
 
@@ -30,7 +30,7 @@ chmod +x demo.sh
 python run_demo.py
 ```
 
-## Step-by-Step Walkthrough
+## Step-by-step walkthrough
 
 ### 1. Upload a file
 
@@ -75,7 +75,7 @@ sha256sum downloads/sample.txt
 
 If the hashes match, the data is intact — no tampering occurred between upload and download.
 
-## With Provenance Standard
+## With provenance standard
 
 Tag uploads with a provenance standard identifier:
 
@@ -85,7 +85,7 @@ swarm-prov-upload upload --file sample.txt --std "PROV-STD-V1" --usePool
 
 This adds `"provenance_standard": "PROV-STD-V1"` to the metadata envelope, useful for categorizing data by compliance framework or data standard.
 
-## Metadata Envelope Structure
+## Metadata envelope structure
 
 The CLI wraps your file in a JSON metadata envelope before uploading:
 

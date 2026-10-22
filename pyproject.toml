@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+# 77+: `license` as an SPDX expression and `license-files` (PEP 639)
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,8 +9,10 @@ name = "swarm-provenance-uploader"
 dynamic = ["version"]
 description = "A CLI toolkit for wrapping data and uploading to Swarm."
 readme = "README.md"
-requires-python = ">=3.8"
-license = {file = "LICENSE.txt"}
+# CI tests 3.9-3.13
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE.txt"]
 classifiers = [
     "Programming Language :: Python :: 3",
      "Operating System :: OS Independent",
@@ -46,13 +49,13 @@ testing = [
 # on 3.9).
 x402 = [
     "eth-account>=0.13.5",
-    "web3>=7.0.0",
+    "web3>=7.0.0,<9",
 ]
 # Blockchain anchoring (DataProvenance contract on Base)
 # Floors are what the code uses (eth-account 0.13.5: sign_typed_data; web3 7
-# accepts it). Keep in sync with swarm_provenance_uploader/_requirements.py.
+# accepts it). web3 is capped below the next major, 9, which is untested. Keep in sync with swarm_provenance_uploader/_requirements.py.
 blockchain = [
-    "web3>=7.0.0",
+    "web3>=7.0.0,<9",
     "eth-account>=0.13.5",
 ]
 

@@ -1,15 +1,15 @@
-# Example 03: Scientific Data
+# Example 03: Scientific data
 
 Demonstrates research data archival on Swarm with extended retention.
 
-## What This Demonstrates
+## What this demonstrates
 
 - Uploading experiment metadata with `--std "PROV-O"` provenance standard
 - Using `--duration 720` for 30-day data retention
 - Archiving both metadata and raw data files
 - Downloading and verifying research data integrity
 
-## Use Case
+## Use case
 
 Research institutions need to archive experiment data with clear provenance tracking. The PROV-O standard (W3C provenance ontology) tags data with its scientific context, while extended duration ensures the data remains accessible for the retention period required by the research protocol.
 
@@ -18,7 +18,7 @@ Research institutions need to archive experiment data with clear provenance trac
 1. Install the CLI: `pip install -e .`
 2. Gateway access (default, no setup needed)
 
-## Quick Start
+## Quick start
 
 ### Shell
 
@@ -33,7 +33,7 @@ chmod +x demo.sh
 python run_demo.py
 ```
 
-## Step-by-Step Walkthrough
+## Step-by-step walkthrough
 
 ### 1. Upload experiment metadata
 
@@ -67,7 +67,7 @@ swarm-prov-upload download <csv_reference> --output-dir ./downloads
 shasum -a 256 experiment_results.csv downloads/*.data
 ```
 
-## Sample Data
+## Sample data
 
 ### dataset_metadata.json
 

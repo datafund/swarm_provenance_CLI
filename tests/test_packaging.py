@@ -1,8 +1,11 @@
-"""Packaging regression tests (#133)."""
+"""Packaging and import regression tests (#133)."""
 
 import re
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 TEXT_SUFFIXES = {".py", ".md", ".yml", ".yaml", ".sh", ".toml", ".txt", ".cfg", ".ini"}
@@ -78,3 +81,32 @@ def test_install_hints_match_the_extras():
         block = re.search(rf"(?m)^{extra}\s*=\s*\[(.*?)\]", pyproject, re.S).group(1)
         assert f'"{WEB3_REQUIREMENT}"' in block, extra
         assert f'"{ETH_ACCOUNT_REQUIREMENT}"' in block, extra
+
+
+def test_license_is_an_spdx_expression():
+    """A TOML table for `project.license` is deprecated in setuptools and warns on every build."""
+    project, _ = _project_table()
+    assert re.search(r'(?m)^license\s*=\s*"MIT"\s*$', project)
+    assert re.search(r'(?m)^requires-python\s*=\s*">=3\.9"\s*$', project)
+
+
+@pytest.mark.parametrize("module", [
+    "swarm_provenance_uploader.chain.provider",
+    "swarm_provenance_uploader.chain.exceptions",
+    "swarm_provenance_uploader.core.chain_client",
+    "swarm_provenance_uploader.exceptions",
+])
+def test_module_imports_on_its_own(module):
+    """Each module imports in a fresh interpreter, with nothing imported before it.
+
+    chain/exceptions.py and exceptions.py import each other; importing a chain
+    module first failed with a circular ImportError (cannot import ChainError).
+    """
+    code = (
+        f"import {module}\n"
+        "from swarm_provenance_uploader.exceptions import ChainError, ProvenanceError\n"
+        "from swarm_provenance_uploader.chain.exceptions import ChainError as Canonical\n"
+        "assert ChainError is Canonical and issubclass(ChainError, ProvenanceError)\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
