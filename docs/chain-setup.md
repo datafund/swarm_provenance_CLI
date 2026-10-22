@@ -170,8 +170,15 @@ swarm-prov-upload chain anchor <swarm_hash>
 ### Verify the anchor
 
 ```bash
-# Check if a hash is registered (exit code 0=yes, 1=no)
+# Check if a hash is registered (exit code 0=yes, 1=no).
+# The output shows the record's status (ACTIVE, RESTRICTED or DELETED) and owner.
+# "Verified:" means ACTIVE. A RESTRICTED or DELETED record prints
+# "Anchored on-chain (status: DELETED): ..." and still exits 0.
 swarm-prov-upload chain verify <swarm_hash>
+
+# Also require an ACTIVE record and a given owner (exit code 1 if either differs).
+# The owner is compared without regard to case or checksum.
+swarm-prov-upload chain verify <swarm_hash> --require-active --owner 0xYourAddress
 
 # Get the full provenance record
 swarm-prov-upload chain get <swarm_hash>
@@ -354,6 +361,15 @@ Your RPC URL doesn't match the selected chain. Ensure `CHAIN_NAME` and `CHAIN_RP
 - `base-sepolia` expects chain ID 84532
 - `base` expects chain ID 8453
 
+With `base` or `base-sepolia`, a custom RPC that reports another chain ID is a configuration error. This stops a testnet configuration from signing mainnet transactions. The check runs when the client starts: if the RPC answers then on another chain, the command fails before it reads or signs anything. The chain ID is checked again once before the first transaction is signed. If the RPC could not be reached when the command started, signing is still blocked until the chain ID matches, but reads may be served once the RPC comes up. A fallback RPC that reports another chain ID is skipped.
+
+For a local development node (Hardhat, Anvil), set `CHAIN_NAME=localhost` and `CHAIN_RPC_URL` to the node's URL. The `localhost` preset uses the chain ID that the node reports. The global `--chain` option accepts only `base-sepolia` and `base`, so use the environment variable:
+
+```bash
+export CHAIN_NAME=localhost
+export CHAIN_RPC_URL=http://127.0.0.1:8545
+```
+
 ### "No contract address configured"
 
 Base mainnet contract is not yet deployed. Use `base-sepolia` for testing, or provide a custom address:
@@ -401,7 +417,7 @@ export CHAIN_CONTRACT=0x...your_contract_address...
 | RPC URL | http://127.0.0.1:8545 |
 | DataProvenance Contract | `0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9` |
 
-Use `--chain localhost` for local Hardhat development.
+Set `CHAIN_NAME=localhost` (and `CHAIN_RPC_URL`, if the node is not at `http://127.0.0.1:8545`) for local Hardhat development. The `--chain` option does not accept `localhost`.
 
 ## Additional resources
 

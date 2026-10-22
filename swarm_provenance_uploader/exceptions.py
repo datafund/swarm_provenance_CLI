@@ -360,6 +360,7 @@ class SignatureVerificationError(NotaryError):
 _CHAIN_EXCEPTIONS = frozenset({
     "ChainError",
     "ChainConfigurationError",
+    "ChainIdMismatchError",
     "ChainConnectionError",
     "ChainTransactionError",
     "ChainValidationError",
