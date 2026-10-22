@@ -1,8 +1,8 @@
-# Chain Workflow Diagrams
+# Chain workflow diagrams
 
 Visual reference for on-chain provenance operations. For setup instructions, see [chain-setup.md](chain-setup.md).
 
-## Component Architecture
+## Component architecture
 
 How the chain subsystem is structured internally:
 
@@ -63,7 +63,7 @@ How the chain subsystem is structured internally:
                    └───────────────┘
 ```
 
-## End-to-End: Upload + Anchor + Verify
+## End-to-end: Upload + anchor + verify
 
 The complete flow from raw data to on-chain provenance:
 
@@ -129,7 +129,7 @@ swarm-prov-upload chain verify abc123...
 swarm-prov-upload chain get abc123... --json
 ```
 
-## Transformation Lineage
+## Transformation lineage
 
 Track how data evolves through transformations. Each transformation links an original hash to a derived hash with a description.
 
@@ -209,7 +209,7 @@ for record in chain:
         print(f"  -> {t.new_data_hash[:12]}... {t.description}")
 ```
 
-## Access Logging
+## Access logging
 
 Record and audit who accessed what data. Each access call is a transaction, creating an immutable audit trail.
 
@@ -283,7 +283,7 @@ swarm-prov-upload chain get abc123...
 #     - 0x8bC3...a1B2
 ```
 
-## Data Lifecycle (Status Management)
+## Data lifecycle (status management)
 
 Data goes through lifecycle states. Status changes are recorded on-chain.
 
@@ -355,7 +355,7 @@ client.set_status("abc123...", status=2)  # DELETED
 client.set_status("abc123...", status=0)  # ACTIVE
 ```
 
-## Ownership and Delegation
+## Ownership and delegation
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -433,7 +433,7 @@ alice_client.transfer_ownership("abc123...", new_owner="0xCarol...")
 alice_client.set_delegate("0xBob...", authorized=False)
 ```
 
-## Transaction Cost Summary
+## Transaction cost summary
 
 | Operation | Type | Gas Cost | Notes |
 |-----------|------|----------|-------|
@@ -453,7 +453,7 @@ alice_client.set_delegate("0xBob...", authorized=False)
 
 Gas costs are estimates on Base chain. At typical gas prices (~0.001 gwei), each write operation costs fractions of a cent.
 
-## Data Protection Pattern
+## Data protection pattern
 
 The `chain protect` command combines multiple steps into a single atomic-intent workflow: replace sensitive data with a clean version and restrict the original.
 
@@ -509,7 +509,7 @@ swarm-prov-upload chain status aaa... --set restricted
 swarm-prov-upload chain transform aaa... bbb... --restrict-original -d "Removed PII"
 ```
 
-## Merge Transformation (N-to-1)
+## Merge transformation (N-to-1)
 
 Combine multiple data sources into one. Unlike `transform` (1-to-1), `merge` links 2-50 source hashes to a single new hash.
 
@@ -580,7 +580,7 @@ result = client.merge_transform(
 print(f"TX: {result.tx_hash}, Gas: {result.gas_used}")
 ```
 
-## Depth-Limited Chain Traversal
+## Depth-limited chain traversal
 
 The `--follow` flag on `chain get` walks the full transformation chain using breadth-first search. Use `--depth` to limit how deep it goes.
 
@@ -616,9 +616,9 @@ swarm-prov-upload chain get aaa... --follow --json
 # Output: {"chain": [...], "depth": 4, "root": "aaa..."}
 ```
 
-## Error Recovery
+## Error recovery
 
-### Partial Failures in Protect
+### Partial failures in Protect
 
 The `chain protect` command runs multiple operations sequentially. If a later step fails, earlier steps have already been committed on-chain.
 
@@ -648,7 +648,7 @@ swarm-prov-upload chain status aaa... --set restricted
 }
 ```
 
-### Common Error Scenarios
+### Common error scenarios
 
 | Error | Cause | Fix |
 |-------|-------|-----|
@@ -657,7 +657,7 @@ swarm-prov-upload chain status aaa... --set restricted
 | `Transaction failed: reverted` | Not the owner or not authorized | Check owner with `chain get <hash>` |
 | `Cannot connect to chain` | RPC node unreachable | Check `CHAIN_RPC_URL` or network config |
 
-### Exit Codes
+### Exit codes
 
 | Exit Code | Meaning |
 |-----------|---------|

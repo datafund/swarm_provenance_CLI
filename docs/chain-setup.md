@@ -1,8 +1,8 @@
-# Blockchain Anchoring Setup Guide
+# Blockchain anchoring setup guide
 
 This guide walks you through setting up on-chain provenance anchoring for the Swarm Provenance CLI.
 
-## What is Blockchain Anchoring?
+## What is blockchain anchoring?
 
 Blockchain anchoring registers Swarm hashes on the **DataProvenance smart contract** (Base chain), providing:
 
@@ -13,7 +13,7 @@ Blockchain anchoring registers Swarm hashes on the **DataProvenance smart contra
 
 Once a Swarm hash is anchored on-chain, anyone can independently verify its registration, ownership, and history.
 
-### How It Works
+### How it works
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -50,11 +50,11 @@ Once a Swarm hash is anchored on-chain, anyone can independently verify its regi
 
 ## Prerequisites
 
-- Python 3.8+
+- Python 3.9+
 - An Ethereum wallet (MetaMask, hardware wallet, etc.)
 - Base Sepolia ETH (for gas fees on testnet)
 
-## Step 1: Install Blockchain Dependencies
+## Step 1: Install blockchain dependencies
 
 Install the CLI with blockchain support:
 
@@ -66,7 +66,7 @@ This installs:
 - `web3` — Blockchain interaction (RPC calls, transaction sending)
 - `eth-account` — Ethereum account management and transaction signing
 
-## Step 2: Create or Export a Wallet
+## Step 2: Create or export a wallet
 
 ### Option A: Use an existing wallet
 
@@ -90,7 +90,7 @@ print(f"Private key: {account.key.hex()}")
 
 **Important:** Store your private key securely. Never commit it to version control.
 
-## Step 3: Get Testnet ETH
+## Step 3: Get testnet ETH
 
 For development and testing, use Base Sepolia testnet. You need ETH for gas fees.
 
@@ -149,7 +149,7 @@ swarm-prov-upload chain balance
 # Get testnet ETH: https://www.alchemy.com/faucets/base-sepolia
 ```
 
-## Step 5: Anchor Your First Hash
+## Step 5: Anchor your first hash
 
 ### Basic anchoring
 
@@ -177,7 +177,7 @@ swarm-prov-upload chain verify <swarm_hash>
 swarm-prov-upload chain get <swarm_hash>
 ```
 
-### End-to-end workflow: Upload + Anchor + Verify
+### End-to-end workflow: Upload + anchor + verify
 
 ```bash
 # 1. Upload data to Swarm
@@ -194,7 +194,7 @@ swarm-prov-upload chain verify abc123...
 swarm-prov-upload chain get abc123... --json
 ```
 
-## Common Operations
+## Common operations
 
 ### Record a data transformation
 
@@ -277,7 +277,7 @@ swarm-prov-upload --chain base chain balance
 swarm-prov-upload --chain-rpc https://your-rpc.io chain balance
 ```
 
-## Data Status Values
+## Data status values
 
 On-chain records have a status field:
 
@@ -289,7 +289,7 @@ On-chain records have a status field:
 
 Status changes are recorded on-chain and can be audited.
 
-## Switching to Mainnet
+## Switching to mainnet
 
 When ready for production:
 
@@ -361,7 +361,7 @@ Base mainnet contract is not yet deployed. Use `base-sepolia` for testing, or pr
 export CHAIN_CONTRACT=0x...your_contract_address...
 ```
 
-## Security Best Practices
+## Security best practices
 
 1. **Never commit private keys** to version control
 2. **Use a dedicated wallet** for anchoring, not your main wallet
@@ -370,9 +370,9 @@ export CHAIN_CONTRACT=0x...your_contract_address...
 5. **Monitor gas costs** — anchor transactions are cheap but add up at scale
 6. **Use batch operations** (`batch_anchor`, `batch_access` via Python API) for efficiency
 
-## Network Details
+## Network details
 
-### Base Sepolia (Testnet)
+### Base Sepolia (testnet)
 
 | Property | Value |
 |----------|-------|
@@ -383,7 +383,7 @@ export CHAIN_CONTRACT=0x...your_contract_address...
 | DataProvenance Contract | `0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a` |
 | Deploy Block | 39,075,766 |
 
-### Base (Mainnet)
+### Base (mainnet)
 
 | Property | Value |
 |----------|-------|
@@ -393,7 +393,7 @@ export CHAIN_CONTRACT=0x...your_contract_address...
 | Block Explorer | https://basescan.org |
 | DataProvenance Contract | Not yet deployed |
 
-### Localhost (Development)
+### Localhost (development)
 
 | Property | Value |
 |----------|-------|
@@ -403,7 +403,7 @@ export CHAIN_CONTRACT=0x...your_contract_address...
 
 Use `--chain localhost` for local Hardhat development.
 
-## Additional Resources
+## Additional resources
 
 - [Base Documentation](https://docs.base.org)
 - [Base Sepolia Block Explorer](https://base-sepolia.blockscout.com)
