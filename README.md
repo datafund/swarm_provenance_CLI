@@ -323,7 +323,7 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
 | `CHAIN_ENABLED` | Enable blockchain features | `false` |
-| `CHAIN_NAME` | `base-sepolia` (testnet) or `base` (mainnet) | `base-sepolia` |
+| `CHAIN_NAME` | `base-sepolia` (testnet), `base` (mainnet), or `localhost` (local development node; takes the chain ID the node reports) | `base-sepolia` |
 | `PROVENANCE_WALLET_KEY` | Wallet private key (keep secret!) | - |
 | `CHAIN_RPC_URL` | Custom RPC URL (optional). With `base` or `base-sepolia`, it must report the preset chain ID | Uses preset |
 | `CHAIN_CONTRACT` | Custom contract address (optional) | Uses preset |

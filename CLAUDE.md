@@ -359,7 +359,7 @@ Uses python-dotenv for environment configuration:
 
 **Chain / Blockchain Configuration**:
 - `CHAIN_ENABLED`: Enable on-chain anchoring (default: false)
-- `CHAIN_NAME`: `base-sepolia` (testnet, default) or `base` (mainnet)
+- `CHAIN_NAME`: `base-sepolia` (testnet, default), `base` (mainnet), or `localhost` (local development node; takes the chain ID the node reports)
 - `CHAIN_RPC_URL`: Custom RPC URL (optional, overrides preset). With `base`/`base-sepolia` its chain ID must match the preset; use `CHAIN_NAME=localhost` for a local node
 - `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs (optional, overrides preset fallbacks)
 - `CHAIN_CONTRACT`: Custom contract address (optional, overrides preset)
