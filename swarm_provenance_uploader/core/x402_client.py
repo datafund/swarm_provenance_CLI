@@ -71,7 +71,11 @@ LEGACY_PRIVATE_KEY_ENV = "SWARM_X402_PRIVATE_KEY"  # gitleaks:allow (a variable 
 
 INVALID_PRIVATE_KEY_ENV_MESSAGE = "X402_PRIVATE_KEY_ENV is not a valid variable name"  # gitleaks:allow (a message, not a key)
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_HEX_KEY_RE = re.compile(r"(?:0x)?[0-9a-fA-F]{64}")
+# A value of 32 or more hex digits, with or without 0x, is taken to be a key
+# (or most of one: eth_account also accepts a key with leading zeros dropped).
+_HEX_KEY_RE = re.compile(r"(?:0[xX])?[0-9a-fA-F]{32,}")
+_ALL_HEX_RE = re.compile(r"[0-9a-fA-F]+")
+KEY_ENV_PLACEHOLDER = "the variable named by X402_PRIVATE_KEY_ENV"
 
 
 def x402_private_key_env_name() -> Optional[str]:
@@ -79,9 +83,10 @@ def x402_private_key_env_name() -> Optional[str]:
 
     This is the value of X402_PRIVATE_KEY_ENV when it is set, otherwise
     X402_PRIVATE_KEY. Returns None when X402_PRIVATE_KEY_ENV is not a valid
-    variable name, or looks like a 64-hex-digit key: someone may have put
-    the key itself there, so the value must never be printed (#141). Show
-    INVALID_PRIVATE_KEY_ENV_MESSAGE instead.
+    variable name, or is 32 or more hex digits (with or without 0x): someone
+    may have put the key itself there, so the value must never be printed
+    (#141). Show INVALID_PRIVATE_KEY_ENV_MESSAGE instead. To print a name,
+    use printable_key_env_name().
     """
     name = (os.getenv("X402_PRIVATE_KEY_ENV") or "").strip()
     if not name:
@@ -89,6 +94,22 @@ def x402_private_key_env_name() -> Optional[str]:
     if not _ENV_NAME_RE.fullmatch(name) or _HEX_KEY_RE.fullmatch(name):
         return None
     return name
+
+
+def printable_key_env_name(name: Optional[str]) -> str:
+    """Return ``name`` if it is safe to print, else a placeholder.
+
+    The fixed names X402_PRIVATE_KEY and SWARM_X402_PRIVATE_KEY are printed.
+    A custom name is printed only if it passes the same check as
+    x402_private_key_env_name() and is not made only of hex digits, which
+    could be part of a key (#141).
+    """
+    if name in (DEFAULT_PRIVATE_KEY_ENV, LEGACY_PRIVATE_KEY_ENV):
+        return name
+    if (name and _ENV_NAME_RE.fullmatch(name) and not _HEX_KEY_RE.fullmatch(name)
+            and not _ALL_HEX_RE.fullmatch(name)):
+        return name
+    return KEY_ENV_PLACEHOLDER
 
 
 def resolve_x402_private_key() -> Tuple[Optional[str], Optional[str]]:
@@ -338,8 +359,10 @@ class X402Client:
         self._private_key = private_key or resolve_x402_private_key()[0]
         if not self._private_key:
             key_env = x402_private_key_env_name()
+            shown = printable_key_env_name(key_env)
             raise X402ConfigurationError(
-                f"x402 private key not configured. Set the {key_env} environment variable."
+                (f"x402 private key not configured. Set the {key_env} environment variable."
+                 if shown == key_env else f"x402 private key not configured. Put the key in {shown}.")
                 if key_env else
                 f"x402 private key not configured: {INVALID_PRIVATE_KEY_ENV_MESSAGE}."
             )

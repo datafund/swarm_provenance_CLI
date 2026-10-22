@@ -1849,12 +1849,13 @@ def x402_status(
 
     # Check for private key the way the signer does (#141); show only the
     # name of the variable it came from, never the key
-    from .core.x402_client import (INVALID_PRIVATE_KEY_ENV_MESSAGE, resolve_x402_private_key,
-                                   x402_private_key_env_name)
+    from .core.x402_client import (INVALID_PRIVATE_KEY_ENV_MESSAGE, printable_key_env_name,
+                                   resolve_x402_private_key, x402_private_key_env_name)
     pk_env_name = x402_private_key_env_name()  # None when invalid: never print the raw value
     pk_source = resolve_x402_private_key()[1]
     has_pk = pk_source is not None
-    pk_str = (typer.style("Configured", fg=typer.colors.GREEN) + f" (from {pk_source})" if has_pk
+    pk_str = (typer.style("Configured", fg=typer.colors.GREEN)
+              + f" (from {printable_key_env_name(pk_source)})" if has_pk
               else typer.style("Not set", fg=typer.colors.RED))
     typer.echo(f"  Private key:  {pk_str}")
     if pk_env_name is None:
@@ -1877,7 +1878,10 @@ def x402_status(
             typer.echo("(or unset it to use X402_PRIVATE_KEY), and put your key in that variable.")
         else:
             typer.echo("To enable x402 payments, set your private key:")
-            typer.echo(f"  export {pk_env_name}=0x...")
+            if printable_key_env_name(pk_env_name) == pk_env_name:
+                typer.echo(f"  export {pk_env_name}=0x...")
+            else:
+                typer.echo(f"  put it in {printable_key_env_name(pk_env_name)}")
         typer.echo("")
 
 
@@ -1891,8 +1895,8 @@ def x402_balance(
     import os
 
     # Check for private key, the same way the signer does (#141)
-    from .core.x402_client import (INVALID_PRIVATE_KEY_ENV_MESSAGE, resolve_x402_private_key,
-                                   x402_private_key_env_name)
+    from .core.x402_client import (INVALID_PRIVATE_KEY_ENV_MESSAGE, printable_key_env_name,
+                                   resolve_x402_private_key, x402_private_key_env_name)
     pk_env_name = x402_private_key_env_name()  # None when invalid: never print the raw value
     has_pk = resolve_x402_private_key()[0] is not None
 
@@ -1902,7 +1906,10 @@ def x402_balance(
         raise typer.Exit(code=1)
     if not has_pk:
         typer.secho(f"ERROR: No private key configured.", fg=typer.colors.RED, err=True)
-        typer.echo(f"Set your private key: export {pk_env_name}=0x...")
+        if printable_key_env_name(pk_env_name) == pk_env_name:
+            typer.echo(f"Set your private key: export {pk_env_name}=0x...")
+        else:
+            typer.echo(f"Set your private key in {printable_key_env_name(pk_env_name)}.")
         raise typer.Exit(code=1)
 
     network = _x402_config["network"]
@@ -1945,6 +1952,8 @@ def x402_info():
 
     typer.echo("\n2. Set environment variable:")
     typer.echo("   export X402_PRIVATE_KEY=0x...")
+    typer.echo("   (X402_PRIVATE_KEY_ENV can name another variable; the legacy")
+    typer.echo("   SWARM_X402_PRIVATE_KEY is still read. See docs/x402-setup.md.)")
 
     typer.echo("\n3. Get testnet funds (for testing):")
     typer.echo("   - ETH (gas): https://www.alchemy.com/faucets/base-sepolia")
@@ -3436,7 +3445,8 @@ def main(
     Use --backend local for direct Bee node communication.
 
     For pay-per-request mode, use --x402 to enable x402 payments.
-    Requires X402_PRIVATE_KEY environment variable.
+    Requires X402_PRIVATE_KEY environment variable (or the variable named by
+    X402_PRIVATE_KEY_ENV, or the legacy SWARM_X402_PRIVATE_KEY; see docs/x402-setup.md).
 
     For testing/development, use --free for rate-limited free tier access.
     """
