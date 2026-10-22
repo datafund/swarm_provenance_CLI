@@ -1925,8 +1925,12 @@ def x402_info():
     typer.echo("   - Create new: Use MetaMask or any Ethereum wallet")
     typer.echo("   - Export private key (starts with 0x)")
 
-    typer.echo("\n2. Set environment variable:")
-    typer.echo("   export X402_PRIVATE_KEY=0x...")
+    typer.echo("\n2. Set X402_PRIVATE_KEY for one command, without typing the key")
+    typer.echo("   (it would stay in your shell history). Read it from your password")
+    typer.echo("   manager's CLI (1Password op, pass, macOS security), for example:")
+    typer.echo("   X402_PRIVATE_KEY=\"$(op read 'op://<vault>/<item>/<field>')\" \\")
+    typer.echo("     swarm-prov-upload --x402 upload --file data.txt")
+    typer.echo("   If you keep it in a .env file instead: chmod 600 .env, never commit it.")
 
     typer.echo("\n3. Get testnet funds (for testing):")
     typer.echo("   - ETH (gas): https://www.alchemy.com/faucets/base-sepolia")
@@ -3370,7 +3374,8 @@ def main(
     )] = None,
     gateway_url: Annotated[Optional[str], typer.Option(
         "--gateway-url",
-        help=f"Gateway URL (when backend=gateway). [default: {config.GATEWAY_URL}]"
+        help="Gateway URL (when backend=gateway).",
+        show_default=config.GATEWAY_URL,  # shown in --help (#144)
     )] = None,
     x402: Annotated[Optional[bool], typer.Option(
         "--x402/--no-x402",
@@ -3384,15 +3389,18 @@ def main(
     )] = None,
     max_pay: Annotated[Optional[float], typer.Option(
         "--max-pay",
-        help="Maximum auto-pay amount in USD per request. [default: 1.00]"
+        help="Maximum auto-pay amount in USD per request.",
+        show_default="1.00",
     )] = None,
     x402_network: Annotated[Optional[str], typer.Option(
         "--x402-network",
-        help="x402 network: 'base-sepolia' (testnet) or 'base' (mainnet). [default: base-sepolia]"
+        help="x402 network: 'base-sepolia' (testnet) or 'base' (mainnet).",
+        show_default="base-sepolia",
     )] = None,
     chain: Annotated[Optional[str], typer.Option(
         "--chain",
-        help="Blockchain for on-chain anchoring: 'base-sepolia' (testnet) or 'base' (mainnet)."
+        help="Blockchain for on-chain anchoring: 'base-sepolia' (testnet) or 'base' (mainnet).",
+        show_default=config.CHAIN_NAME,
     )] = None,
     chain_rpc: Annotated[Optional[str], typer.Option(
         "--chain-rpc",
@@ -3402,8 +3410,8 @@ def main(
         "--idempotency-key",
         help="Idempotency-Key for this command's paid requests. Pass the key printed by a "
              "failed run to repeat it: a gateway that supports the key answers from the first "
-             "result instead of charging again. [default: a new random key per command]",
-        show_default=False,
+             "result instead of charging again.",
+        show_default="a new random key per command",
     )] = None,
     free: Annotated[Optional[bool], typer.Option(
         "--free/--no-free",

@@ -42,6 +42,9 @@ CHAIN_PRESETS = {
         "rpc_url": "https://sepolia.base.org",
         "explorer_url": "https://base-sepolia.blockscout.com",
         "contract_address": "0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322",
+        # First DataProvenance data event, where event scans start. The contract
+        # was created earlier, at block 39,898,628; that block has only its
+        # constructor's RoleGranted log (#144)
         "deploy_block": 39_905_249,
         "rpc_fallbacks": [
             "https://base-sepolia-rpc.publicnode.com",

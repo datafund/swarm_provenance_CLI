@@ -744,6 +744,47 @@ class TestX402InfoCommand:
         assert "X402_PRIVATE_KEY" in result.stdout
         assert "faucet" in result.stdout.lower()
 
+    def test_x402_info_does_not_suggest_exporting_a_key(self):
+        """The guide reads the key for one command, never `export KEY=0x...` (#144)."""
+        result = runner.invoke(app, ["x402", "info"])
+
+        assert result.exit_code == 0
+        assert "export X402_PRIVATE_KEY" not in result.stdout
+        assert "=0x" not in result.stdout
+        assert "chmod 600 .env" in result.stdout
+
+
+class TestRootHelpDefaults:
+    """--help shows the defaults of the global options (#144)."""
+
+    def _help(self):
+        result = runner.invoke(app, ["--help"], terminal_width=250, env={"COLUMNS": "250"})
+        assert result.exit_code == 0
+        # Rich may wrap or pad; compare on collapsed whitespace without box characters
+        return " ".join(re.sub(r"[│╭╮╰╯─]", " ", result.output).split())
+
+    def test_help_shows_default_gateway_url(self):
+        from swarm_provenance_uploader import config
+        assert f"[default: ({config.GATEWAY_URL})]" in self._help()
+
+    def test_production_gateway_is_the_built_in_default(self):
+        from swarm_provenance_uploader import config
+        assert config.GATEWAY_DEFAULT_URL == "https://provenance-gateway.datafund.io"
+
+    @pytest.mark.parametrize("text", [
+        "[default: (1.00)]",
+        "[default: (base-sepolia)]",
+        "[default: (a new random key per command)]",
+    ])
+    def test_help_shows_other_defaults(self, text):
+        assert text in self._help()
+
+    def test_help_shows_default_chain(self):
+        from swarm_provenance_uploader import config
+        help_text = self._help()
+        start = help_text.index("--chain ")
+        assert f"[default: ({config.CHAIN_NAME})]" in help_text[start:start + 200]
+
 
 class TestX402BalanceCommand:
     """Tests for x402 balance command."""
