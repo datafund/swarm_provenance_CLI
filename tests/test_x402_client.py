@@ -1039,3 +1039,17 @@ class TestX402ClientSettingsSources:
 
         assert "Sup3rSecretApiKey42" not in str(exc_info.value)
         assert "base-sepolia.g.alchemy.com" in str(exc_info.value)
+
+    def test_invalid_key_env_name_not_echoed_in_error(self, env, mock_eth_deps):
+        """A key pasted into X402_PRIVATE_KEY_ENV is not repeated in the error."""
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        env.setenv("X402_PRIVATE_KEY_ENV", "0x" + "d" * 64)
+        env.setenv("X402_PRIVATE_KEY", DUMMY_PRIVATE_KEY)
+
+        with pytest.raises(X402ConfigurationError) as exc_info:
+            X402Client()
+
+        assert "d" * 16 not in str(exc_info.value)
+        assert "X402_PRIVATE_KEY_ENV is not a valid variable name" in str(exc_info.value)
+        mock_eth_deps["account_class"].from_key.assert_not_called()

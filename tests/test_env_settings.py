@@ -239,3 +239,67 @@ def test_chain_enabled_setting_removed():
     assert "enabled" not in _chain_config
     for doc in ("README.md", "CLAUDE.md", ".env.example", "docs/chain-setup.md"):
         assert "CHAIN_ENABLED" not in (ROOT / doc).read_text(), doc
+
+
+# --- A key put into X402_PRIVATE_KEY_ENV by mistake is never printed ----------
+
+KEY_AS_NAME = "0x" + "d" * 64
+INVALID_NAME_MESSAGE = "X402_PRIVATE_KEY_ENV is not a valid variable name"
+
+
+def test_invalid_key_env_name_resolves_no_key(no_key_env):
+    from swarm_provenance_uploader.core.x402_client import (
+        resolve_x402_private_key, x402_private_key_env_name)
+
+    no_key_env.setenv("X402_PRIVATE_KEY_ENV", KEY_AS_NAME)
+    no_key_env.setenv("X402_PRIVATE_KEY", KEY_B)
+
+    assert x402_private_key_env_name() is None
+    assert resolve_x402_private_key() == (None, None)
+
+
+@pytest.mark.parametrize("name", ["MY_KEY", "_k", "X402_PRIVATE_KEY", "a1", " MY_KEY "])
+def test_valid_key_env_names_accepted(no_key_env, name):
+    from swarm_provenance_uploader.core.x402_client import x402_private_key_env_name
+
+    no_key_env.setenv("X402_PRIVATE_KEY_ENV", name)
+    assert x402_private_key_env_name() == name.strip()
+
+
+@pytest.mark.parametrize("name", [KEY_AS_NAME, "d" * 64, "1ABC", "MY-KEY", "MY KEY", "MY\nKEY", "A" * 64])
+def test_invalid_key_env_names_rejected(no_key_env, name):
+    from swarm_provenance_uploader.core.x402_client import x402_private_key_env_name
+
+    no_key_env.setenv("X402_PRIVATE_KEY_ENV", name)
+    assert x402_private_key_env_name() is None
+
+
+def test_x402_status_does_not_echo_key_in_key_env(no_key_env):
+    no_key_env.setenv("X402_PRIVATE_KEY_ENV", KEY_AS_NAME)
+
+    result = runner.invoke(app, ["x402", "status"])
+
+    assert result.exit_code == 0
+    assert "d" * 16 not in result.output
+    assert INVALID_NAME_MESSAGE in result.output
+    assert "Not set" in result.output
+
+
+def test_x402_balance_does_not_echo_key_in_key_env(no_key_env):
+    no_key_env.setenv("X402_PRIVATE_KEY_ENV", KEY_AS_NAME)
+
+    with patch("swarm_provenance_uploader.core.x402_client.X402Client") as client_class:
+        result = runner.invoke(app, ["x402", "balance"])
+
+    assert result.exit_code == 1
+    assert "d" * 16 not in result.output
+    assert INVALID_NAME_MESSAGE in result.output
+    client_class.assert_not_called()
+
+
+def test_config_has_no_unread_x402_constants():
+    """The CLI reads these through x402_client at call time; the config copies were unread."""
+    from swarm_provenance_uploader import config
+
+    assert not hasattr(config, "X402_PRIVATE_KEY_ENV")
+    assert not hasattr(config, "X402_RPC_URL")
