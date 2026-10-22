@@ -11,6 +11,7 @@ import logging
 from typing import List, Optional
 
 from .exceptions import ChainConfigurationError, ChainConnectionError
+from ..redaction import redact_url, redact_urls_in_text
 from .._requirements import INSTALL_SIGNING_DEPS
 
 logger = logging.getLogger(__name__)
@@ -226,14 +227,14 @@ class ChainProvider:
             try:
                 if not self._web3.is_connected():
                     raise ChainConnectionError(
-                        f"Cannot connect to RPC endpoint: {self.rpc_url}",
-                        rpc_url=self.rpc_url,
+                        f"Cannot connect to RPC endpoint: {redact_url(self.rpc_url)}",
+                        rpc_url=redact_url(self.rpc_url),
                     )
                 actual_chain_id = self._web3.eth.chain_id
                 if actual_chain_id != self.chain_id:
                     raise ChainConnectionError(
                         f"Chain ID mismatch: expected {self.chain_id}, got {actual_chain_id}",
-                        rpc_url=self.rpc_url,
+                        rpc_url=redact_url(self.rpc_url),
                     )
                 return True
             except Exception as e:
@@ -244,8 +245,8 @@ class ChainProvider:
                 if isinstance(e, ChainConnectionError):
                     raise
                 raise ChainConnectionError(
-                    f"RPC health check failed: {e}",
-                    rpc_url=self.rpc_url,
+                    redact_urls_in_text(f"RPC health check failed: {e}"),
+                    rpc_url=redact_url(self.rpc_url),
                 ) from e
 
     def get_block_number(self) -> int:
@@ -267,8 +268,8 @@ class ChainProvider:
                 if self._try_fallback(tried):
                     continue
                 raise ChainConnectionError(
-                    f"Failed to get block number: {e}",
-                    rpc_url=self.rpc_url,
+                    redact_urls_in_text(f"Failed to get block number: {e}"),
+                    rpc_url=redact_url(self.rpc_url),
                 ) from e
 
     def get_explorer_tx_url(self, tx_hash: str) -> Optional[str]:

@@ -19,6 +19,7 @@ from ..chain.exceptions import (
     DataNotRegisteredError,
     TransformationAlreadyExistsError,
 )
+from ..redaction import redact_urls_in_text
 from ..models import (
     AccessResult,
     AnchorResult,
@@ -239,7 +240,7 @@ class ChainClient:
             if "tx_hash" in dir():
                 tx_hash_str = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
             raise ChainTransactionError(
-                f"Transaction failed: {e}",
+                redact_urls_in_text(f"Transaction failed: {e}"),
                 tx_hash=tx_hash_str,
             ) from e
 

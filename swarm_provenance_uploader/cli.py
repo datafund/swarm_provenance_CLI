@@ -15,6 +15,7 @@ from ._requirements import INSTALL_ETH_ACCOUNT, INSTALL_SIGNING_DEPS
 from .core import file_utils, swarm_client, metadata_builder
 from .core.gateway_client import GatewayClient, is_insecure_gateway_url, is_valid_idempotency_key
 from .models import ProvenanceMetadata, ValidationError
+from .redaction import redact_url
 from . import exceptions
 
 app = typer.Typer(help="Swarm Provenance CLI - Wraps and uploads data to Swarm.")
@@ -2189,7 +2190,7 @@ def chain_balance(
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}")
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2236,7 +2237,7 @@ def chain_verify(
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}")
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2276,7 +2277,7 @@ def chain_get(
         except exceptions.ChainConnectionError as e:
             typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
             if e.rpc_url:
-                typer.echo(f"  RPC URL: {e.rpc_url}")
+                typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}")
             raise typer.Exit(code=1)
         except exceptions.ChainError as e:
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2335,7 +2336,7 @@ def chain_get(
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}")
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2432,7 +2433,7 @@ def chain_anchor(
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}")
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2487,7 +2488,7 @@ def chain_set_storage_ref(
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}")
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2527,7 +2528,7 @@ def chain_lookup(
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}")
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2585,7 +2586,7 @@ def chain_access(
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}")
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2651,7 +2652,7 @@ def chain_status(
         except exceptions.ChainConnectionError as e:
             typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
             if e.rpc_url:
-                typer.echo(f"  RPC URL: {e.rpc_url}")
+                typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}")
             raise typer.Exit(code=1)
         except exceptions.ChainError as e:
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2682,7 +2683,7 @@ def chain_status(
         except exceptions.ChainConnectionError as e:
             typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
             if e.rpc_url:
-                typer.echo(f"  RPC URL: {e.rpc_url}")
+                typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}")
             raise typer.Exit(code=1)
         except exceptions.ChainError as e:
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2726,7 +2727,7 @@ def chain_transfer(
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}")
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2787,7 +2788,7 @@ def chain_delegate(
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}")
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2846,7 +2847,7 @@ def chain_transform(
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}")
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -3065,7 +3066,7 @@ def chain_merge(
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}")
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
