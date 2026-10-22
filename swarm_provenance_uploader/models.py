@@ -30,11 +30,13 @@ class StampDetails(BaseModel):
     batchTTL: int = Field(description="Time to live in seconds")
     # Optional fields that may or may not be present depending on API version
     blockNumber: Optional[int] = Field(default=None, description="Block number when stamp was created")
-    exists: Optional[bool] = Field(default=None, description="Whether the stamp exists")
+    # Not sent by the gateway (its StampDetails has no `exists`); kept so code
+    # that reads it keeps working. It is always None from the gateway.
+    exists: Optional[bool] = Field(default=None, description="Not sent by the gateway; always None from it")
     start: Optional[int] = Field(default=None, description="Start block number")
     owner: Optional[str] = Field(default=None, description="Owner address")
     expectedExpiration: Optional[str] = Field(default=None, description="Expected expiration date")
-    local: Optional[bool] = Field(default=None, description="Whether stamp is local")
+    local: Optional[bool] = Field(default=None, description="Whether the batch is on this gateway's own Bee node")
 
 
 class StampListResponse(BaseModel):

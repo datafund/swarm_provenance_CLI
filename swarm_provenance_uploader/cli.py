@@ -708,7 +708,6 @@ def upload(
                 stamp_details = gw_client.get_stamp(stamp_id, verbose=verbose)
                 if stamp_details:
                     stamp_info = {
-                        "exists": stamp_details.exists,
                         "usable": stamp_details.usable,
                         "batchTTL": stamp_details.batchTTL,
                     }
@@ -718,15 +717,14 @@ def upload(
                 stamp_info = swarm_client.get_stamp_info(local_bee_url, stamp_id, verbose=verbose)
 
             if stamp_info:
-                exists = stamp_info.get("exists")
                 usable = stamp_info.get("usable", False)
                 batch_ttl_seconds = stamp_info.get("batchTTL")  # TTL in seconds
 
                 if verbose:
                     ttl_str = f"{batch_ttl_seconds // 60}m {batch_ttl_seconds % 60}s" if batch_ttl_seconds is not None else "N/A"
-                    typer.echo(f"    Attempt {i+1}: Stamp found - Exists={exists}, Usable={usable}, TTL={ttl_str}")
+                    typer.echo(f"    Attempt {i+1}: Stamp found - Usable={usable}, TTL={ttl_str}")
 
-                # Check usable flag - exists may be None from gateway API
+                # Only the usable flag decides; the gateway may send it as null
                 if usable:
                     stamp_is_ready_for_upload = True
                     if not verbose: typer.echo(typer.style("OK", fg=typer.colors.GREEN))
@@ -1528,7 +1526,8 @@ def stamps_info(
             typer.echo(f"\nStamp Details:")
             typer.echo(f"  Batch ID:    {stamp.batchID}")
             typer.echo(f"  Usable:      {_format_usable(stamp.usable)}")
-            typer.echo(f"  Exists:      {'Unknown' if stamp.exists is None else 'Yes' if stamp.exists else 'No'}")
+            # `local`: the batch is on this gateway's node. The gateway sends no `exists`.
+            typer.echo(f"  Local:       {'Unknown' if stamp.local is None else 'Yes' if stamp.local else 'No'}")
             typer.echo(f"  TTL:         {_format_ttl(stamp.batchTTL)}")
             typer.echo(f"  Depth:       {stamp.depth}")
             typer.echo(f"  Amount:      {stamp.amount}")
