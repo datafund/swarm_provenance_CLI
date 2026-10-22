@@ -3,6 +3,8 @@
 Provides unified error handling across both gateway and local Bee backends.
 """
 
+import requests
+
 
 class ProvenanceError(Exception):
     """Base exception for all provenance CLI errors."""
@@ -230,6 +232,25 @@ class StampPurchasePendingError(PaymentSettledNotDeliveredError):
         self.label = label
         self.depth = depth
         self.lookup = lookup
+
+
+class GatewayHTTPError(requests.exceptions.HTTPError):
+    """
+    An error response from the gateway, with the gateway's own code and message (#139).
+
+    A `requests.exceptions.HTTPError`, so code that catches that (and reads
+    `e.response.status_code`) keeps working. `code` is the gateway's error code
+    (for example STAMP_OWNERSHIP_DENIED), `gateway_message` its message, and
+    `retry_after` the Retry-After header in seconds, when the gateway sent one.
+    """
+
+    def __init__(self, message: str, response: requests.Response = None, code: str = None,
+                 gateway_message: str = None, retry_after: int = None):
+        super().__init__(message, response=response)
+        self.status_code = response.status_code if response is not None else None
+        self.code = code
+        self.gateway_message = gateway_message
+        self.retry_after = retry_after
 
 
 # --- Stamp Pool Exceptions ---

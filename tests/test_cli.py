@@ -4975,6 +4975,33 @@ class TestPaymentPromptReviewCases:
         assert "Payment not made: Payment of $0.050000 declined by user" in result.output
         assert "Use --x402 to enable" not in result.output
 
+    def test_payment_required_hint_mentions_free_when_x402_off(self, mocker):
+        """#139: a 402 in default mode names both ways forward, --x402 and --free."""
+        _x402_config["enabled"] = False
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.side_effect = exceptions.PaymentRequiredError("Payment required")
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["upload", "--file", "d.txt"])
+        assert result.exit_code == 1
+        assert "--x402" in result.output
+        assert "--free for the free tier" in result.output
+
+    def test_gateway_error_code_reaches_the_user(self, mocker, requests_mock):
+        """#139: the gateway's code and message are printed, not a generic HTTP error."""
+        requests_mock.post("https://test.gateway.io/api/v1/stamps/", status_code=403, json={
+            "detail": {"code": "STAMP_OWNERSHIP_DENIED", "message": "Not your stamp."},
+            "code": "STAMP_OWNERSHIP_DENIED", "message": "Not your stamp."})
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--gateway-url", "https://test.gateway.io", "upload", "--file", "d.txt"])
+        assert result.exit_code == 1
+        assert "HTTP 403 STAMP_OWNERSHIP_DENIED: Not your stamp." in result.output
+        assert "Client Error" not in result.output
+
     def test_total_printed_when_command_fails_after_paying(self, mocker):
         from swarm_provenance_uploader.cli import _record_x402_payment
 

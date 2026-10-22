@@ -24,6 +24,7 @@ from typing import Callable, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 from ..exceptions import (
+    GatewayHTTPError,
     IdempotencyKeyError,
     InsecureGatewayWarning,
     PaymentDeliveredNotStoredError,
@@ -625,6 +626,94 @@ class GatewayClient:
             self._raise_for_paid_failure(response, payment, outstanding)
             return response
 
+    # How many FastAPI validation errors (422) to name before "and N more".
+    _MAX_VALIDATION_ERRORS_SHOWN = 3
+
+    @classmethod
+    def _gateway_error(cls, response: requests.Response) -> Tuple[Optional[str], Optional[str]]:
+        """
+        The gateway's (code, message) for an error response, either may be None.
+
+        Current gateways put `code` and `message` at the top level (swarm_connect
+        #381); older ones only under `detail`, as a dict, a string, or (for a
+        422) FastAPI's list of field errors. A placeholder code `HTTP_<status>`
+        is dropped: the status is shown anyway.
+        """
+        try:
+            body = response.json()
+        except ValueError:
+            return None, None
+        if not isinstance(body, dict):
+            return None, None
+        detail = body.get("detail")
+        inner = detail if isinstance(detail, dict) else {}
+
+        code = body.get("code")
+        if not isinstance(code, str) or not code:
+            code = inner.get("code")
+        if not isinstance(code, str) or re.fullmatch(r"HTTP_\d+", code or ""):
+            code = None
+
+        message = None
+        for candidate in (body.get("message"), inner.get("message"), inner.get("error"),
+                          inner.get("detail"), detail, body.get("error")):
+            if isinstance(candidate, str) and candidate.strip():
+                message = candidate
+                break
+
+        if isinstance(detail, list) and detail:
+            fields = []
+            for item in detail[: cls._MAX_VALIDATION_ERRORS_SHOWN]:
+                if isinstance(item, dict):
+                    loc = ".".join(str(part) for part in item.get("loc") or [])
+                    msg = str(item.get("msg") or "invalid")
+                    fields.append(f"{loc}: {msg}" if loc else msg)
+            if fields:
+                listed = "; ".join(fields)
+                more = len(detail) - cls._MAX_VALIDATION_ERRORS_SHOWN
+                if more > 0:
+                    listed += f"; and {more} more"
+                message = f"{message} ({listed})" if message else listed
+
+        return (_sanitize_gateway_text(code, limit=64),
+                _sanitize_gateway_text(message, limit=300))
+
+    @staticmethod
+    def _retry_after_header(response: requests.Response) -> Optional[int]:
+        """Retry-After in seconds, as the gateway sent it, or None."""
+        try:
+            seconds = int(str(response.headers.get("Retry-After", "")).strip())
+        except ValueError:
+            return None
+        return seconds if seconds >= 0 else None
+
+    @classmethod
+    def _raise_for_gateway_error(cls, response: requests.Response) -> None:
+        """
+        Raise for a non-2xx response with the gateway's code and message (#139).
+
+        Raises GatewayHTTPError, a requests HTTPError that keeps `.response`,
+        with text such as "HTTP 403 STAMP_OWNERSHIP_DENIED: <message> Retry
+        after 30 s." When the gateway said nothing readable (not JSON, empty
+        body), requests' own HTTPError is raised unchanged.
+        """
+        if response.status_code < 400:
+            return
+        code, message = cls._gateway_error(response)
+        retry_after = cls._retry_after_header(response)
+        if not code and not message:
+            response.raise_for_status()
+            return
+        text = f"HTTP {response.status_code}"
+        if code:
+            text += f" {code}"
+        if message:
+            text += f": {message}"
+        if retry_after is not None:
+            text += f" Retry after {retry_after} s."
+        raise GatewayHTTPError(text, response=response, code=code,
+                               gateway_message=message, retry_after=retry_after)
+
     @staticmethod
     def _retry_after(response: requests.Response) -> int:
         """Seconds from Retry-After (default 5, at most 30)."""
@@ -913,7 +1002,7 @@ class GatewayClient:
             response = requests.get(url, headers=self._get_headers(), params=params, timeout=30)
             if verbose:
                 print(f"DEBUG: List stamps status: {response.status_code}")
-            response.raise_for_status()
+            self._raise_for_gateway_error(response)
             data = response.json()
             return StampListResponse.model_validate(data)
         except requests.exceptions.RequestException as e:
@@ -986,7 +1075,7 @@ class GatewayClient:
                 print(f"DEBUG: Purchase stamp status: {response.status_code}")
             if response.status_code == 202:
                 self._raise_purchase_pending(response)
-            response.raise_for_status()
+            self._raise_for_gateway_error(response)
             with self._reading_paid_result(response):
                 result = StampPurchaseResponse.model_validate(response.json())
             if verbose:
@@ -1045,7 +1134,7 @@ class GatewayClient:
                 if verbose:
                     print(f"DEBUG: Stamp {stamp_id} not found")
                 return None
-            response.raise_for_status()
+            self._raise_for_gateway_error(response)
             data = response.json()
             return StampDetails.model_validate(data)
         except requests.exceptions.RequestException as e:
@@ -1082,7 +1171,7 @@ class GatewayClient:
             )
             if verbose:
                 print(f"DEBUG: Extend stamp status: {response.status_code}")
-            response.raise_for_status()
+            self._raise_for_gateway_error(response)
             data = response.json()
             result = StampExtensionResponse.model_validate(data)
             if verbose:
@@ -1144,7 +1233,7 @@ class GatewayClient:
             )
             if verbose:
                 print(f"DEBUG: Upload status: {response.status_code}")
-            response.raise_for_status()
+            self._raise_for_gateway_error(response)
             with self._reading_paid_result(response):
                 result = DataUploadResponse.model_validate(response.json())
             if verbose:
@@ -1184,7 +1273,7 @@ class GatewayClient:
                 print(f"DEBUG: Download status: {response.status_code}")
             if response.status_code == 404:
                 raise FileNotFoundError(f"Data not found on Swarm: {reference}")
-            response.raise_for_status()
+            self._raise_for_gateway_error(response)
             if verbose:
                 print(f"DEBUG: Downloaded {len(response.content)} bytes")
             return response.content
@@ -1211,7 +1300,7 @@ class GatewayClient:
             response = requests.get(url, headers=self._get_headers(), timeout=10)
             if verbose:
                 print(f"DEBUG: Get wallet status: {response.status_code}")
-            response.raise_for_status()
+            self._raise_for_gateway_error(response)
             data = response.json()
             return WalletResponse.model_validate(data)
         except requests.exceptions.RequestException as e:
@@ -1235,7 +1324,7 @@ class GatewayClient:
             response = requests.get(url, headers=self._get_headers(), timeout=10)
             if verbose:
                 print(f"DEBUG: Get chequebook status: {response.status_code}")
-            response.raise_for_status()
+            self._raise_for_gateway_error(response)
             data = response.json()
             return ChequebookResponse.model_validate(data)
         except requests.exceptions.RequestException as e:
@@ -1275,7 +1364,7 @@ class GatewayClient:
             if response.status_code == 404:
                 raise PoolNotEnabledError("Stamp pool is not enabled on this gateway.")
 
-            response.raise_for_status()
+            self._raise_for_gateway_error(response)
             data = response.json()
             return PoolStatusResponse.model_validate(data)
         except PoolNotEnabledError:
@@ -1345,7 +1434,7 @@ class GatewayClient:
             if response.status_code == 404:
                 raise PoolNotEnabledError("Stamp pool is not enabled on this gateway.")
 
-            response.raise_for_status()
+            self._raise_for_gateway_error(response)
             data = response.json()
             # Response contains {"stamps": [...], "count": n}
             stamps_data = data.get("stamps", data)
@@ -1411,7 +1500,7 @@ class GatewayClient:
             )
             if verbose:
                 print(f"DEBUG: Acquire response: {response.status_code}")
-            response.raise_for_status()
+            self._raise_for_gateway_error(response)
             with self._reading_paid_result(response):
                 result = AcquireStampResponse.model_validate(response.json())
 
@@ -1476,7 +1565,7 @@ class GatewayClient:
             if response.status_code == 404:
                 raise StampNotFoundError(f"Stamp {stamp_id} not found.")
 
-            response.raise_for_status()
+            self._raise_for_gateway_error(response)
             data = response.json()
             return StampHealthCheckResponse.model_validate(data)
         except StampNotFoundError:
@@ -1511,7 +1600,7 @@ class GatewayClient:
             if response.status_code == 404:
                 raise NotaryNotEnabledError("Notary signing is not enabled on this gateway.")
 
-            response.raise_for_status()
+            self._raise_for_gateway_error(response)
             data = response.json()
             return NotaryInfoResponse.model_validate(data)
         except NotaryNotEnabledError:
@@ -1544,7 +1633,7 @@ class GatewayClient:
             if response.status_code == 404:
                 raise NotaryNotEnabledError("Notary signing is not enabled on this gateway.")
 
-            response.raise_for_status()
+            self._raise_for_gateway_error(response)
             data = response.json()
             return NotaryStatusResponse.model_validate(data)
         except NotaryNotEnabledError:
@@ -1641,9 +1730,9 @@ class GatewayClient:
                     elif error_code == "INVALID_SIGN_OPTION":
                         raise ValueError(f"Invalid sign option: {error_message}")
                 except (ValueError, KeyError):
-                    pass  # Fall through to raise_for_status
+                    pass  # Fall through to _raise_for_gateway_error
 
-            response.raise_for_status()
+            self._raise_for_gateway_error(response)
             with self._reading_paid_result(response):
                 data_response = response.json()
 
@@ -1744,7 +1833,7 @@ class GatewayClient:
             if verbose:
                 print(f"DEBUG: Upload manifest status: {response.status_code}")
 
-            response.raise_for_status()
+            self._raise_for_gateway_error(response)
             with self._reading_paid_result(response):
                 data = response.json()
 
