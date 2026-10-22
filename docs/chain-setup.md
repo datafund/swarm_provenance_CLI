@@ -337,6 +337,8 @@ export CHAIN_RPC_URL=https://base-sepolia.g.alchemy.com/v2/YOUR_KEY
 export CHAIN_RPC_URLS=https://fallback1.io,https://fallback2.io
 ```
 
+Like `CHAIN_RPC_URL`, `CHAIN_RPC_URLS` applies whatever chain is selected (`CHAIN_NAME` or `--chain`). If you switch chains, change the URLs too.
+
 ### "Transaction reverted"
 
 Common causes:

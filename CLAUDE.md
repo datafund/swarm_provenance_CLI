@@ -351,7 +351,7 @@ Uses python-dotenv for environment configuration. `config.py` loads `find_dotenv
 **x402 Payment Configuration**:
 - `X402_ENABLED`: Enable x402 payment support (default: false)
 - `X402_PRIVATE_KEY`: Wallet private key for signing payments
-- `X402_PRIVATE_KEY_ENV`: Name of the variable holding the key (default `X402_PRIVATE_KEY`). Signer and `x402 status`/`balance` share `resolve_x402_private_key()`: a custom name is read alone, otherwise `X402_PRIVATE_KEY` then legacy `SWARM_X402_PRIVATE_KEY`. A value that is not a valid variable name (or is 32+ hex digits, with or without 0x) resolves no key and is never printed; names are printed only through `printable_key_env_name()`
+- `X402_PRIVATE_KEY_ENV`: Name of the variable holding the key (default `X402_PRIVATE_KEY`). Signer and `x402 status`/`balance` share `resolve_x402_private_key()`: a custom name is read alone, otherwise `X402_PRIVATE_KEY` then legacy `SWARM_X402_PRIVATE_KEY`. A value that is not a valid variable name (or contains a run of 32+ hex digits anywhere) resolves no key and is never printed; names are printed only through `printable_key_env_name()`
 - `X402_RPC_URL`: RPC for the USDC balance and EIP-712 domain checks (optional; `X402Client(rpc_url=...)` wins, else the network preset). Registered for redaction
 - `X402_NETWORK`: `base-sepolia` (testnet) or `base` (mainnet)
 - `X402_AUTO_PAY`: Enable auto-pay without prompts (default: false; `--no-auto-pay` overrides it per command)

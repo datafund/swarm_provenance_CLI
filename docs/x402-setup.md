@@ -162,9 +162,11 @@ The CLI reads the `.env` of the folder you run it in, or the nearest `.env` in a
 
 The key is looked up in this order, for both signing and `x402 status`:
 
-1. If `X402_PRIVATE_KEY_ENV` names another variable, only that variable.
+1. If `X402_PRIVATE_KEY_ENV` names another variable, only that variable. If it is not a valid variable name, or it contains a run of 32 or more hex digits (it looks like a key), no key is read at all, and the CLI says "X402_PRIVATE_KEY_ENV is not a valid variable name" without repeating the value.
 2. Otherwise `X402_PRIVATE_KEY`.
 3. Otherwise the legacy `SWARM_X402_PRIVATE_KEY`.
+
+Spaces and line breaks around the key are removed. A variable that is empty or blank counts as not set.
 
 ### Verify configuration
 
