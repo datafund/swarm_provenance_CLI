@@ -6151,3 +6151,468 @@ class TestChainCodeCheckRpcError:
         assert result.exit_code == 1, result.output
         assert "Cannot connect to chain" in result.output
         assert f"RPC URL: {rpc}" in result.output
+
+
+# RPC URL redaction in chain error output (#169)
+
+RPC_KEY = "SECRETKEYSECRETKEY"
+RPC_URLS_WITH_KEY = [
+    f"https://base-sepolia.g.alchemy.com/v2/{RPC_KEY}",
+    f"https://rpc.example.org/base?apikey={RPC_KEY}",
+    f"https://rpcuser:{RPC_KEY}@rpc.example.org",
+]
+RPC_URL_IDS = ["path", "query", "basic-auth"]
+RPC_HOST = {0: "https://base-sepolia.g.alchemy.com/", 1: "https://rpc.example.org/", 2: "https://rpc.example.org/"}
+
+# (command line, client method that raises)
+CHAIN_COMMANDS = [
+    (["chain", "balance"], "balance"),
+    (["chain", "balance", "--json"], "balance"),
+    (["chain", "get", DUMMY_SWARM_REF], "get"),
+    (["chain", "get", DUMMY_SWARM_REF, "--json"], "get"),
+    (["chain", "anchor", DUMMY_SWARM_REF], "anchor"),
+    (["chain", "anchor", DUMMY_SWARM_REF, "--json"], "anchor"),
+    (["chain", "access", DUMMY_SWARM_REF, "--json"], "access"),
+]
+CHAIN_COMMAND_IDS = [" ".join(c[0][1:]).replace(DUMMY_SWARM_REF, "<hash>") for c in CHAIN_COMMANDS]
+
+
+class TestChainErrorRedaction:
+    """Chain error output never shows the path, query or credentials of the RPC URL."""
+
+    @pytest.mark.parametrize("args,method", CHAIN_COMMANDS, ids=CHAIN_COMMAND_IDS)
+    @pytest.mark.parametrize("url_index", range(3), ids=RPC_URL_IDS)
+    def test_connection_error_from_code_check(self, mocker, args, method, url_index):
+        """The ChainConnectionError of the contract code check (#166): message and RPC URL line."""
+        rpc_url = RPC_URLS_WITH_KEY[url_index]
+        error = exceptions.ChainConnectionError(
+            "The RPC endpoint did not answer the contract code check: "
+            f"401 Client Error: Unauthorized for url: {rpc_url}",
+            rpc_url=rpc_url,
+        )
+        mock_client = mocker.MagicMock()
+        getattr(mock_client, method).side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        assert RPC_KEY not in result.output
+        assert "ERROR: Cannot connect to chain" in result.output
+        assert "401 Client Error: Unauthorized" in result.output
+        assert f"RPC URL: {RPC_HOST[url_index]}" in result.output
+
+    @pytest.mark.parametrize("args,method", CHAIN_COMMANDS, ids=CHAIN_COMMAND_IDS)
+    def test_raw_rpc_error(self, mocker, args, method):
+        """A requests error that no handler wrapped: it was an uncaught traceback with the URL."""
+        import requests
+
+        mock_client = mocker.MagicMock()
+        getattr(mock_client, method).side_effect = requests.exceptions.HTTPError(
+            f"429 Client Error: Too Many Requests for url: {RPC_URLS_WITH_KEY[0]}"
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert RPC_KEY not in result.output
+        assert "ERROR: Cannot connect to chain: 429 Client Error: Too Many Requests" in result.output
+        assert "https://base-sepolia.g.alchemy.com/" in result.output
+
+    def test_raw_connection_error_path_only(self, mocker):
+        """urllib3's "Max retries exceeded with url: /v2/<key>" has no scheme or host."""
+        import requests
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.side_effect = requests.exceptions.ConnectionError(
+            "HTTPSConnectionPool(host='base-sepolia.g.alchemy.com', port=443): Max retries "
+            f"exceeded with url: /v2/{RPC_KEY} (Caused by NewConnectionError('refused'))"
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "get", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1, result.output
+        assert RPC_KEY not in result.output
+        assert "base-sepolia.g.alchemy.com" in result.output
+
+    def test_unexpected_error_is_not_a_traceback(self, mocker):
+        """An error that is not an RPC failure exits 1 with its redacted text."""
+        mock_client = mocker.MagicMock()
+        mock_client.verify.side_effect = ValueError(f"bad answer from {RPC_URLS_WITH_KEY[1]}")
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert RPC_KEY not in result.output
+        assert "ERROR: Chain command failed: ValueError: bad answer from https://rpc.example.org/" in result.output
+
+    def test_json_stdout_has_no_error_text(self, mocker):
+        """With --json, the error and the RPC URL line go to stderr, not into the JSON stream."""
+        from typer.testing import CliRunner as _Runner
+
+        error = exceptions.ChainConnectionError("RPC health check failed", rpc_url=RPC_URLS_WITH_KEY[0])
+        mock_client = mocker.MagicMock()
+        mock_client.balance.side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "balance", "--json"])
+
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert "RPC URL: https://base-sepolia.g.alchemy.com/" in result.stderr
+        assert RPC_KEY not in result.stderr
+
+    def test_not_verified_reason(self, mocker):
+        """The "reason" of a not-verified write, in text and in --json."""
+        from swarm_provenance_uploader.exceptions import TransactionNotVerifiedError
+
+        reason = f"504 Server Error: Gateway Timeout for url: {RPC_URLS_WITH_KEY[0]}"
+        error = TransactionNotVerifiedError(
+            f"Not verified: {reason}",
+            tx_hash=DUMMY_TX_HASH,
+            event_name="DataAccessed",
+            expected_count=1,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=DUMMY_EXPLORER_URL,
+            reason=reason,
+        )
+        mock_client = mocker.MagicMock()
+        mock_client.access.side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+        assert result.exit_code == 1, result.output
+        assert RPC_KEY not in result.output
+        assert "504 Server Error: Gateway Timeout" in result.output
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF, "--json"])
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.output)
+        assert RPC_KEY not in output["reason"]
+        assert output["reason"].startswith("504 Server Error: Gateway Timeout for url: https://base-sepolia.g.alchemy.com/")
+
+
+@pytest.fixture
+def echo_rpc_server():
+    """A local "RPC" that answers HTTP 200 with an HTML page quoting the request path."""
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = f"<html><body>The requested URL {self.path} was not found</body></html>".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server.server_port
+    server.shutdown()
+    server.server_close()
+
+
+class TestChainErrorRedactionRealProvider:
+    """The real provider and web3 with RPC URLs whose errors repeat the key without a usable URL."""
+
+    @pytest.mark.parametrize("args", [
+        ["chain", "get", DUMMY_SWARM_REF],
+        ["chain", "balance", "--json"],
+    ], ids=["get", "balance-json"])
+    @pytest.mark.parametrize("kind", ["no-scheme", "htps", "body-echo"])
+    def test_key_never_shown(self, monkeypatch, echo_rpc_server, args, kind):
+        pytest.importorskip("web3")
+        rpc_url = {
+            "no-scheme": f"127.0.0.1:{echo_rpc_server}/v2/{RPC_KEY}",
+            "htps": f"htps://127.0.0.1:{echo_rpc_server}/v2/{RPC_KEY}",
+            "body-echo": f"http://127.0.0.1:{echo_rpc_server}/v2/{RPC_KEY}",
+        }[kind]
+        monkeypatch.setenv("PROVENANCE_WALLET_KEY", "0x" + "a" * 64)
+        monkeypatch.setitem(_chain_config, "chain", "base-sepolia")
+        monkeypatch.setitem(_chain_config, "rpc_url", rpc_url)
+        monkeypatch.setitem(_chain_config, "contract", None)
+        monkeypatch.setitem(_chain_config, "wallet_key_env", "PROVENANCE_WALLET_KEY")
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert "ERROR: Cannot connect to chain" in result.output
+        assert RPC_KEY not in result.output
+        if kind == "body-echo":
+            assert "The requested URL /\u2026 was not found" in result.output
+        else:
+            assert "No connection adapters were found for '" in result.output
+            assert "127.0.0.1:" in result.output
+
+
+class TestNonSecretUrlsKept:
+    """Guard (#169): explorer, faucet and bridge links are shown in full, not redacted."""
+
+    @pytest.mark.parametrize("error_cls", ["TransactionNotRecordedError", "TransactionNotVerifiedError"])
+    def test_explorer_url(self, mocker, error_cls):
+        error = getattr(exceptions, error_cls)(
+            "Not confirmed",
+            tx_hash=DUMMY_TX_HASH,
+            event_name="DataAccessed",
+            expected_count=1,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=DUMMY_EXPLORER_URL,
+        )
+        assert error.explorer_url == DUMMY_EXPLORER_URL
+        mock_client = mocker.MagicMock()
+        mock_client.access.side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+        assert f"Explorer:    {DUMMY_EXPLORER_URL}" in result.output
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF, "--json"])
+        assert json.loads(result.output)["explorer_url"] == DUMMY_EXPLORER_URL
+
+    @pytest.mark.parametrize("chain,key", [("base-sepolia", "faucet_url"), ("base", "bridge_url")])
+    def test_faucet_and_bridge_urls(self, mocker, chain, key):
+        from swarm_provenance_uploader.chain.provider import CHAIN_PRESETS
+
+        url = CHAIN_PRESETS[chain][key]
+        mock_client = mocker.MagicMock()
+        mock_client.anchor.side_effect = exceptions.InsufficientFundsError(
+            "Insufficient funds",
+            wallet_address=DUMMY_ADDRESS,
+            balance_wei=0,
+            estimated_cost_wei=1,
+            chain_name=chain,
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF])
+        assert url in result.output
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
+        assert json.loads(result.output)[key] == url
+
+
+class TestJsonStdoutOnChainErrors:
+    """With --json, error and hint lines go to stderr, so stdout is empty or valid JSON."""
+
+    @staticmethod
+    def _assert_stdout_empty_or_json(result):
+        if result.stdout.strip():
+            json.loads(result.stdout)
+
+    def test_anchor_without_wallet_key(self, monkeypatch):
+        """No wallet key ("Check PROVENANCE_WALLET_KEY..."), or no blockchain extra ("Install with:")."""
+        from typer.testing import CliRunner as _Runner
+
+        monkeypatch.delenv("PROVENANCE_WALLET_KEY", raising=False)
+        monkeypatch.setitem(_chain_config, "wallet_key_env", "PROVENANCE_WALLET_KEY_UNSET_FOR_TEST")
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
+
+        assert result.exit_code == 1
+        self._assert_stdout_empty_or_json(result)
+        assert "PROVENANCE_WALLET_KEY" in result.stderr or "Install with:" in result.stderr
+
+    @pytest.mark.parametrize("args,method,error", [
+        (["chain", "transform", DUMMY_SWARM_REF, "b" * 64, "--description", "d", "--json"],
+         "transform", "DataNotRegisteredError"),
+        (["chain", "anchor", DUMMY_SWARM_REF, "--json"], "anchor", "ChainTransactionError"),
+    ], ids=["transform-not-registered", "anchor-transaction-failed"])
+    def test_hint_lines(self, mocker, args, method, error):
+        from typer.testing import CliRunner as _Runner
+
+        kwargs = {"tx_hash": DUMMY_TX_HASH} if error == "ChainTransactionError" else {}
+        mock_client = mocker.MagicMock()
+        getattr(mock_client, method).side_effect = getattr(exceptions, error)("failed", **kwargs)
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = _Runner(mix_stderr=False).invoke(app, args)
+
+        assert result.exit_code == 1
+        self._assert_stdout_empty_or_json(result)
+        assert "ERROR" in result.stderr
+
+
+class TestUnexpectedChainErrorVerbose:
+    """An error no chain handler catches: one line by default, a redacted traceback with -v."""
+
+    def _invoke(self, mocker, args):
+        from typer.testing import CliRunner as _Runner
+
+        def fail(*a, **kw):
+            raise KeyError(f"no field in answer from {RPC_URLS_WITH_KEY[0]}")
+
+        mock_client = mocker.MagicMock()
+        mock_client.verify.side_effect = fail
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+        return _Runner(mix_stderr=False).invoke(app, args)
+
+    def test_default_is_one_line(self, mocker):
+        result = self._invoke(mocker, ["chain", "verify", DUMMY_SWARM_REF])
+        assert result.exit_code == 1
+        assert "Traceback" not in result.stderr
+        assert result.stderr.strip().count("\n") == 0
+        assert "ERROR: Chain command failed: KeyError" in result.stderr
+        assert RPC_KEY not in result.stderr
+
+    @pytest.mark.parametrize("flag", ["-v", "--verbose"])
+    def test_verbose_prints_redacted_traceback(self, mocker, flag):
+        result = self._invoke(mocker, ["chain", "verify", DUMMY_SWARM_REF, flag])
+        assert result.exit_code == 1
+        assert "Traceback (most recent call last)" in result.stderr
+        assert "in fail" in result.stderr
+        assert "KeyError" in result.stderr
+        assert "https://base-sepolia.g.alchemy.com/" in result.stderr
+        assert RPC_KEY not in result.stderr
+        assert "ERROR: Chain command failed: KeyError" in result.stderr
+
+
+class TestMergeErrorLinesOnStderr:
+    """chain merge: the Usage line and the not-registered Hash line go to stderr with the ERROR."""
+
+    def test_usage_line(self):
+        from typer.testing import CliRunner as _Runner
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "merge", "a" * 64, "b" * 64])
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert "Usage: swarm-prov-upload chain merge" in result.stderr
+
+    def test_not_registered_hash_line(self, mocker):
+        from typer.testing import CliRunner as _Runner
+
+        mock_client = mocker.MagicMock()
+        mock_client.merge_transform.side_effect = exceptions.DataNotRegisteredError(
+            "not registered", data_hash="a" * 64
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = _Runner(mix_stderr=False).invoke(
+            app, ["chain", "merge", "a" * 64, "b" * 64, "c" * 64, "--json"]
+        )
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert f"Hash: {'a' * 64}" in result.stderr
+
+
+class TestRpcRejectionIsNotConnectionError:
+    """A JSON-RPC error answer means the node answered: it is not "Cannot connect to chain"."""
+
+    def _invoke(self, mocker, error):
+        mock_client = mocker.MagicMock()
+        mock_client.verify.side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+        return runner.invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
+
+    def test_web3_rpc_error_uses_node_message(self, mocker):
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        error = web3_exceptions.Web3RPCError(
+            "{'code': -32000, 'message': 'nonce too low'}",
+            rpc_response={"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "nonce too low"}},
+        )
+        result = self._invoke(mocker, error)
+        assert result.exit_code == 1
+        assert "ERROR: The RPC rejected the request: nonce too low" in result.output
+        assert "Cannot connect to chain" not in result.output
+
+    def test_web3_rpc_error_without_response_uses_text(self, mocker):
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        error = web3_exceptions.Web3RPCError(f"rejected by {RPC_URLS_WITH_KEY[0]}")
+        result = self._invoke(mocker, error)
+        assert result.exit_code == 1
+        assert "ERROR: The RPC rejected the request: rejected by https://base-sepolia.g.alchemy.com/" in result.output
+        assert RPC_KEY not in result.output
+
+    def test_web3_rpc_error_dict_repr_without_response(self, mocker):
+        """Without rpc_response, a dict-repr text gives only the node's message, redacted."""
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        error = web3_exceptions.Web3RPCError(
+            f"{{'code': -32000, 'message': 'rejected by {RPC_URLS_WITH_KEY[0]}'}}"
+        )
+        result = self._invoke(mocker, error)
+        assert result.exit_code == 1
+        assert (
+            "ERROR: The RPC rejected the request: rejected by https://base-sepolia.g.alchemy.com/"
+            in result.output
+        )
+        assert "'code'" not in result.output
+        assert "-32000" not in result.output
+        assert RPC_KEY not in result.output
+
+    def test_request_timed_out_is_connection_error(self, mocker):
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        result = self._invoke(mocker, web3_exceptions.RequestTimedOut("timed out"))
+        assert result.exit_code == 1
+        assert "ERROR: Cannot connect to chain: timed out" in result.output
+
+
+SHORT_TOKEN = "abcdefghijklmno"  # 15 letters, no digit: not "credential-like" by shape alone
+
+
+@pytest.fixture
+def token_echo_rpc_server():
+    """A local RPC that answers every call with a JSON-RPC error quoting only the bare token."""
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            body = json.dumps({
+                "jsonrpc": "2.0",
+                "id": request.get("id", 1) if isinstance(request, dict) else 1,
+                "error": {"code": -32001, "message": f"invalid api key: {SHORT_TOKEN}"},
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server.server_port
+    server.shutdown()
+    server.server_close()
+
+
+class TestShortTokenEcho:
+    """A short letters-only key in the last path segment or a credential-named query value."""
+
+    @pytest.mark.parametrize("args", [
+        ["chain", "get", DUMMY_SWARM_REF],
+        ["chain", "balance", "--json"],
+    ], ids=["get", "balance-json"])
+    @pytest.mark.parametrize("form", ["path", "query"])
+    def test_bare_token_echo_is_redacted(self, monkeypatch, token_echo_rpc_server, args, form):
+        pytest.importorskip("web3")
+        base = f"http://127.0.0.1:{token_echo_rpc_server}"
+        rpc_url = f"{base}/rpc/{SHORT_TOKEN}" if form == "path" else f"{base}/?apikey={SHORT_TOKEN}"
+        monkeypatch.setenv("PROVENANCE_WALLET_KEY", "0x" + "a" * 64)
+        monkeypatch.setitem(_chain_config, "chain", "base-sepolia")
+        monkeypatch.setitem(_chain_config, "contract", None)
+        monkeypatch.setitem(_chain_config, "wallet_key_env", "PROVENANCE_WALLET_KEY")
+        monkeypatch.setitem(_chain_config, "rpc_url", _chain_config["rpc_url"])
+
+        result = runner.invoke(app, ["--chain-rpc", rpc_url] + args)
+
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert "invalid api key: …" in result.output
+        assert SHORT_TOKEN not in result.output

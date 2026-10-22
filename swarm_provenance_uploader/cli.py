@@ -1,4 +1,5 @@
 import click
+import functools
 import typer
 from typing import List, NoReturn, Optional
 from typing_extensions import Annotated
@@ -16,6 +17,7 @@ from .core import file_utils, swarm_client, metadata_builder
 from .core.gateway_client import GatewayClient, is_insecure_gateway_url, is_valid_idempotency_key
 from .models import ProvenanceMetadata, ValidationError
 from . import exceptions
+from .chain.redact import redact_url, redact_urls
 
 app = typer.Typer(help="Swarm Provenance CLI - Wraps and uploads data to Swarm.")
 stamps_app = typer.Typer(help="Manage postage stamps.")
@@ -110,7 +112,7 @@ def _get_chain_client(verbose: bool = False):
             "ERROR: Blockchain dependencies not installed.",
             fg=typer.colors.RED, err=True,
         )
-        typer.echo(f"Install with: {INSTALL_SIGNING_DEPS}")
+        typer.echo(f"Install with: {INSTALL_SIGNING_DEPS}", err=True)
         raise typer.Exit(code=1)
 
     try:
@@ -124,7 +126,7 @@ def _get_chain_client(verbose: bool = False):
         )
     except exceptions.ChainConfigurationError as e:
         typer.secho(f"ERROR: Chain configuration invalid: {e}", fg=typer.colors.RED, err=True)
-        typer.echo("Check PROVENANCE_WALLET_KEY environment variable and chain settings.")
+        typer.echo("Check PROVENANCE_WALLET_KEY environment variable and chain settings.", err=True)
         raise typer.Exit(code=1)
 
 
@@ -2151,6 +2153,65 @@ def _insufficient_funds_json(e: "exceptions.InsufficientFundsError") -> dict:
     return data
 
 
+def _rpc_rejection_message(e: Exception) -> Optional[str]:
+    """The node's message if e is a JSON-RPC error answer, else None."""
+    try:
+        from .core.chain_client import _rpc_rejection_message as rejection_message
+    except ImportError:
+        return None
+    return rejection_message(e)
+
+
+def _report_unexpected_chain_error(e: Exception, verbose: bool = False) -> None:
+    """Print an error that no chain command handles, without the RPC URL.
+
+    Raw requests and web3 errors repeat the RPC URL, which can carry a
+    provider API key. Uncaught, they reached the user in a traceback that
+    also lists local variables (#169). With verbose, the traceback is
+    printed without local variables and with URLs redacted.
+    """
+    if verbose:
+        import traceback
+
+        trace = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+        typer.echo(redact_urls(trace), err=True)
+    rejection = _rpc_rejection_message(e)
+    if rejection is not None:
+        typer.secho(f"ERROR: The RPC rejected the request: {redact_urls(rejection)}",
+                    fg=typer.colors.RED, err=True)
+        return
+    try:
+        from .core.chain_client import _is_rpc_failure
+        rpc_failure = _is_rpc_failure(e)
+    except ImportError:
+        rpc_failure = False
+    if rpc_failure:
+        typer.secho(f"ERROR: Cannot connect to chain: {redact_urls(str(e))}",
+                    fg=typer.colors.RED, err=True)
+    else:
+        typer.secho(f"ERROR: Chain command failed: {type(e).__name__}: {redact_urls(str(e))}",
+                    fg=typer.colors.RED, err=True)
+
+
+def _chain_command(name: str):
+    """Register a chain subcommand. Errors it does not handle exit 1 with redacted text."""
+    register = chain_app.command(name)
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except (click.exceptions.Exit, click.exceptions.Abort, click.ClickException):
+                raise
+            except Exception as e:
+                _report_unexpected_chain_error(e, verbose=bool(kwargs.get("verbose")))
+                raise typer.Exit(code=1)
+        return register(wrapper)
+
+    return decorator
+
+
 def _handle_insufficient_funds(
     e: "exceptions.InsufficientFundsError",
     output_json: bool = False,
@@ -2200,7 +2261,7 @@ def _not_recorded_json(e: "exceptions.TransactionUnconfirmedError") -> dict:
     if isinstance(e, exceptions.TransactionNotRecordedError):
         data["emitted_count"] = e.emitted_count
     else:
-        data["reason"] = getattr(e, "reason", None)
+        data["reason"] = redact_urls(getattr(e, "reason", None))
     return data
 
 
@@ -2232,7 +2293,7 @@ def _handle_not_recorded(
             "explorer before you try again.",
             fg=typer.colors.RED, err=True,
         )
-        typer.echo(f"  Reason:      {getattr(e, 'reason', None) or e}", err=True)
+        typer.echo(f"  Reason:      {redact_urls(getattr(e, 'reason', None) or str(e))}", err=True)
     typer.echo(f"  Transaction: {e.tx_hash}", err=True)
     if e.explorer_url:
         typer.echo(f"  Explorer:    {e.explorer_url}", err=True)
@@ -2345,7 +2406,7 @@ def _composite_step_failed(
     raise typer.Exit(code=1)
 
 
-@chain_app.command("balance")
+@_chain_command("balance")
 def chain_balance(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
@@ -2361,7 +2422,7 @@ def chain_balance(
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2390,7 +2451,7 @@ def chain_balance(
         typer.echo(f"Bridge ETH: {bridge}")
 
 
-@chain_app.command("verify")
+@_chain_command("verify")
 def chain_verify(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to verify on-chain.")],
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
@@ -2408,7 +2469,7 @@ def chain_verify(
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2421,7 +2482,7 @@ def chain_verify(
         raise typer.Exit(code=1)
 
 
-@chain_app.command("get")
+@_chain_command("get")
 def chain_get(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to look up.")],
     follow: Annotated[bool, typer.Option("--follow", help="Walk the transformation chain.")] = False,
@@ -2448,7 +2509,7 @@ def chain_get(
         except exceptions.ChainConnectionError as e:
             typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
             if e.rpc_url:
-                typer.echo(f"  RPC URL: {e.rpc_url}")
+                typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
             raise typer.Exit(code=1)
         except exceptions.ChainError as e:
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2507,7 +2568,7 @@ def chain_get(
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2549,7 +2610,7 @@ def chain_get(
             typer.echo(f"    - {addr_short}")
 
 
-@chain_app.command("anchor")
+@_chain_command("anchor")
 def chain_anchor(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to anchor on-chain.")],
     data_type: Annotated[str, typer.Option("--type", "-t", help="Data type/category.")] = "swarm-provenance",
@@ -2602,12 +2663,12 @@ def chain_anchor(
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
-            typer.echo(f"  Transaction: {e.tx_hash}")
+            typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2631,7 +2692,7 @@ def chain_anchor(
         typer.echo(f"  Explorer: {result.explorer_url}")
 
 
-@chain_app.command("set-storage-ref")
+@_chain_command("set-storage-ref")
 def chain_set_storage_ref(
     data_hash: Annotated[str, typer.Argument(help="Registered data hash.")],
     storage_ref: Annotated[str, typer.Argument(help="Storage reference (e.g. Swarm hash) to link.")],
@@ -2660,12 +2721,12 @@ def chain_set_storage_ref(
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
-            typer.echo(f"  Transaction: {e.tx_hash}")
+            typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2685,7 +2746,7 @@ def chain_set_storage_ref(
         typer.echo(f"  Explorer: {result.explorer_url}")
 
 
-@chain_app.command("lookup")
+@_chain_command("lookup")
 def chain_lookup(
     storage_ref: Annotated[str, typer.Argument(help="Storage reference (e.g. Swarm hash) to look up.")],
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
@@ -2705,7 +2766,7 @@ def chain_lookup(
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2732,7 +2793,7 @@ def chain_lookup(
     typer.echo(f"  Time:    {ts_str}")
 
 
-@chain_app.command("access")
+@_chain_command("access")
 def chain_access(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to record access for.")],
     gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
@@ -2761,12 +2822,12 @@ def chain_access(
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
-            typer.echo(f"  Transaction: {e.tx_hash}")
+            typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2785,7 +2846,7 @@ def chain_access(
         typer.echo(f"  Explorer: {result.explorer_url}")
 
 
-@chain_app.command("status")
+@_chain_command("status")
 def chain_status(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to query or update status.")],
     set_status: Annotated[Optional[str], typer.Option("--set", help="Set status: active, restricted, deleted.")] = None,
@@ -2830,12 +2891,12 @@ def chain_status(
         except exceptions.ChainTransactionError as e:
             typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
             if e.tx_hash:
-                typer.echo(f"  Transaction: {e.tx_hash}")
+                typer.echo(f"  Transaction: {e.tx_hash}", err=True)
             raise typer.Exit(code=1)
         except exceptions.ChainConnectionError as e:
             typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
             if e.rpc_url:
-                typer.echo(f"  RPC URL: {e.rpc_url}")
+                typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
             raise typer.Exit(code=1)
         except exceptions.ChainError as e:
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2866,7 +2927,7 @@ def chain_status(
         except exceptions.ChainConnectionError as e:
             typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
             if e.rpc_url:
-                typer.echo(f"  RPC URL: {e.rpc_url}")
+                typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
             raise typer.Exit(code=1)
         except exceptions.ChainError as e:
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2881,7 +2942,7 @@ def chain_status(
         typer.echo(f"  Status: {record.status.name}")
 
 
-@chain_app.command("transfer")
+@_chain_command("transfer")
 def chain_transfer(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to transfer.")],
     to: Annotated[str, typer.Option("--to", help="New owner address.")],
@@ -2908,12 +2969,12 @@ def chain_transfer(
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
-            typer.echo(f"  Transaction: {e.tx_hash}")
+            typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2934,7 +2995,7 @@ def chain_transfer(
         typer.echo(f"  Explorer: {result.explorer_url}")
 
 
-@chain_app.command("delegate")
+@_chain_command("delegate")
 def chain_delegate(
     address: Annotated[str, typer.Argument(help="Delegate address to authorize or revoke.")],
     authorize: Annotated[bool, typer.Option("--authorize", help="Authorize this delegate.")] = False,
@@ -2972,12 +3033,12 @@ def chain_delegate(
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
-            typer.echo(f"  Transaction: {e.tx_hash}")
+            typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -2998,7 +3059,7 @@ def chain_delegate(
         typer.echo(f"  Explorer: {result.explorer_url}")
 
 
-@chain_app.command("transform")
+@_chain_command("transform")
 def chain_transform(
     original_hash: Annotated[str, typer.Argument(help="Hash of the original data.")],
     new_hash: Annotated[str, typer.Argument(help="Hash of the transformed data.")],
@@ -3032,7 +3093,7 @@ def chain_transform(
         raise
     except exceptions.DataNotRegisteredError as e:
         typer.secho(f"ERROR: Original hash is not registered on-chain.", fg=typer.colors.RED, err=True)
-        typer.echo(f"  Anchor it first: swarm-prov-upload chain anchor {e.data_hash or original_hash}")
+        typer.echo(f"  Anchor it first: swarm-prov-upload chain anchor {e.data_hash or original_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
@@ -3043,12 +3104,12 @@ def chain_transform(
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
-            typer.echo(f"  Transaction: {e.tx_hash}")
+            typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
@@ -3091,7 +3152,7 @@ def chain_transform(
         typer.echo(f"  Tx:      {status_result.tx_hash}")
 
 
-@chain_app.command("protect")
+@_chain_command("protect")
 def chain_protect(
     original_hash: Annotated[str, typer.Argument(help="Hash of the original data to protect.")],
     new_hash: Annotated[str, typer.Argument(help="Hash of the replacement/transformed data.")],
@@ -3128,7 +3189,7 @@ def chain_protect(
             _composite_step_failed(e, "verify", results, output_json=True)
         if isinstance(e, exceptions.DataNotRegisteredError):
             typer.secho(f"ERROR: Original hash is not registered on-chain.", fg=typer.colors.RED, err=True)
-            typer.echo(f"  Anchor it first: swarm-prov-upload chain anchor {original_hash}")
+            typer.echo(f"  Anchor it first: swarm-prov-upload chain anchor {original_hash}", err=True)
         else:
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -3193,7 +3254,7 @@ def chain_protect(
         typer.echo(f"  Desc:      {description}")
 
 
-@chain_app.command("merge")
+@_chain_command("merge")
 def chain_merge(
     hashes: Annotated[List[str], typer.Argument(help="Source hashes followed by the new (merged) hash. Minimum 3 values (2 sources + 1 new).")],
     description: Annotated[str, typer.Option("--description", "-d", help="Description of the merge.")] = "",
@@ -3215,7 +3276,7 @@ def chain_merge(
             "ERROR: Need at least 3 hashes: 2+ source hashes and 1 new hash.",
             fg=typer.colors.RED, err=True,
         )
-        typer.echo("Usage: swarm-prov-upload chain merge <source1> <source2> [<source3>...] <new_hash>")
+        typer.echo("Usage: swarm-prov-upload chain merge <source1> <source2> [<source3>...] <new_hash>", err=True)
         raise typer.Exit(code=1)
 
     source_hashes = hashes[:-1]
@@ -3237,8 +3298,8 @@ def chain_merge(
     except exceptions.DataNotRegisteredError as e:
         typer.secho(f"ERROR: Source hash is not registered on-chain.", fg=typer.colors.RED, err=True)
         if e.data_hash:
-            typer.echo(f"  Hash: {e.data_hash}")
-        typer.echo(f"  Anchor source hashes first: swarm-prov-upload chain anchor <hash>")
+            typer.echo(f"  Hash: {e.data_hash}", err=True)
+        typer.echo(f"  Anchor source hashes first: swarm-prov-upload chain anchor <hash>", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainValidationError as e:
         typer.secho(f"ERROR: Validation failed: {e}", fg=typer.colors.RED, err=True)
@@ -3252,12 +3313,12 @@ def chain_merge(
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
-            typer.echo(f"  Transaction: {e.tx_hash}")
+            typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
-            typer.echo(f"  RPC URL: {e.rpc_url}")
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)

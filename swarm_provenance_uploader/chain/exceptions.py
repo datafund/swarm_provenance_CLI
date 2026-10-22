@@ -6,11 +6,21 @@ allowing the chain module to be self-contained.
 """
 
 from ..exceptions import ProvenanceError
+from .redact import redact_url, redact_urls
 
 
 class ChainError(ProvenanceError):
-    """Base exception for blockchain-related errors."""
-    pass
+    """Base exception for blockchain-related errors.
+
+    URLs in the message are redacted (scheme, host and port are kept),
+    because chain errors often repeat the RPC URL, which can carry a
+    provider API key (#169).
+    """
+
+    def __init__(self, message: str = "", *args):
+        if isinstance(message, str):
+            message = redact_urls(message)
+        super().__init__(message, *args)
 
 
 class ChainConfigurationError(ChainError):
@@ -19,11 +29,15 @@ class ChainConfigurationError(ChainError):
 
 
 class ChainConnectionError(ChainError):
-    """Failed to connect to RPC endpoint."""
+    """Failed to connect to RPC endpoint.
+
+    ``rpc_url`` is the endpoint with only its scheme, host and port; the
+    path, query and credentials are replaced (#169).
+    """
 
     def __init__(self, message: str, rpc_url: str = None):
         super().__init__(message)
-        self.rpc_url = rpc_url
+        self.rpc_url = redact_url(rpc_url)
 
 
 class ChainTransactionError(ChainError):
@@ -172,7 +186,7 @@ class TransactionNotVerifiedError(TransactionUnconfirmedError):
             contract_address=contract_address,
             explorer_url=explorer_url,
         )
-        self.reason = reason
+        self.reason = redact_urls(reason)
 
 
 class TransformationAlreadyExistsError(ChainError):

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .exceptions import ChainConfigurationError, ChainValidationError
+from .redact import redact_urls
 
 logger = logging.getLogger(__name__)
 
@@ -558,7 +559,7 @@ class DataProvenanceContract:
             # Reconstruct the record from the scalar mapping.
             if self.supports_transformation_links():
                 raise  # genuine error on v2+ — re-raise
-            logger.debug("getDataRecord decode failed on older contract, using fallback: %s", e)
+            logger.debug("getDataRecord decode failed on older contract, using fallback: %s", redact_urls(str(e)))
             return self._get_data_record_v1_fallback(hash_bytes)
 
     def _get_data_record_v1_fallback(self, hash_bytes: bytes) -> Tuple:

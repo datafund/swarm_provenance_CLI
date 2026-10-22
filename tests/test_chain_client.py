@@ -3262,3 +3262,105 @@ def test_build_tx_timeout_reason_with_web3_classes():
         ChainClient._build_tx(MagicMock(), build)
     assert str(exc_info.value).endswith(": request timed out")
     assert "{" not in str(exc_info.value)
+
+
+# RPC URL redaction (#169)
+
+RPC_KEY = "SECRETKEYSECRETKEY"
+RPC_URLS_WITH_KEY = [
+    f"https://base-sepolia.g.alchemy.com/v2/{RPC_KEY}",
+    f"https://rpc.example.org/base?apikey={RPC_KEY}",
+    f"https://rpcuser:{RPC_KEY}@rpc.example.org",
+]
+RPC_URL_IDS = ["path", "query", "basic-auth"]
+
+
+class TestRpcUrlRedaction:
+    """No chain error shows the path, query or credentials of the RPC URL."""
+
+    @pytest.mark.parametrize("rpc_url", RPC_URLS_WITH_KEY, ids=RPC_URL_IDS)
+    def test_code_check_http_error(self, mock_chain_deps, rpc_url):
+        """The #166 code check: requests' HTTPError repeats the full URL."""
+        import requests
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.get_code.side_effect = requests.exceptions.HTTPError(
+            f"401 Client Error: Unauthorized for url: {rpc_url}"
+        )
+        client = ChainClient(chain="base-sepolia", rpc_url=rpc_url)
+
+        with pytest.raises(ChainConnectionError) as exc_info:
+            client.access(swarm_hash=DUMMY_HASH)
+        message = str(exc_info.value)
+        assert RPC_KEY not in message
+        assert RPC_KEY not in exc_info.value.rpc_url
+        assert "401 Client Error: Unauthorized" in message
+        assert "rpc.example.org" in message or "base-sepolia.g.alchemy.com" in message
+        assert exc_info.value.rpc_url.startswith("https://")
+        web3.eth.send_raw_transaction.assert_not_called()
+
+    def test_code_check_connection_error_path_only(self, mock_chain_deps):
+        """urllib3 repeats only the path and query: "Max retries exceeded with url: /v2/<key>"."""
+        import requests
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.get_code.side_effect = requests.exceptions.ConnectionError(
+            "HTTPSConnectionPool(host='base-sepolia.g.alchemy.com', port=443): Max retries "
+            f"exceeded with url: /v2/{RPC_KEY}?apikey={RPC_KEY} (Caused by NewConnectionError('refused'))"
+        )
+        client = ChainClient(chain="base-sepolia", rpc_url=RPC_URLS_WITH_KEY[0])
+
+        with pytest.raises(ChainConnectionError) as exc_info:
+            client.access(swarm_hash=DUMMY_HASH)
+        assert RPC_KEY not in str(exc_info.value)
+        assert "base-sepolia.g.alchemy.com" in str(exc_info.value)
+
+    @pytest.mark.parametrize("rpc_url", RPC_URLS_WITH_KEY, ids=RPC_URL_IDS)
+    def test_health_check_cannot_connect(self, mock_chain_deps, rpc_url):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        provider = ChainProvider(chain="base-sepolia", rpc_url=rpc_url)
+        mock_chain_deps["web3_instance"].is_connected.return_value = False
+
+        with pytest.raises(ChainConnectionError) as exc_info:
+            provider.health_check()
+        assert "Cannot connect to RPC endpoint" in str(exc_info.value)
+        assert RPC_KEY not in str(exc_info.value)
+        assert RPC_KEY not in exc_info.value.rpc_url
+
+    def test_get_block_number_error(self, mock_chain_deps):
+        import requests
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        rpc_url = RPC_URLS_WITH_KEY[0]
+        provider = ChainProvider(chain="base-sepolia", rpc_url=rpc_url)
+        type(mock_chain_deps["web3_instance"].eth).block_number = PropertyMock(
+            side_effect=requests.exceptions.HTTPError(f"429 Client Error: Too Many Requests for url: {rpc_url}")
+        )
+        try:
+            with pytest.raises(ChainConnectionError) as exc_info:
+                provider.get_block_number()
+        finally:
+            del type(mock_chain_deps["web3_instance"].eth).block_number
+        assert RPC_KEY not in str(exc_info.value)
+        assert "429 Client Error: Too Many Requests" in str(exc_info.value)
+
+    def test_fallback_log(self, mock_chain_deps, caplog):
+        """The "RPC fallback: switched from ... to ..." log line."""
+        import logging
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        provider = ChainProvider(
+            chain="base-sepolia",
+            rpc_url=RPC_URLS_WITH_KEY[0],
+            rpc_fallbacks=[RPC_URLS_WITH_KEY[1]],
+        )
+        web3 = mock_chain_deps["web3_instance"]
+        web3.is_connected.side_effect = [False, True, True]
+
+        with caplog.at_level(logging.INFO, logger="swarm_provenance_uploader.chain.provider"):
+            assert provider.health_check() is True
+        assert "RPC fallback" in caplog.text
+        assert RPC_KEY not in caplog.text

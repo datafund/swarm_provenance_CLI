@@ -17,6 +17,8 @@ from __future__ import annotations
 import logging
 import threading
 
+from .redact import redact_urls
+
 logger = logging.getLogger(__name__)
 
 # Module-level singleton registry keyed by (chain, contract_address_lower)
@@ -112,7 +114,7 @@ class TransformationEventCache:
                         self._forward.setdefault(src_hex, []).append((new_hex, desc))
                         self._reverse.setdefault(new_hex, []).append((src_hex, desc))
             except Exception as e:
-                logger.debug("DataMerged event scan skipped: %s", e)
+                logger.debug("DataMerged event scan skipped: %s", redact_urls(str(e)))
 
             self._last_scanned_block = current_block
             logger.debug(

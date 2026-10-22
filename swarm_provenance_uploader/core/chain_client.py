@@ -14,6 +14,7 @@ import logging
 from typing import List, Optional
 
 from ..chain.contract import DataStatus
+from ..chain.redact import redact_url, redact_urls
 from ..chain.exceptions import (
     ChainError,
     ChainConfigurationError,
@@ -113,6 +114,22 @@ def _error_reason(error: Exception) -> str:
         return message
     # An exception with no arguments has an empty str(): name its class
     return str(error) or type(error).__name__
+
+
+def _rpc_rejection_message(error: Exception) -> Optional[str]:
+    """The node's message if error is a JSON-RPC error answer, else None.
+
+    A Web3RPCError means the node answered and refused the request (for
+    example "nonce too low"), so it is not a connection failure. Its
+    RequestTimedOut subclass is: the node did not answer in time. The
+    message is _error_reason's, so a Web3RPCError whose text is the repr of
+    the JSON-RPC error object gives only the node's message. Callers redact
+    it (#169).
+    """
+    if not _is_rpc_rejection(error):
+        return None
+    return _error_reason(error)
+
 
 class ChainClient:
     """High-level client for DataProvenance smart contract operations.
@@ -237,8 +254,9 @@ class ChainClient:
         nothing. Checked once per client, before the first signature.
 
         Raises:
-            ChainConfigurationError: If the address has no contract code, or
-                the code check fails for a reason other than the RPC.
+            ChainConfigurationError: If the address has no contract code, the
+                RPC rejected the check (a JSON-RPC error answer), or the check
+                fails for a reason other than the RPC.
             ChainConnectionError: If the RPC cannot be reached.
         """
         if self._contract_code_checked:
@@ -249,6 +267,12 @@ class ChainClient:
         try:
             code = self._provider.web3.eth.get_code(address)
         except Exception as e:
+            rejection = _rpc_rejection_message(e)
+            if rejection is not None:
+                # The node answered and refused: not a connection failure
+                raise ChainConfigurationError(
+                    f"The RPC rejected the contract code check: {rejection}"
+                ) from e
             if _is_rpc_failure(e):
                 # The RPC is at fault, not the contract address
                 raise ChainConnectionError(
@@ -762,7 +786,7 @@ class ChainClient:
             except TransformationAlreadyExistsError:
                 raise
             except Exception as e:
-                logger.warning("State-based duplicate check failed: %s", e)
+                logger.warning("State-based duplicate check failed: %s", redact_urls(str(e)))
         else:
             deploy_block = self._provider.deploy_block
             if deploy_block is not None:
@@ -787,7 +811,7 @@ class ChainClient:
                 except TransformationAlreadyExistsError:
                     raise
                 except Exception as e:
-                    logger.warning("Duplicate check failed, proceeding: %s", e)
+                    logger.warning("Duplicate check failed, proceeding: %s", redact_urls(str(e)))
 
         tx = self._build_tx(
             self._contract.build_record_transformation_tx,
@@ -1243,7 +1267,7 @@ class ChainClient:
         logger.debug(
             "Chain health check: chain=%s rpc=%s",
             self._provider.chain,
-            self._provider.rpc_url,
+            redact_url(self._provider.rpc_url),
         )
 
         result = self._provider.health_check()
@@ -1312,7 +1336,7 @@ class ChainClient:
             except Exception as e:
                 logger.warning(
                     "Full event scan failed, falling back to per-node queries: %s",
-                    e,
+                    redact_urls(str(e)),
                 )
 
         chain = []
@@ -1356,7 +1380,7 @@ class ChainClient:
                     logger.warning(
                         "State-based forward read failed for %s: %s",
                         current_hash,
-                        e,
+                        redact_urls(str(e)),
                     )
                 # Reverse: parents via state
                 try:
@@ -1369,7 +1393,7 @@ class ChainClient:
                     logger.warning(
                         "State-based reverse read failed for %s: %s",
                         current_hash,
-                        e,
+                        redact_urls(str(e)),
                     )
             elif use_local_index:
                 # V1 contract: use pre-built event cache index
@@ -1408,7 +1432,7 @@ class ChainClient:
                     if enriched:
                         record.transformations = enriched
                 except Exception as e:
-                    logger.warning("Event query failed for %s: %s", current_hash, e)
+                    logger.warning("Event query failed for %s: %s", current_hash, redact_urls(str(e)))
                     for t in record.transformations:
                         if t.new_data_hash and t.new_data_hash not in visited:
                             to_visit.append((t.new_data_hash, current_depth + 1))
@@ -1427,7 +1451,7 @@ class ChainClient:
                     logger.warning(
                         "Reverse event query failed for %s: %s",
                         current_hash,
-                        e,
+                        redact_urls(str(e)),
                     )
 
             chain.append(record)
