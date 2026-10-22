@@ -4975,6 +4975,78 @@ class TestPaymentPromptReviewCases:
         assert "Payment not made: Payment of $0.050000 declined by user" in result.output
         assert "Use --x402 to enable" not in result.output
 
+    def test_payment_required_hint_mentions_free_when_x402_off(self, mocker):
+        """#139: a 402 in default mode names both ways forward, --x402 and --free."""
+        _x402_config["enabled"] = False
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.side_effect = exceptions.PaymentRequiredError("Payment required")
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["upload", "--file", "d.txt"])
+        assert result.exit_code == 1
+        assert "--x402" in result.output
+        assert "--free for the free tier" in result.output
+
+    def test_allowance_402_shows_code_and_no_free_hint(self, requests_mock):
+        """#139: the pool's allowance 402 (x402 on, paid bypass honoured) keeps its code and
+        message; --free would not help, because the free tier draws on the same allowance."""
+        _x402_config["enabled"] = False
+        gw = "https://test.gateway.io"
+        message = ("The daily free allowance of 5 small stamps for this application has been used "
+                   "up. It resets at 2026-10-23T00:00:00Z. To continue now, pay with x402.")
+        detail = {"x402Version": 1, "error": message,
+                  "accepts": [{"scheme": "exact", "network": "base", "maxAmountRequired": "50000"}],
+                  "code": "DAILY_STAMP_ALLOWANCE_EXHAUSTED", "size": "small", "allowance": 5,
+                  "used": 5, "resets_at": "2026-10-23T00:00:00Z", "message": message}
+        requests_mock.get(f"{gw}/api/v1/pool/status", json={
+            "enabled": True, "reserve_config": {"17": 5}, "current_levels": {"17": 1},
+            "available_stamps": {"17": [DUMMY_STAMP]}, "total_stamps": 1,
+            "low_reserve_warning": False, "errors": []})
+        requests_mock.post(f"{gw}/api/v1/pool/acquire", status_code=402,
+                           json={**detail, "detail": detail})
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--gateway-url", gw, "upload", "--file", "d.txt", "--usePool"])
+        assert result.exit_code == 1
+        assert "DAILY_STAMP_ALLOWANCE_EXHAUSTED" in result.output
+        assert "The daily free allowance of 5 small stamps" in result.output
+        assert "--x402" in result.output
+        assert "2026-10-23T00:00:00Z" in result.output
+        assert "--free" not in result.output
+
+    def test_free_tier_402_shows_message_and_no_free_hint(self, requests_mock):
+        """#139: with --free, a 402 means the free tier is no way forward (here: disabled)."""
+        _x402_config["enabled"] = False
+        gw = "https://test.gateway.io"
+        detail = {"x402Version": 1, "error": "Free tier is not available. Payment required.",
+                  "accepts": [{"scheme": "exact", "network": "base", "maxAmountRequired": "50000"}]}
+        requests_mock.post(f"{gw}/api/v1/stamps/", status_code=402, json={
+            **detail, "code": "HTTP_402", "message": detail["error"], "detail": detail})
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--free", "--gateway-url", gw, "upload", "--file", "d.txt"])
+        assert result.exit_code == 1
+        assert "Free tier is not available. Payment required." in result.output
+        assert "--x402" in result.output
+        assert "--free" not in result.output
+
+    def test_gateway_error_code_reaches_the_user(self, mocker, requests_mock):
+        """#139: the gateway's code and message are printed, not a generic HTTP error."""
+        requests_mock.post("https://test.gateway.io/api/v1/stamps/", status_code=403, json={
+            "detail": {"code": "STAMP_OWNERSHIP_DENIED", "message": "Not your stamp."},
+            "code": "STAMP_OWNERSHIP_DENIED", "message": "Not your stamp."})
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--gateway-url", "https://test.gateway.io", "upload", "--file", "d.txt"])
+        assert result.exit_code == 1
+        assert "HTTP 403 STAMP_OWNERSHIP_DENIED: Not your stamp." in result.output
+        assert "Client Error" not in result.output
+
     def test_total_printed_when_command_fails_after_paying(self, mocker):
         from swarm_provenance_uploader.cli import _record_x402_payment
 

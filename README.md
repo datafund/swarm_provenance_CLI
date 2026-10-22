@@ -103,6 +103,19 @@ swarm-prov-upload --backend local upload --file data.txt
 swarm-prov-upload --backend local upload --file data.txt --bee-url http://localhost:1633
 ```
 
+### Gateway errors
+
+When the gateway refuses a request, the CLI prints the gateway's error code and message, and the wait time when the gateway sends a `Retry-After` header:
+
+```
+ERROR: Failed uploading data: Failed to upload data: HTTP 403 STAMP_OWNERSHIP_DENIED: <message>
+ERROR: Failed to list stamps: Failed to list stamps: HTTP 429 RATE_LIMIT_EXCEEDED: Too many requests. Try again in 42 seconds. Retry after 42 s.
+```
+
+The code tells you what went wrong (for example `EXTENSION_TOO_SMALL`, `DAILY_STAMP_ALLOWANCE_EXHAUSTED` or `FILE_TOO_LARGE`). Run the command with `--verbose` to also see the request URL. A response the gateway could not explain (for example an HTML error page from a proxy) is shown as the plain HTTP error.
+
+If a request needs payment and x402 is not enabled, the CLI says so: use `--x402` to pay, or `--free` for the free tier. When the gateway gives its own reason for the 402, the CLI prints its code and message. If the free daily pool allowance is used up (`DAILY_STAMP_ALLOWANCE_EXHAUSTED`), `--free` does not help, because the free tier draws on the same allowance: pay with `--x402`, or wait until the time the message gives.
+
 ### Environment variables
 
 ```bash
