@@ -12,19 +12,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **IMPORTANT**: Always create a feature branch before making changes. Never commit directly to `main`.
 
-### x402 feature development (active)
-
-**DO NOT MERGE `feature/x402-support` TO `main` UNTIL EXPLICITLY AGREED WITH USER.**
-
-The x402 implementation uses a branching strategy:
-- `feature/x402-support` - Main x402 feature branch (DO NOT MERGE TO MAIN)
-- `feature/x402-core-module` - Issue #37: Core payment module
-- `feature/x402-gateway-integration` - Issue #38: GatewayClient integration
-- `feature/x402-cli-commands` - Issue #39: CLI commands and config
-- `feature/x402-testing-docs` - Issue #40: Testing and documentation
-
-All sub-branches merge into `feature/x402-support`, which only merges to `main` after explicit approval.
-
 ### Branch naming
 - `fix/` - Bug fixes (for example, `fix/stamp-usability-check`)
 - `feature/` - New features (for example, `feature/add-stamp-purchase-command`)
@@ -191,7 +178,7 @@ swarm-prov-upload chain protect <orig> <new> --description "..."             # C
 swarm-prov-upload chain protect <orig> <new> --anchor-new                    # Protect with auto-anchor
 swarm-prov-upload chain merge <h1> <h2> [<h3>...] <new> --description "..."  # N-to-1 merge transformation
 swarm-prov-upload chain merge <h1> <h2> <new> --type "dataset"               # Merge with custom data type
-swarm-prov-upload chain set-storage-ref <data_hash> <storage_ref>            # Set/update storage reference for anchored hash
+swarm-prov-upload chain set-storage-ref <data_hash> <storage_ref>            # Set storage reference (set-once)
 swarm-prov-upload chain lookup <storage_ref>                                 # Look up data hash by storage reference
 
 # Collection/manifest upload (directory as Swarm manifest, gateway only)

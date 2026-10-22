@@ -108,13 +108,22 @@ Alternative faucets:
 
 ## Step 4: Configure the CLI
 
+### Private key
+
+The CLI reads the wallet key from the `PROVENANCE_WALLET_KEY` environment variable. Do not type the key into your shell, for example with `export PROVENANCE_WALLET_KEY=0x...`: it stays in your shell history. Instead, read it from your password manager's command-line tool (such as 1Password `op read`, `pass`, or macOS `security`) into the variable for one command:
+
+```bash
+PROVENANCE_WALLET_KEY="$(op read 'op://<vault>/<item>/<field>')" swarm-prov-upload chain balance
+```
+
+If you must keep the key in a `.env` file, make the file readable only by you (`chmod 600 .env`) and never commit it. Use a dedicated wallet that holds only what anchoring needs.
+
 ### Environment variables
 
 Add to your `.env` file:
 
 ```bash
-# Your wallet private key (KEEP SECRET!)
-PROVENANCE_WALLET_KEY=0x...your_private_key_here...
+# Wallet private key: not stored here, see "Private key" above
 
 # Chain: base-sepolia (testnet) or base (mainnet)
 CHAIN_NAME=base-sepolia
@@ -319,12 +328,10 @@ pip install -e .[blockchain]
 
 ### "No wallet private key configured"
 
-Set the `PROVENANCE_WALLET_KEY` environment variable:
+Set the `PROVENANCE_WALLET_KEY` environment variable for the command, as described in [Private key](#private-key):
 ```bash
-export PROVENANCE_WALLET_KEY=0x...
+PROVENANCE_WALLET_KEY="$(op read 'op://<vault>/<item>/<field>')" swarm-prov-upload chain balance
 ```
-
-Or add it to your `.env` file.
 
 ### "Cannot connect to chain"
 
@@ -366,7 +373,7 @@ export CHAIN_CONTRACT=0x...your_contract_address...
 1. **Never commit private keys** to version control
 2. **Use a dedicated wallet** for anchoring, not your main wallet
 3. **Start with testnet** before using real funds
-4. **Use environment files** (`.env`) instead of command line arguments for secrets
+4. **Keep the key out of your shell history and plaintext files**: read it from a password manager for each command; if you use a `.env` file, `chmod 600` it and never commit it
 5. **Monitor gas costs** — anchor transactions are cheap but add up at scale
 6. **Use batch operations** (`batch_anchor`, `batch_access` via Python API) for efficiency
 
@@ -380,8 +387,8 @@ export CHAIN_CONTRACT=0x...your_contract_address...
 | RPC URL | https://sepolia.base.org |
 | Fallback RPCs | base-sepolia-rpc.publicnode.com, base-sepolia.drpc.org |
 | Block Explorer | https://base-sepolia.blockscout.com |
-| DataProvenance Contract | `0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a` |
-| Deploy Block | 39,075,766 |
+| DataProvenance Contract | `0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322` |
+| Deploy Block | 39,898,628 |
 
 ### Base (mainnet)
 

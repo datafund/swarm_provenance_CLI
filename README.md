@@ -158,7 +158,8 @@ x402 enables pay-per-request payments using USDC on Base chain. When the gateway
 pip install -e .[x402]
 
 # Configure wallet (testnet)
-export X402_PRIVATE_KEY=0x...  # Your wallet private key
+# X402_PRIVATE_KEY: read it from your password manager for each command,
+# never export it in your shell (see docs/x402-setup.md#private-key)
 export X402_ENABLED=true
 export X402_NETWORK=base-sepolia     # Testnet (default)
 
@@ -230,7 +231,8 @@ On-chain provenance anchoring registers Swarm hashes on the DataProvenance smart
 pip install -e .[blockchain]
 
 # Configure wallet
-export PROVENANCE_WALLET_KEY=0x...  # Your wallet private key
+# PROVENANCE_WALLET_KEY: read it from your password manager for each command,
+# never export it in your shell (see docs/chain-setup.md#private-key)
 export CHAIN_NAME=base-sepolia      # Testnet (default)
 
 # Check wallet balance
@@ -295,7 +297,7 @@ swarm-prov-upload chain delegate <address> --revoke
 swarm-prov-upload chain protect <original_hash> <new_hash> --description "Removed PII"
 swarm-prov-upload chain protect <orig> <new> --anchor-new --description "Redacted"  # anchor new hash first
 
-# Set or update storage reference for an anchored hash
+# Set the storage reference for an anchored hash (set-once: it cannot be changed later)
 swarm-prov-upload chain set-storage-ref <data_hash> <storage_ref>
 
 # Look up data hash by storage reference
@@ -358,7 +360,7 @@ print(f"TX: {result.explorer_url}")
 - `set_status(swarm_hash, status)` - Change data status (ACTIVE/RESTRICTED/DELETED)
 - `transfer_ownership(swarm_hash, new_owner)` - Transfer data ownership
 - `set_delegate(delegate, authorized)` - Authorize/revoke a delegate
-- `set_storage_ref(swarm_hash, storage_ref)` - Set/update storage reference for anchored hash
+- `set_storage_ref(swarm_hash, storage_ref)` - Set the storage reference for an anchored hash (set-once)
 
 **Read operations** (no gas required):
 - `get(swarm_hash)` - Get full provenance record
@@ -470,7 +472,7 @@ swarm-prov-upload upload-collection /path/to/directory --stamp-id <id> --deferre
 ```
 Processing directory: my_dataset/ (3 files)...
 Purchasing postage stamp...
-Postage stamp purchased (ID: ...a3a3a3a3a3a3)
+Postage stamp purchased (ID: a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3)
 Uploading collection to Swarm...
 
 SUCCESS! Collection uploaded.
@@ -537,6 +539,8 @@ You can also use any Swarm gateway or a local Bee node to access the files.
 | `--usePool` | Acquire stamp from pool instead of purchasing (gateway only, faster) |
 | `--sign` | Sign document with notary service (value: `notary`, gateway only) |
 | `--amount` | Legacy: PLUR amount (local backend) |
+
+**How long data stays on Swarm:** an upload stays available only while its postage stamp is valid. Without `--duration`, the gateway buys a 25-hour stamp, so the data can expire about a day after the upload. The gateway buys its pool stamps (`--usePool`) for 169 hours, counted from when the pool bought them. To keep data longer, pass `--duration <hours>` or add funds with `stamps extend`.
 
 ### Stamp management (gateway only)
 
@@ -797,10 +801,10 @@ The [`examples/`](examples/) directory contains real-world usage demos with shel
 | # | Example | Description |
 |---|---------|-------------|
 | [01](examples/01-basic-upload-download/) | **Basic Upload/Download** | Upload a file, download it back, verify integrity |
-| [02](examples/02-audit-trail/) | **Audit Trail** | Immutable compliance records with `--std "AUDIT-LOG-V1"` |
+| [02](examples/02-audit-trail/) | **Audit Trail** | Tamper-evident compliance records with `--std "AUDIT-LOG-V1"` |
 | [03](examples/03-scientific-data/) | **Scientific Data** | Research archival with `--std "PROV-O"` and `--duration 720` |
 | [04](examples/04-batch-processing/) | **Batch Processing** | Stamp reuse across multiple uploads with `--stamp-id` |
-| [05](examples/05-encrypted-data/) | **Encrypted Data** | Pre-encrypt, upload with `--enc "AES-256-GCM"`, decrypt |
+| [05](examples/05-encrypted-data/) | **Encrypted Data** | Pre-encrypt, upload with `--enc "AES-256-CBC-PBKDF2"`, decrypt |
 | [06](examples/06-market-memory/) | **Market Memory** | Canonical hashing, prediction-to-outcome linking |
 | [07](examples/07-stamp-management/) | **Stamp Management** | Full stamp lifecycle: list, info, check, extend, pool-status |
 | [08](examples/08-ci-cd-integration/) | **CI/CD Integration** | Archive build artifacts with GitHub Actions / GitLab CI |
@@ -977,7 +981,7 @@ See [examples/README.md](examples/README.md) for the full guide with walkthrough
 │  │                                 │  │                                     │  │
 │  │ provenance-gateway.datafund.io  │  │ • Decentralized storage             │  │
 │  │ API Endpoints:                  │  │ • Content-addressable               │  │
-│  │ • /api/v1/stamps/ - CRUD        │  │ • Redundant & persistent            │  │
+│  │ • /api/v1/stamps/ - CRUD        │  │ • Kept while stamp valid            │  │
 │  │ • /api/v1/data/ - Upload/DL     │  │ • Cryptographic integrity           │  │
 │  │ • /api/v1/wallet - Balance      │  │ • Economic incentives               │  │
 │  │ • /api/v1/chequebook            │  │ • Censorship resistant              │  │
@@ -996,14 +1000,14 @@ See [examples/README.md](examples/README.md) for the full guide with walkthrough
 │  🔒 SECURITY & INTEGRITY           📦 DATA PROCESSING                          │
 │  • SHA256 content verification    • Base64 encoding/decoding                  │
 │  • Cryptographic hashing          • JSON metadata wrapping                    │
-│  • Immutable storage              • Pydantic data validation                  │
+│  • Content-addressed data         • Pydantic data validation                  │
 │  • Tamper detection               • Type-safe operations                      │
 │                                                                                 │
 │  🌐 DECENTRALIZED STORAGE          ⚙️  OPERATIONAL                             │
 │  • Swarm network integration      • Verbose/concise modes                     │
 │  • Content-addressable            • Comprehensive error handling              │
 │  • Censorship resistant           • Retry logic with backoff                  │
-│  • Persistent & redundant         • Environment configuration                 │
+│  • Kept while stamp valid         • Environment configuration                 │
 │  • Collection/manifest upload     • JSON output for automation                │
 │                                                                                 │
 │  🏷️  PROVENANCE METADATA           🧪 TESTING & RELIABILITY                   │
