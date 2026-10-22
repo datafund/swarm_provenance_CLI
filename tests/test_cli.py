@@ -6688,3 +6688,78 @@ class TestShortTokenEcho:
         assert isinstance(result.exception, SystemExit), result.exception
         assert "invalid api key: …" in result.output
         assert SHORT_TOKEN not in result.output
+
+
+# =============================================================================
+# GATEWAY NULL FIELDS AND CAIP-2 NETWORK NAMES (#143)
+# =============================================================================
+
+class TestGatewayNullFieldsDisplay:
+    """Fields the gateway sends as null are shown as 'unknown', not 'None' (#143)."""
+
+    @staticmethod
+    def _stamp():
+        return StampDetails(batchID=DUMMY_STAMP, usable=None, depth=20, amount="1",
+                            bucketDepth=16, immutableFlag=None, batchTTL=3600, utilization=None)
+
+    def test_stamps_list_shows_unknown(self, mocker):
+        mock_client = mocker.MagicMock()
+        mock_client.list_stamps.return_value = StampListResponse(stamps=[self._stamp()], total_count=1)
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+
+        result = runner.invoke(app, ["stamps", "list"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "None" not in result.stdout
+        assert "unknown" in result.stdout.lower()
+
+    def test_stamps_info_shows_unknown(self, mocker):
+        mock_client = mocker.MagicMock()
+        mock_client.get_stamp.return_value = self._stamp()
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+
+        result = runner.invoke(app, ["stamps", "info", DUMMY_STAMP])
+
+        assert result.exit_code == 0, result.stdout
+        assert "None" not in result.stdout
+        assert re.search(r"Usable:\s+Unknown", result.stdout)
+        assert re.search(r"Utilization:\s+unknown", result.stdout)
+
+    def test_wallet_shows_unknown_balance(self, mocker):
+        mock_client = mocker.MagicMock()
+        mock_client.get_wallet.return_value = WalletResponse(walletAddress="0x" + "1" * 40, bzzBalance=None)
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+
+        result = runner.invoke(app, ["wallet"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "BZZ Balance: unknown" in result.stdout
+
+    def test_chequebook_shows_unknown_balances(self, mocker):
+        mock_client = mocker.MagicMock()
+        mock_client.get_chequebook.return_value = ChequebookResponse(
+            chequebookAddress="0x" + "2" * 40, availableBalance=None, totalBalance=None)
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+
+        result = runner.invoke(app, ["chequebook"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "None" not in result.stdout
+        assert re.search(r"Available Balance:\s+unknown", result.stdout)
+        assert re.search(r"Total Balance:\s+unknown", result.stdout)
+
+
+class TestX402NetworkCaip2:
+    def test_caip2_network_flag_is_accepted(self):
+        saved = _x402_config["network"]
+        try:
+            result = runner.invoke(app, ["--x402-network", "eip155:8453", "x402", "status"])
+            assert result.exit_code == 0, result.stdout
+            assert _x402_config["network"] == "base"
+        finally:
+            _x402_config["network"] = saved
+
+    def test_unknown_caip2_network_is_rejected(self):
+        result = runner.invoke(app, ["--x402-network", "eip155:1", "x402", "status"])
+        assert result.exit_code == 1
+        assert "Invalid x402 network" in result.stdout
