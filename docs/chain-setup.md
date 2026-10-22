@@ -361,9 +361,14 @@ Your RPC URL doesn't match the selected chain. Ensure `CHAIN_NAME` and `CHAIN_RP
 - `base-sepolia` expects chain ID 84532
 - `base` expects chain ID 8453
 
-With `base` or `base-sepolia`, a custom RPC that reports another chain ID is a configuration error. Every command fails before it reads or signs anything. The chain ID is also checked once before the first transaction is signed, so an RPC that was down when the command started and comes up on another chain gets nothing signed. This stops a testnet configuration from signing mainnet transactions. A fallback RPC that reports another chain ID is skipped.
+With `base` or `base-sepolia`, a custom RPC that reports another chain ID is a configuration error. This stops a testnet configuration from signing mainnet transactions. The check runs when the client starts: if the RPC answers then on another chain, the command fails before it reads or signs anything. The chain ID is checked again once before the first transaction is signed. If the RPC could not be reached when the command started, signing is still blocked until the chain ID matches, but reads may be served once the RPC comes up. A fallback RPC that reports another chain ID is skipped.
 
-For a local development node (Hardhat, Anvil), use `--chain localhost` (or `CHAIN_NAME=localhost`). The `localhost` preset uses the chain ID that the node reports.
+For a local development node (Hardhat, Anvil), set `CHAIN_NAME=localhost` and `CHAIN_RPC_URL` to the node's URL. The `localhost` preset uses the chain ID that the node reports. The global `--chain` option accepts only `base-sepolia` and `base`, so use the environment variable:
+
+```bash
+export CHAIN_NAME=localhost
+export CHAIN_RPC_URL=http://127.0.0.1:8545
+```
 
 ### "No contract address configured"
 
@@ -412,7 +417,7 @@ export CHAIN_CONTRACT=0x...your_contract_address...
 | RPC URL | http://127.0.0.1:8545 |
 | DataProvenance Contract | `0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9` |
 
-Use `--chain localhost` for local Hardhat development.
+Set `CHAIN_NAME=localhost` (and `CHAIN_RPC_URL`, if the node is not at `http://127.0.0.1:8545`) for local Hardhat development. The `--chain` option does not accept `localhost`.
 
 ## Additional resources
 

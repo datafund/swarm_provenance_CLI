@@ -200,8 +200,9 @@ class ChainProvider:
                 f"Chain ID mismatch: chain '{self.chain}' has chain ID "
                 f"{self.chain_id}, but the RPC endpoint "
                 f"{redact_url(self.rpc_url)} reports chain ID {detected}. "
-                "Use an RPC for that network, or --chain localhost "
-                "for a local development node.",
+                "Use an RPC for that network. For a local development "
+                "node, set CHAIN_NAME=localhost and CHAIN_RPC_URL to the "
+                "node's URL.",
                 chain=self.chain,
                 expected_chain_id=self.chain_id,
                 actual_chain_id=detected,

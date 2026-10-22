@@ -127,7 +127,7 @@ def _get_chain_client(verbose: bool = False):
     except exceptions.ChainConfigurationError as e:
         typer.secho(f"ERROR: Chain configuration invalid: {e}", fg=typer.colors.RED, err=True)
         if not isinstance(e, exceptions.ChainIdMismatchError):
-            # The mismatch message carries its own advice (--chain localhost)
+            # The mismatch message carries its own advice (CHAIN_NAME=localhost)
             typer.echo("Check PROVENANCE_WALLET_KEY environment variable and chain settings.", err=True)
         raise typer.Exit(code=1)
 

@@ -2357,27 +2357,66 @@ class TestChainGetCommand:
         assert "filtered PII" in result.stdout
 
 
+def _fake_rpc_node(mocker, chain_id):
+    """Replace web3 with a node that reports chain_id; returns the node mock."""
+    pytest.importorskip("eth_account")
+    node = mocker.MagicMock()
+    node.eth.chain_id = chain_id
+    node.to_checksum_address = lambda address: address
+    web3_class = mocker.MagicMock(return_value=node)
+    mocker.patch("swarm_provenance_uploader.chain.provider._import_web3", return_value=web3_class)
+    mocker.patch.dict("os.environ", {"PROVENANCE_WALLET_KEY": "0x" + "a" * 64})
+    return node
+
+
 class TestChainIdMismatchHint:
     """A chain ID mismatch prints its own advice, not the wallet-key hint (#142 review)."""
 
     def test_mismatch_does_not_point_to_the_wallet_key(self, mocker):
         from typer.testing import CliRunner as _Runner
-        from swarm_provenance_uploader.chain.exceptions import ChainIdMismatchError
 
-        error = ChainIdMismatchError(
-            "Chain ID mismatch: chain 'base-sepolia' has chain ID 84532, but the RPC endpoint "
-            "https://mainnet.base.org reports chain ID 8453. Use an RPC for that network, "
-            "or --chain localhost for a local development node.",
-            chain="base-sepolia", expected_chain_id=84532, actual_chain_id=8453,
-        )
-        mocker.patch("swarm_provenance_uploader.core.chain_client.ChainClient", side_effect=error)
+        _fake_rpc_node(mocker, 8453)  # a mainnet node behind a base-sepolia config
+        mocker.patch.dict(_chain_config, {"chain": "base-sepolia", "rpc_url": "https://rpc.example.org"})
 
         result = _Runner(mix_stderr=False).invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
 
         assert result.exit_code == 1
         assert "Chain ID mismatch" in result.stderr
-        assert "--chain localhost" in result.stderr
+        assert "84532" in result.stderr and "8453" in result.stderr
+        assert "CHAIN_NAME=localhost" in result.stderr
+        assert "CHAIN_RPC_URL" in result.stderr
+        assert "--chain localhost" not in result.stderr
         assert "PROVENANCE_WALLET_KEY" not in result.stderr
+
+    def test_advised_setting_works(self, mocker, monkeypatch):
+        """The advice works: CHAIN_NAME=localhost with CHAIN_RPC_URL to a node on 31337 creates a client."""
+        import importlib
+        from swarm_provenance_uploader import config, cli
+
+        _fake_rpc_node(mocker, 31337)
+        monkeypatch.setenv("CHAIN_NAME", "localhost")
+        monkeypatch.setenv("CHAIN_RPC_URL", "http://127.0.0.1:8545")
+        try:
+            importlib.reload(config)
+            mocker.patch.dict(_chain_config, {"chain": config.CHAIN_NAME, "rpc_url": config.CHAIN_RPC_URL})
+        finally:
+            monkeypatch.undo()
+            importlib.reload(config)
+
+        client = cli._get_chain_client()
+        assert client.chain == "localhost"
+        assert client._provider.chain_id == 31337
+
+        mocker.patch.object(type(client), "get", return_value=_verify_record())
+        result = runner.invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
+        assert result.exit_code == 0, result.output
+        assert "Chain ID mismatch" not in result.output
+
+    def test_chain_option_rejects_localhost(self):
+        """Why the advice names CHAIN_NAME: the global --chain option accepts only the public networks."""
+        result = runner.invoke(app, ["--chain", "localhost", "chain", "verify", DUMMY_SWARM_REF])
+        assert result.exit_code == 1
+        assert "Invalid chain 'localhost'" in result.output
 
     def test_other_configuration_errors_keep_the_hint(self, mocker):
         from typer.testing import CliRunner as _Runner

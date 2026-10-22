@@ -2253,7 +2253,8 @@ class TestChainIdPresetMismatch:
         assert str(preset_id) in message
         assert str(node_id) in message
         assert chain in message
-        assert "--chain localhost" in message
+        assert "CHAIN_NAME=localhost" in message
+        assert "--chain localhost" not in message
 
     def test_custom_rpc_on_the_preset_chain_is_accepted(self, mock_chain_deps):
         from swarm_provenance_uploader.chain.provider import ChainProvider
