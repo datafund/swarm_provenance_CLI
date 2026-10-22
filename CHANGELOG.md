@@ -6,12 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - `--help` shows the defaults of the global options: `--gateway-url` (the production gateway, `https://provenance-gateway.datafund.io`, unless `PROVENANCE_GATEWAY_URL` is set), `--max-pay`, `--x402-network`, `--chain` and `--idempotency-key`. The help text had them in `[default: ...]`, which the help renderer removed as markup (#144)
-- `x402 info` no longer suggests `export X402_PRIVATE_KEY=0x...`, which leaves the key in the shell history. It shows how to read the key from a password manager for one command, or to keep a `.env` file with mode 600 (#144)
+- `x402 info`, and the hints of `x402 status` and `x402 balance` when no key is set, no longer suggest `export X402_PRIVATE_KEY=0x...`, which leaves the key in the shell history. They show how to read the key from a password manager for one command, or to keep a `.env` file with mode 600 (#144)
 
 ### Documentation
 - `docs/chain-setup.md` gives the Base Sepolia DataProvenance contract the CLI uses, `0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322`, created at block 39,898,628. It showed the old v2 contract (#144)
-- README and examples 02 and 08 say that data stays on Swarm only while its stamp is valid (25 hours by default) instead of calling the storage persistent or permanent (#144)
-- The setup guides no longer recommend `export KEY=0x...` or a plaintext key in `.env` (#144)
+- README and examples 01, 02, 08 and 09 say that data stays on Swarm only while its stamp is valid (25 hours by default) instead of calling the storage persistent or permanent (#144)
+- The setup guides and `.env.example` no longer recommend `export KEY=0x...` or a plaintext key in `.env` (#144)
 - Example 05 tags its uploads with the cipher it uses: `AES-256-CBC-PBKDF2` in `demo.sh` and `XOR-DEMO` in `run_demo.py`. Both said `AES-256-GCM` (#144)
 - `chain set-storage-ref` is described as set-once, as the contract enforces; the README said "set or update" (#144)
 

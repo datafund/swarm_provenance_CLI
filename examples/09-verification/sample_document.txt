@@ -28,7 +28,8 @@ SECURITY MEASURES:
   - Role-based access control
   - Annual penetration testing
 
-This document is stored on Swarm for immutable record-keeping.
+This document is stored on Swarm, content-addressed, for as long
+as its postage stamp is valid.
 Any modification will result in a different content hash, proving
 the document has been tampered with.
 

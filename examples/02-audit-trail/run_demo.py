@@ -2,7 +2,8 @@
 """
 Audit Trail Demo - Python Version
 
-Demonstrates immutable compliance audit records on Swarm:
+Demonstrates tamper-evident compliance audit records on Swarm
+(kept while their postage stamp is valid):
 1. Upload multiple audit records with --std "AUDIT-LOG-V1"
 2. Download and verify one record
 3. Prove data integrity via SHA-256
