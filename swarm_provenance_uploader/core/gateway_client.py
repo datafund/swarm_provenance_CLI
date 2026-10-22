@@ -660,6 +660,11 @@ class GatewayClient:
             if isinstance(candidate, str) and candidate.strip():
                 message = candidate
                 break
+        # The free-tier 429 puts a generic message at the top level and the
+        # specific reason in detail.detail: show both.
+        reason = inner.get("detail")
+        if isinstance(reason, str) and reason.strip() and message and reason.strip() != message.strip():
+            message = f"{message.rstrip()} ({reason.strip()})"
 
         if isinstance(detail, list) and detail:
             fields = []
@@ -678,6 +683,9 @@ class GatewayClient:
         return (_sanitize_gateway_text(code, limit=64),
                 _sanitize_gateway_text(message, limit=300))
 
+    # Not to be confused with _retry_after below: this one is the raw value,
+    # shown to the user in an error message (None when the header is missing);
+    # _retry_after is clamped to 5..30 s and paces the idempotency retries.
     @staticmethod
     def _retry_after_header(response: requests.Response) -> Optional[int]:
         """Retry-After in seconds, as the gateway sent it, or None."""
@@ -925,7 +933,9 @@ class GatewayClient:
 
         body = self._error_body(response)
         code = str(body.get("code") or "") or None
-        gateway_message = body.get("message")
+        # Gateway-authored text, cleaned before it is shown (#139; wider in #151)
+        gateway_message = _sanitize_gateway_text(body.get("message"), limit=300)
+        shown_code = _sanitize_gateway_text(code, limit=64)
 
         if code and code.startswith("IDEMPOTENCY"):
             self._raise_for_idempotency_answer(response, code, body, payment, outstanding)
@@ -938,9 +948,11 @@ class GatewayClient:
                 status_code=status_code, code=code, **payment,
             )
         if status_code == 402:
-            reason = gateway_message or body.get("error") or "no reason given"
+            reason = (gateway_message or _sanitize_gateway_text(body.get("error"), limit=300)
+                      or "no reason given")
             raise PaymentRejectedError(
-                f"The gateway did not accept the payment: {reason}",
+                "The gateway did not accept the payment"
+                + (f" ({shown_code})" if shown_code else "") + f": {reason}",
                 reason=reason,
             )
         if status_code >= 500 and not self._says_not_charged(body):

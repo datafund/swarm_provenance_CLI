@@ -2366,12 +2366,20 @@ class TestGatewayErrorMessages:
         assert exc.value.__cause__.retry_after == 42
 
     def test_placeholder_code_not_repeated(self, requests_mock):
-        """The free-tier 429 has no code of its own: the gateway sends HTTP_429."""
+        """The free-tier 429 has no code of its own: the gateway sends HTTP_429.
+
+        Body as app/x402/dependency.py sends it: the generic message at the top
+        level, the specific reason in detail.detail.
+        """
+        generic = "Free tier rate limit exceeded. Use x402 payment for higher limits."
         requests_mock.get(f"{GW}/api/v1/wallet", status_code=429, headers={"Retry-After": "60"}, json={
             "detail": {"error": "Rate limit exceeded",
-                       "message": "Free tier rate limit exceeded. Use x402 payment for higher limits."},
+                       "detail": "3 requests per 60 s allowed on the free tier",
+                       "message": generic,
+                       "payment_info": {"price_usd": "0.05", "network": "base-sepolia",
+                                        "pay_to": "0x" + "1" * 40}},
             "code": "HTTP_429",
-            "message": "Free tier rate limit exceeded. Use x402 payment for higher limits.",
+            "message": generic,
         })
         client = GatewayClient(base_url=GW)
 
@@ -2380,8 +2388,34 @@ class TestGatewayErrorMessages:
 
         text = str(exc.value)
         assert "HTTP 429: Free tier rate limit exceeded." in text
+        assert "3 requests per 60 s allowed on the free tier" in text
         assert "HTTP_429" not in text
         assert "Retry after 60 s." in text
+
+    def test_inner_reason_not_repeated_when_same_as_message(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/wallet", status_code=400, json={
+            "detail": {"code": "X", "message": "Same text.", "detail": "Same text."},
+            "code": "X", "message": "Same text."})
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError) as exc:
+            client.get_wallet()
+
+        assert str(exc.value).count("Same text.") == 1
+
+    def test_inner_reason_is_sanitized_and_bounded(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/wallet", status_code=429, json={
+            "detail": {"message": "Generic.", "detail": "reason\x1b[2J\u202e" + "r" * 5000},
+            "code": "HTTP_429", "message": "Generic."})
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError) as exc:
+            client.get_wallet()
+
+        text = str(exc.value)
+        assert "reason" in text
+        assert "\x1b" not in text and "\u202e" not in text
+        assert len(text) < 600
 
     def test_older_gateway_code_under_detail(self, requests_mock):
         requests_mock.get(f"{GW}/api/v1/chequebook", status_code=503, json={
@@ -2497,3 +2531,70 @@ class TestGatewayErrorMessages:
             client.get_wallet(verbose=True)
 
         assert f"{GW}/api/v1/wallet" in capsys.readouterr().out
+
+
+class TestPaidFailureMessages:
+    """Paid-path failures show the gateway code; gateway text is sanitised (#139, part of #151)."""
+
+    def test_settlement_failed_shows_code(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRejectedError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 402,
+            "json": {"code": "PAYMENT_SETTLEMENT_FAILED",
+                     "message": "The payment could not be settled (insufficient_funds).",
+                     "x402_status": "settlement_failed"},
+        }])
+        with pytest.raises(PaymentRejectedError) as exc:
+            paying_client.purchase_stamp()
+
+        assert str(exc.value) == ("The gateway did not accept the payment (PAYMENT_SETTLEMENT_FAILED): "
+                                  "The payment could not be settled (insufficient_funds).")
+
+    def test_rejected_without_code_keeps_old_text(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRejectedError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 402, "json": {"error": "authorization expired"}}])
+        with pytest.raises(PaymentRejectedError) as exc:
+            paying_client.purchase_stamp()
+
+        assert str(exc.value) == "The gateway did not accept the payment: authorization expired"
+
+    def test_rejected_text_is_sanitized(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRejectedError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 402,
+            "json": {"code": "BAD\x1b[2J", "message": "evil\x1b[31m text\u202e here"}}])
+        with pytest.raises(PaymentRejectedError) as exc:
+            paying_client.purchase_stamp()
+
+        text = str(exc.value)
+        assert "\x1b" not in text and "\u202e" not in text
+        assert "evil" in text and "BAD" in text
+
+    def test_outcome_unknown_suffix_is_sanitized(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 502, "json": {"code": "X", "message": "boom\x1b[2J\u202e"}}])
+        with pytest.raises(PaymentOutcomeUnknownError) as exc:
+            paying_client.purchase_stamp()
+
+        text = str(exc.value)
+        assert "Gateway: boom" in text
+        assert "\x1b" not in text and "\u202e" not in text
+
+    def test_settled_not_delivered_suffix_is_sanitized(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        requests_mock.post(f"{GW}/api/v1/data/", [PAYMENT_REQUIRED, {
+            "status_code": 500,
+            "json": {"code": "DELIVERY_FAILED_AFTER_PAYMENT", "message": "lost\x1b[2J\u202e"}}])
+        with pytest.raises(PaymentSettledNotDeliveredError) as exc:
+            paying_client.upload_data(b"x", DUMMY_STAMP)
+
+        text = str(exc.value)
+        assert "Gateway: lost" in text
+        assert "\x1b" not in text and "\u202e" not in text
