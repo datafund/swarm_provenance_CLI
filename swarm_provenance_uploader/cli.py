@@ -1864,8 +1864,10 @@ def x402_status(
     typer.echo("")
 
     if not has_pk:
-        typer.echo("To enable x402 payments, set your private key:")
-        typer.echo(f"  export {pk_env_name}=0x...")
+        typer.echo("To enable x402 payments, set your private key for one command,")
+        typer.echo("reading it from your password manager (not typed into the shell):")
+        typer.echo(f"  {pk_env_name}=\"$(op read 'op://<vault>/<item>/<field>')\" swarm-prov-upload x402 status")
+        typer.echo("Or keep it in a .env file with mode 600 (chmod 600 .env), never committed.")
         typer.echo("")
 
 
@@ -1884,7 +1886,9 @@ def x402_balance(
 
     if not has_pk:
         typer.secho(f"ERROR: No private key configured.", fg=typer.colors.RED, err=True)
-        typer.echo(f"Set your private key: export {pk_env_name}=0x...")
+        typer.echo("Set your private key for one command, reading it from your password manager:")
+        typer.echo(f"  {pk_env_name}=\"$(op read 'op://<vault>/<item>/<field>')\" swarm-prov-upload x402 balance")
+        typer.echo("Or keep it in a .env file with mode 600 (chmod 600 .env), never committed.")
         raise typer.Exit(code=1)
 
     network = _x402_config["network"]

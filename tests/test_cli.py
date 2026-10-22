@@ -754,14 +754,34 @@ class TestX402InfoCommand:
         assert "chmod 600 .env" in result.stdout
 
 
+class TestX402KeyHints:
+    """x402 status/balance never suggest `export KEY=0x...` (#144)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_key(self, monkeypatch):
+        for name in ("X402_PRIVATE_KEY", "SWARM_X402_PRIVATE_KEY"):  # gitleaks:allow (variable names, not keys)
+            monkeypatch.delenv(name, raising=False)
+
+    @pytest.mark.parametrize("command", ["status", "balance"])
+    def test_hint_does_not_export_a_key(self, command):
+        result = runner.invoke(app, ["x402", command])
+        output = result.output
+        assert "op read" in output
+        assert "chmod 600 .env" in output
+        assert not re.search(r"export \S+=0x", output)
+
+
 class TestRootHelpDefaults:
     """--help shows the defaults of the global options (#144)."""
 
     def _help(self):
         result = runner.invoke(app, ["--help"], terminal_width=250, env={"COLUMNS": "250"})
         assert result.exit_code == 0
-        # Rich may wrap or pad; compare on collapsed whitespace without box characters
-        return " ".join(re.sub(r"[│╭╮╰╯─]", " ", result.output).split())
+        # Under GITHUB_ACTIONS (or FORCE_COLOR) Rich forces a terminal and adds
+        # ANSI codes; strip them, then compare on collapsed whitespace without
+        # box characters
+        text = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        return " ".join(re.sub(r"[│╭╮╰╯─]", " ", text).split())
 
     def test_help_shows_default_gateway_url(self):
         from swarm_provenance_uploader import config
