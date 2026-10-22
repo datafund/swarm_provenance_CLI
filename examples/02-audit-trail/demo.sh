@@ -103,4 +103,4 @@ echo "Swarm References:"
 for i in "${!RECORDS[@]}"; do
     echo "  ${RECORDS[$i]}: ${REFS[$i]}"
 done
-echo "These immutable records can be retrieved from any Swarm gateway."
+echo "These records can be retrieved from any Swarm gateway while their stamp is valid."

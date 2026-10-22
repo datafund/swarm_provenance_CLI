@@ -156,7 +156,7 @@ def main():
     print("Swarm References:")
     for name, ref in refs.items():
         print(f"  {name}: {ref}")
-    print("These immutable records can be retrieved from any Swarm gateway.")
+    print("These records can be retrieved from any Swarm gateway while their stamp is valid.")
 
 
 if __name__ == "__main__":

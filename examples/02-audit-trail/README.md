@@ -1,22 +1,24 @@
 # Example 02: Audit trail
 
-Demonstrates using Swarm as an immutable audit log for compliance records.
+Demonstrates using Swarm as a tamper-evident audit log for compliance records.
 
 ## What this demonstrates
 
 - Uploading multiple audit records with a provenance standard (`--std "AUDIT-LOG-V1"`)
-- Immutable storage of compliance-critical events
+- Content-addressed storage of compliance-critical events
 - Downloading and verifying record integrity via SHA-256
 
 ## Use case
 
-Organizations subject to SOX, GDPR, or ISO 27001 need tamper-proof audit trails. By uploading audit events to Swarm with a provenance standard tag, each record gets:
+Audit trails must show that a record was not changed after it was written. By uploading audit events to Swarm with a provenance standard tag, each record gets:
 
 - An immutable content-addressed reference (Swarm hash)
 - A SHA-256 integrity fingerprint
 - A metadata envelope recording the provenance standard
 
 No one — not even the data owner — can alter a record after upload without changing its hash.
+
+**Retention:** a record stays on Swarm only while its postage stamp is valid. Without `--duration`, the gateway buys a 25-hour stamp, so the record can expire about a day after upload. For records you must keep, buy a longer stamp with `--duration <hours>` or extend it with `stamps extend`, and keep your own copy. Swarm storage alone does not make an audit trail compliant with a regulation.
 
 ## Prerequisites
 

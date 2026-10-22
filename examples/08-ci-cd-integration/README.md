@@ -11,14 +11,16 @@ Demonstrates archiving build artifacts to Swarm from CI/CD pipelines.
 
 ## Use case
 
-CI/CD pipelines produce build artifacts that need immutable archival for:
+CI/CD pipelines produce build artifacts that need tamper-evident archival for:
 
 - **Compliance**: Prove exactly what was built and deployed
 - **Reproducibility**: Retrieve any historical build artifact by its Swarm reference
 - **Audit trails**: Track which artifacts were deployed to production
 - **Supply chain security**: Verify artifact integrity before deployment
 
-By archiving artifacts to Swarm with a provenance standard, each build gets a permanent, content-addressed record.
+By archiving artifacts to Swarm with a provenance standard, each build gets a content-addressed record.
+
+**Retention:** an artifact stays on Swarm only while its postage stamp is valid. Without `--duration`, the gateway buys a 25-hour stamp, so the artifact can expire about a day after upload. For artifacts you must keep, buy a longer stamp with `--duration <hours>` or extend it with `stamps extend`, and keep your own copy.
 
 ## Prerequisites
 

@@ -5,7 +5,7 @@ Demonstrates pre-encryption workflow for sensitive data on Swarm.
 ## What this demonstrates
 
 - Encrypting data locally before upload
-- Using `--enc "AES-256-GCM"` to tag the metadata envelope with encryption info
+- Using `--enc` to tag the metadata envelope with the cipher actually used: `"AES-256-CBC-PBKDF2"` in `demo.sh` (openssl AES-256-CBC with a PBKDF2-derived key), `"XOR-DEMO"` in `run_demo.py`
 - Downloading and verifying the encrypted payload is intact
 - Decrypting and verifying the content matches the original
 
@@ -34,7 +34,7 @@ chmod +x demo.sh
 ./demo.sh
 ```
 
-### Python (uses XOR cipher — demo only)
+### Python (toy XOR cipher: not encryption to rely on)
 
 ```bash
 python run_demo.py
@@ -59,10 +59,10 @@ encrypted = xor_encrypt(original_data, key)
 ### 2. Upload encrypted payload with encryption tag
 
 ```bash
-swarm-prov-upload upload --file sensitive_data.enc --enc "AES-256-GCM" --usePool
+swarm-prov-upload upload --file sensitive_data.enc --enc "AES-256-CBC-PBKDF2" --usePool
 ```
 
-The `--enc` flag adds an `encryption` field to the metadata envelope, recording that this data is encrypted with AES-256-GCM.
+The `--enc` flag adds an `encryption` field to the metadata envelope, recording that this data is encrypted with AES-256-CBC and a PBKDF2-derived key (the openssl command above). Use the label of the cipher you actually used. `run_demo.py` tags its uploads `"XOR-DEMO"`: its repeating-key XOR is a toy for the demo, not encryption to rely on.
 
 ### 3. Download and verify the encrypted payload
 
@@ -80,14 +80,14 @@ shasum -a 256 sensitive_data.txt decrypted.txt
 
 ## Metadata envelope
 
-When uploaded with `--enc "AES-256-GCM"`, the envelope includes:
+When uploaded with `--enc "AES-256-CBC-PBKDF2"`, the envelope includes:
 
 ```json
 {
   "data": "<base64-encoded encrypted payload>",
   "content_hash": "<sha256 of encrypted payload>",
   "stamp_id": "<postage stamp used>",
-  "encryption": "AES-256-GCM"
+  "encryption": "AES-256-CBC-PBKDF2"
 }
 ```
 
@@ -106,5 +106,5 @@ The `encryption` field tells consumers what algorithm was used, but the key is n
 | File | Description |
 |------|-------------|
 | `demo.sh` | Shell demo — encrypts with openssl, uploads, downloads, decrypts |
-| `run_demo.py` | Python demo — XOR cipher (demo only), same workflow |
+| `run_demo.py` | Python demo — toy XOR cipher (not encryption to rely on), same workflow |
 | `sensitive_data.txt` | Sample PII data (fictional patient record) |
