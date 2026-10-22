@@ -4,7 +4,7 @@ Encrypted Data Demo - Python Version
 
 Demonstrates pre-encryption workflow with Swarm:
 1. Encrypt data locally (XOR cipher for demo purposes)
-2. Upload encrypted payload with --enc "AES-256-GCM" tag
+2. Upload encrypted payload with --enc "XOR-DEMO" tag (a toy XOR, not real encryption)
 3. Download the encrypted payload
 4. Verify the encrypted payload is intact
 5. Decrypt and verify it matches the original
@@ -121,12 +121,12 @@ def main():
     print(f"Key length: {len(key)} bytes (kept in memory)")
 
     # --- Step 3: Upload encrypted data ---
-    print("\n--- Step 3: Upload encrypted data with --enc AES-256-GCM ---")
+    print("\n--- Step 3: Upload encrypted data with --enc XOR-DEMO ---")
     print("Uploading (trying pool first)...")
-    result = run_cli("upload", "--file", encrypted_path, "--enc", "AES-256-GCM", "--usePool")
+    result = run_cli("upload", "--file", encrypted_path, "--enc", "XOR-DEMO", "--usePool")
     if result.returncode != 0:
         print("Pool not available, falling back to regular stamp purchase...")
-        result = run_cli("upload", "--file", encrypted_path, "--enc", "AES-256-GCM")
+        result = run_cli("upload", "--file", encrypted_path, "--enc", "XOR-DEMO")
         if result.returncode != 0:
             print(f"Upload failed: {result.stderr or result.stdout}")
             os.remove(encrypted_path)
@@ -204,7 +204,7 @@ def main():
     # --- Summary ---
     print("\n--- Summary ---")
     print(f"Swarm Reference: {swarm_ref}")
-    print("Data was encrypted locally, uploaded with AES-256-GCM metadata tag,")
+    print("Data was encrypted locally, uploaded with XOR-DEMO metadata tag,")
     print("downloaded, and decrypted back to the original content.")
 
 

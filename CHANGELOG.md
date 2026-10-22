@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- `--help` shows the defaults of the global options: `--gateway-url` (the production gateway, `https://provenance-gateway.datafund.io`, unless `PROVENANCE_GATEWAY_URL` is set), `--max-pay`, `--x402-network`, `--chain` and `--idempotency-key`. The help text had them in `[default: ...]`, which the help renderer removed as markup (#144)
+- `x402 info`, and the hints of `x402 status` and `x402 balance` when no key is set, no longer suggest `export X402_PRIVATE_KEY=0x...`, which leaves the key in the shell history. They show how to read the key from a password manager for one command, or to keep a `.env` file with mode 600 (#144)
+
+### Documentation
+- `docs/chain-setup.md` gives the Base Sepolia DataProvenance contract the CLI uses, `0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322`, created at block 39,898,628. It showed the old v2 contract (#144)
+- README and examples 01, 02, 08 and 09 say that data stays on Swarm only while its stamp is valid (25 hours by default) instead of calling the storage persistent or permanent (#144)
+- The setup guides and `.env.example` no longer recommend `export KEY=0x...` or a plaintext key in `.env` (#144)
+- Example 05 tags its uploads with the cipher it uses: `AES-256-CBC-PBKDF2` in `demo.sh` and `XOR-DEMO` in `run_demo.py`. Both said `AES-256-GCM` (#144)
+- `chain set-storage-ref` is described as set-once, as the contract enforces; the README said "set or update" (#144)
+
 ## [0.12.0] - 2026-10-22
 
 ### Notes on 0.11.0
@@ -83,6 +94,26 @@ Payment safety (epic #145).
 - `download` fails (exit 1) on a notary signature that does not verify or cannot be checked: also for a signed document on the local backend without `--notary-address`, from a gateway with notary disabled, without eth-account installed, or with a malformed `signatures` field. Use `--no-verify` to download without checking; combining it with `--require-signature` / `--strict` is an error (#135)
 - Library users: `GatewayClient.download_data` and `swarm_client.download_data_from_swarm` raise `ValueError` for a reference that is not 64/128 hex characters (including a `0x` prefix), and `get_stamp` / `extend_stamp` / `check_stamp_health` for a stamp ID that is not 64 hex (#132)
 - Library users: after a payment was sent, timeouts, 5xx answers and a second 402 now raise `X402Error` subclasses (`PaymentOutcomeUnknownError`, `PaymentSettledNotDeliveredError`, `PaymentRejectedError`), no longer the builtin `ConnectionError`. Code catching `ConnectionError` around paid `GatewayClient` calls should also catch `X402Error` (#127)
+
+## [0.10.0] - 2026-04-08
+
+### Added
+- `storageRef` support in chain anchoring, for the DataProvenance v4 contract: `chain anchor --storage-ref`, and the `chain set-storage-ref` and `chain lookup` commands (#116)
+
+### Changed
+- The Base Sepolia preset uses the DataProvenance v4 contract `0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322` (#116)
+
+## [0.9.0] - 2026-03-19
+
+This entry also covers 0.9.1 to 0.9.3, released the same day.
+
+### Added
+- V2 contract parity: chain module rewritten for DataProvenance v2, with state-based traversal, an event cache fallback, merge transformations, `--follow` chain walking and RPC fallback URLs (#90)
+- Signature verification on download is on by default (#87)
+- Actionable insufficient-funds message for chain operations (#89)
+
+### Fixed
+- x402: parse the 402 response inside the gateway's new `detail` wrapper (#111)
 
 ## [0.8.3] - 2026-03-03
 

@@ -131,6 +131,16 @@ The USDC contract on Base Sepolia is: `0x036CbD53842c5426634e7929541eC2318f3dCF7
 
 ## Step 4: Configure the CLI
 
+### Private key
+
+The CLI reads the payment key from the `X402_PRIVATE_KEY` environment variable. Do not type the key into your shell, for example with `export X402_PRIVATE_KEY=0x...`: it stays in your shell history. Instead, read it from your password manager's command-line tool (such as 1Password `op read`, `pass`, or macOS `security`) into the variable for one command:
+
+```bash
+X402_PRIVATE_KEY="$(op read 'op://<vault>/<item>/<field>')" swarm-prov-upload x402 status
+```
+
+The same form works for any command, for example `swarm-prov-upload --x402 upload --file data.txt`. If you must keep the key in a `.env` file, make the file readable only by you (`chmod 600 .env`) and never commit it. Use a dedicated wallet that holds only what you plan to spend.
+
 ### Environment variables
 
 Add to your `.env` file:
@@ -139,8 +149,7 @@ Add to your `.env` file:
 # Enable x402 payments
 X402_ENABLED=true
 
-# Your wallet private key (KEEP SECRET!)
-X402_PRIVATE_KEY=0x...your_private_key_here...
+# Wallet private key: not stored here, see "Private key" above
 
 # Network: base-sepolia (testnet) or base (mainnet)
 X402_NETWORK=base-sepolia
@@ -178,7 +187,7 @@ swarm-prov-upload --x402 upload --file data.txt
 Output:
 ```
 Payment required: $0.050000 USDC
-  For:     Stamp purchase
+  For:     POST /api/v1/stamps/ (gateway says: "Postage stamp purchase (depth 17, 25h)")
   Network: base-sepolia
   Pay to:  0x1234567890AbcdEF1234567890aBcDeF12345678
   Asset:   USDC 0x036CbD53842c5426634e7929541eC2318f3dCF7e
@@ -245,9 +254,9 @@ pip install -e .[x402]
 
 ### "No private key configured"
 
-Set the `X402_PRIVATE_KEY` environment variable:
+Set the `X402_PRIVATE_KEY` environment variable for the command, as described in [Private key](#private-key):
 ```bash
-export X402_PRIVATE_KEY=0x...
+X402_PRIVATE_KEY="$(op read 'op://<vault>/<item>/<field>')" swarm-prov-upload x402 status
 ```
 
 ### "Insufficient USDC balance"
@@ -312,7 +321,7 @@ The gateway doesn't support your configured network. Check that `X402_NETWORK` m
 3. **Start with testnet** before using real funds
 4. **Set reasonable auto-pay limits** to prevent unexpected charges
 5. **Review payment prompts** before confirming
-6. **Use environment files** (`.env`) instead of command line arguments for secrets
+6. **Keep the key out of your shell history and plaintext files**: read it from a password manager for each command; if you use a `.env` file, `chmod 600` it and never commit it
 
 ## Network details
 

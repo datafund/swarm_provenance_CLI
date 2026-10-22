@@ -7,7 +7,7 @@ Unit tests verify:
 - 02-audit-trail: multi-record upload with --std AUDIT-LOG-V1
 - 03-scientific-data: PROV-O standard with --duration 720
 - 04-batch-processing: stamp reuse across multiple uploads
-- 05-encrypted-data: encryption workflow with --enc AES-256-GCM
+- 05-encrypted-data: encryption workflow with --enc AES-256-CBC-PBKDF2 (shell) / XOR-DEMO (Python)
 - 06-market-memory: canonical hashing and prediction→observation linking
 - 07-stamp-management: full stamp lifecycle commands
 - 08-ci-cd-integration: CI/CD artifact archival with CI-ARTIFACT-V1
@@ -940,7 +940,8 @@ class TestEncryptedDataShellScript:
 
     def test_shell_script_uses_enc_flag(self):
         content = (ENCRYPTED_DIR / "demo.sh").read_text()
-        assert '--enc "AES-256-GCM"' in content
+        assert '--enc "AES-256-CBC-PBKDF2"' in content
+        assert "AES-256-GCM" not in content  # the label must match the cipher used (#144)
 
 
 class TestEncryptedDataSampleFiles:
@@ -1000,7 +1001,7 @@ class TestEncryptedDataPythonDemo:
                 return _make_completed_process(stdout="Healthy\n")
             elif subcmd == "upload":
                 cmd_str = " ".join(str(c) for c in cmd)
-                assert "AES-256-GCM" in cmd_str
+                assert "XOR-DEMO" in cmd_str
                 # Read the encrypted file that was uploaded
                 for i, c in enumerate(cmd):
                     if str(c) == "--file" and i + 1 < len(cmd):

@@ -744,6 +744,90 @@ class TestX402InfoCommand:
         assert "X402_PRIVATE_KEY" in result.stdout
         assert "faucet" in result.stdout.lower()
 
+    def test_x402_info_does_not_suggest_exporting_a_key(self):
+        """The guide reads the key for one command, never `export KEY=0x...` (#144)."""
+        result = runner.invoke(app, ["x402", "info"])
+
+        assert result.exit_code == 0
+        assert "export X402_PRIVATE_KEY" not in result.stdout
+        assert "=0x" not in result.stdout
+        assert "chmod 600 .env" in result.stdout
+
+
+class TestX402KeyHints:
+    """x402 status/balance never suggest `export KEY=0x...` (#144)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_key(self, monkeypatch):
+        for name in ("X402_PRIVATE_KEY", "SWARM_X402_PRIVATE_KEY"):  # gitleaks:allow (variable names, not keys)
+            monkeypatch.delenv(name, raising=False)
+
+    @pytest.mark.parametrize("command", ["status", "balance"])
+    def test_hint_does_not_export_a_key(self, command):
+        result = runner.invoke(app, ["x402", command])
+        output = result.output
+        assert "op read" in output
+        assert "chmod 600 .env" in output
+        assert not re.search(r"export \S+=0x", output)
+
+
+class TestRootHelpDefaults:
+    """--help shows the defaults of the global options (#144)."""
+
+    def _help(self):
+        result = runner.invoke(app, ["--help"], terminal_width=250, env={"COLUMNS": "250"})
+        assert result.exit_code == 0
+        # Under GITHUB_ACTIONS (or FORCE_COLOR) Rich forces a terminal and adds
+        # ANSI codes; strip them, then compare on collapsed whitespace without
+        # box characters
+        text = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        return " ".join(re.sub(r"[│╭╮╰╯─]", " ", text).split())
+
+    def test_help_shows_default_gateway_url(self):
+        from swarm_provenance_uploader import config
+        assert f"[default: ({config.GATEWAY_URL})]" in self._help()
+
+    def test_production_gateway_is_the_built_in_default(self):
+        from swarm_provenance_uploader import config
+        assert config.GATEWAY_DEFAULT_URL == "https://provenance-gateway.datafund.io"
+
+    @pytest.mark.parametrize("text", [
+        "[default: (1.00)]",
+        "[default: (base-sepolia)]",
+        "[default: (a new random key per command)]",
+    ])
+    def test_help_shows_other_defaults(self, text):
+        assert text in self._help()
+
+    def test_help_shows_configured_x402_values(self):
+        """X402_NETWORK / X402_MAX_AUTO_PAY_USD are what the CLI uses, so --help shows them.
+
+        The defaults are read when cli.py is imported, so this runs --help in a
+        fresh interpreter with the variables set; the test process is untouched.
+        """
+        import os
+        import subprocess
+        import sys
+        env = dict(os.environ, X402_NETWORK="base", X402_MAX_AUTO_PAY_USD="5",
+                   COLUMNS="250", TERM="dumb")
+        proc = subprocess.run(
+            [sys.executable, "-c", "from swarm_provenance_uploader.cli import app; app()", "--help"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr
+        text = re.sub(r"\x1b\[[0-9;]*m", "", proc.stdout)
+        help_text = " ".join(re.sub(r"[│╭╮╰╯─]", " ", text).split())
+        network = help_text[help_text.index("--x402-network "):][:200]
+        max_pay = help_text[help_text.index("--max-pay "):][:200]
+        assert "[default: (base)]" in network
+        assert "[default: (5.00)]" in max_pay
+
+    def test_help_shows_default_chain(self):
+        from swarm_provenance_uploader import config
+        help_text = self._help()
+        start = help_text.index("--chain ")
+        assert f"[default: ({config.CHAIN_NAME})]" in help_text[start:start + 200]
+
 
 class TestX402BalanceCommand:
     """Tests for x402 balance command."""

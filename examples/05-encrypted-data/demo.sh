@@ -4,7 +4,7 @@
 #
 # Demonstrates pre-encryption workflow with Swarm:
 # 1. Encrypt data locally with openssl
-# 2. Upload encrypted payload with --enc "AES-256-GCM" tag
+# 2. Upload encrypted payload with --enc "AES-256-CBC-PBKDF2" tag (the cipher used below)
 # 3. Download the encrypted payload
 # 4. Verify the encrypted payload is intact
 # 5. Decrypt and verify it matches the original
@@ -69,11 +69,11 @@ echo "Key saved to: $KEY_FILE"
 echo
 
 # --- Step 3: Upload encrypted data with --enc tag ---
-echo "--- Step 3: Upload encrypted data with --enc AES-256-GCM ---"
+echo "--- Step 3: Upload encrypted data with --enc AES-256-CBC-PBKDF2 ---"
 echo "Uploading (trying pool first)..."
-UPLOAD_OUTPUT=$(swarm-prov-upload upload --file "$ENCRYPTED_FILE" --enc "AES-256-GCM" --usePool 2>&1) || {
+UPLOAD_OUTPUT=$(swarm-prov-upload upload --file "$ENCRYPTED_FILE" --enc "AES-256-CBC-PBKDF2" --usePool 2>&1) || {
     echo "Pool not available, falling back to regular stamp purchase..."
-    UPLOAD_OUTPUT=$(swarm-prov-upload upload --file "$ENCRYPTED_FILE" --enc "AES-256-GCM" 2>&1)
+    UPLOAD_OUTPUT=$(swarm-prov-upload upload --file "$ENCRYPTED_FILE" --enc "AES-256-CBC-PBKDF2" 2>&1)
 }
 echo "$UPLOAD_OUTPUT"
 
@@ -141,5 +141,5 @@ rm -f "$ENCRYPTED_FILE" "$KEY_FILE" "$DECRYPTED_FILE"
 echo
 echo "--- Demo complete ---"
 echo "Swarm Reference: $SWARM_REF"
-echo "The data was encrypted locally, uploaded to Swarm with AES-256-GCM tag,"
+echo "The data was encrypted locally, uploaded to Swarm with AES-256-CBC-PBKDF2 tag,"
 echo "downloaded, and decrypted back to the original content."

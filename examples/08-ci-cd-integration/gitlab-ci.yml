@@ -1,7 +1,8 @@
 # Sample GitLab CI/CD configuration for archiving build artifacts to Swarm
 #
 # This pipeline uploads build artifacts to the Swarm network after a
-# successful build, creating an immutable provenance record.
+# successful build, creating a tamper-evident provenance record
+# (kept on Swarm while its postage stamp is valid).
 #
 # Required CI/CD variables:
 #   PROVENANCE_GATEWAY_URL - Gateway URL (optional, uses default if not set)
