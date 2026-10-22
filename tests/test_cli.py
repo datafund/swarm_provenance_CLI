@@ -2357,6 +2357,42 @@ class TestChainGetCommand:
         assert "filtered PII" in result.stdout
 
 
+class TestChainIdMismatchHint:
+    """A chain ID mismatch prints its own advice, not the wallet-key hint (#142 review)."""
+
+    def test_mismatch_does_not_point_to_the_wallet_key(self, mocker):
+        from typer.testing import CliRunner as _Runner
+        from swarm_provenance_uploader.chain.exceptions import ChainIdMismatchError
+
+        error = ChainIdMismatchError(
+            "Chain ID mismatch: chain 'base-sepolia' has chain ID 84532, but the RPC endpoint "
+            "https://mainnet.base.org reports chain ID 8453. Use an RPC for that network, "
+            "or --chain localhost for a local development node.",
+            chain="base-sepolia", expected_chain_id=84532, actual_chain_id=8453,
+        )
+        mocker.patch("swarm_provenance_uploader.core.chain_client.ChainClient", side_effect=error)
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1
+        assert "Chain ID mismatch" in result.stderr
+        assert "--chain localhost" in result.stderr
+        assert "PROVENANCE_WALLET_KEY" not in result.stderr
+
+    def test_other_configuration_errors_keep_the_hint(self, mocker):
+        from typer.testing import CliRunner as _Runner
+
+        mocker.patch(
+            "swarm_provenance_uploader.core.chain_client.ChainClient",
+            side_effect=exceptions.ChainConfigurationError("No private key"),
+        )
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1
+        assert "PROVENANCE_WALLET_KEY" in result.stderr
+
+
 CHAIN_OWNER = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
 
 
@@ -2411,6 +2447,29 @@ class TestChainVerifyCommand:
         assert result.exit_code == 0, result.output
         assert f"Status: {status}" in result.stdout
         assert f"Owner:  {CHAIN_OWNER}" in result.stdout
+
+    def test_active_record_says_verified(self, mocker):
+        result = self._invoke(mocker, _verify_record("ACTIVE"))
+
+        assert result.exit_code == 0, result.output
+        assert f"Verified: {DUMMY_SWARM_REF} is anchored on-chain." in result.stdout
+
+    @pytest.mark.parametrize("status", ["RESTRICTED", "DELETED"])
+    def test_inactive_record_is_not_called_verified(self, mocker, status):
+        """Exit 0 for backward compatibility, but the headline names the status, not "Verified"."""
+        result = self._invoke(mocker, _verify_record(status))
+
+        assert result.exit_code == 0, result.output
+        assert "Verified" not in result.stdout
+        assert f"Anchored on-chain (status: {status}): {DUMMY_SWARM_REF}" in result.stdout
+        assert "--require-active" in result.stdout
+
+    def test_inactive_record_with_matching_owner_is_not_called_verified(self, mocker):
+        result = self._invoke(mocker, _verify_record("RESTRICTED"), "--owner", CHAIN_OWNER)
+
+        assert result.exit_code == 0, result.output
+        assert "Verified" not in result.stdout
+        assert "Anchored on-chain (status: RESTRICTED)" in result.stdout
 
     @pytest.mark.parametrize("status", ["RESTRICTED", "DELETED"])
     def test_require_active_fails_for_inactive_record(self, mocker, status):

@@ -10,7 +10,7 @@ Requires optional dependencies (the `blockchain` extra): web3 and eth-account.
 import logging
 from typing import List, Optional
 
-from .exceptions import ChainConfigurationError, ChainConnectionError
+from .exceptions import ChainConfigurationError, ChainConnectionError, ChainIdMismatchError
 from .redact import redact_url, register_url_secrets
 from .._requirements import INSTALL_SIGNING_DEPS
 
@@ -176,23 +176,64 @@ class ChainProvider:
         # match: otherwise a "base-sepolia" config with a mainnet RPC would
         # sign mainnet transactions.
         self.chain_id = preset["chain_id"]
+        # Set once the node's chain ID has been read and accepted;
+        # confirm_chain_id() reads it before the first signature otherwise
+        self._chain_id_confirmed = False
         if self._custom_rpc:
             try:
                 detected = self._web3.eth.chain_id
             except Exception:
-                # Unreachable now: keep the preset ID, which signatures are
-                # bound to (EIP-155); health_check reports the connection error
+                # Unreachable now: keep the preset ID; confirm_chain_id()
+                # checks again before anything is signed
                 detected = None
             if detected is not None:
-                if chain in STRICT_CHAIN_ID_PRESETS and detected != preset["chain_id"]:
-                    raise ChainConfigurationError(
-                        f"Chain ID mismatch: chain '{chain}' has chain ID "
-                        f"{preset['chain_id']}, but the RPC endpoint "
-                        f"{redact_url(self.rpc_url)} reports chain ID {detected}. "
-                        "Use an RPC for that network, or --chain localhost "
-                        "for a local development node."
-                    )
-                self.chain_id = detected
+                self._accept_chain_id(detected)
+
+    def _accept_chain_id(self, detected: int) -> None:
+        """Accept the chain ID a node reports, or raise ChainIdMismatchError.
+
+        A named network preset must match its own chain ID. The localhost
+        preset takes whatever the node reports.
+        """
+        if self.chain in STRICT_CHAIN_ID_PRESETS and detected != self.chain_id:
+            raise ChainIdMismatchError(
+                f"Chain ID mismatch: chain '{self.chain}' has chain ID "
+                f"{self.chain_id}, but the RPC endpoint "
+                f"{redact_url(self.rpc_url)} reports chain ID {detected}. "
+                "Use an RPC for that network, or --chain localhost "
+                "for a local development node.",
+                chain=self.chain,
+                expected_chain_id=self.chain_id,
+                actual_chain_id=detected,
+            )
+        self.chain_id = detected
+        self._chain_id_confirmed = True
+
+    def confirm_chain_id(self) -> None:
+        """
+        Read the node's chain ID once, before the first signature.
+
+        The check in __init__ only runs for a custom RPC that answers at that
+        moment. This one runs for the RPC in use, so a node on another chain
+        that comes up later at the same URL gets nothing signed. Fallback
+        switches keep the confirmation: _try_fallback only switches to an
+        endpoint with the same chain ID.
+
+        Raises:
+            ChainIdMismatchError: If the node is on another chain than a
+                named network preset.
+            ChainConnectionError: If the chain ID cannot be read.
+        """
+        if self._chain_id_confirmed:
+            return
+        try:
+            detected = self._web3.eth.chain_id
+        except Exception as e:
+            raise ChainConnectionError(
+                f"Could not read the chain ID before signing: {e}. Nothing was sent.",
+                rpc_url=self.rpc_url,
+            ) from e
+        self._accept_chain_id(detected)
 
     @property
     def web3(self):

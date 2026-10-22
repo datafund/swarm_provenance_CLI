@@ -2322,6 +2322,94 @@ class TestChainIdPresetMismatch:
         assert provider.rpc_url == primary
 
 
+class TestChainIdCheckedBeforeFirstSignature:
+    """The chain ID is checked again before the first signature (#142 review).
+
+    If the custom RPC is unreachable when the client starts, the init check
+    cannot run. A node on another chain that comes up later must not get a
+    signed transaction.
+    """
+
+    def _unregistered(self, mock_chain_deps):
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
+        )
+
+    def _nothing_signed(self, mock_chain_deps):
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    def test_node_on_another_chain_after_start_is_refused(self, mock_chain_deps):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.chain.exceptions import ChainIdMismatchError
+
+        self._unregistered(mock_chain_deps)
+        eth = mock_chain_deps["web3_instance"].eth
+        # Down when the client starts ...
+        type(eth).chain_id = PropertyMock(side_effect=ConnectionError("down"))
+        client = ChainClient(chain="base-sepolia", rpc_url="http://127.0.0.1:8546", gas_limit=200_000)
+        # ... then a mainnet node comes up at the same URL
+        type(eth).chain_id = PropertyMock(return_value=8453)
+
+        with pytest.raises(ChainIdMismatchError) as exc_info:
+            client.anchor(swarm_hash=DUMMY_HASH)
+        assert isinstance(exc_info.value, ChainConfigurationError)
+        assert "84532" in str(exc_info.value) and "8453" in str(exc_info.value)
+        assert exc_info.value.expected_chain_id == 84532
+        assert exc_info.value.actual_chain_id == 8453
+        self._nothing_signed(mock_chain_deps)
+
+    def test_still_unreachable_fails_the_write(self, mock_chain_deps):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        self._unregistered(mock_chain_deps)
+        eth = mock_chain_deps["web3_instance"].eth
+        type(eth).chain_id = PropertyMock(side_effect=ConnectionError("down"))
+        client = ChainClient(chain="base-sepolia", rpc_url="http://127.0.0.1:8546", gas_limit=200_000)
+
+        with pytest.raises(ChainConnectionError):
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+        self._nothing_signed(mock_chain_deps)
+
+    def test_preset_rpc_on_another_chain_is_refused(self, mock_chain_deps):
+        """No custom RPC: the preset RPC is not queried at start, so the check runs before the write."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.chain.exceptions import ChainIdMismatchError
+
+        self._unregistered(mock_chain_deps)
+        mock_chain_deps["web3_instance"].eth.chain_id = 8453
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(ChainIdMismatchError):
+            client.anchor(swarm_hash=DUMMY_HASH)
+        self._nothing_signed(mock_chain_deps)
+
+    def test_checked_once_per_client(self, mock_chain_deps):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        self._unregistered(mock_chain_deps)
+        calls = PropertyMock(return_value=84532)
+        type(mock_chain_deps["web3_instance"].eth).chain_id = calls
+        client = ChainClient(chain="base-sepolia")
+        client.set_status(swarm_hash=DUMMY_HASH, status=1)
+        client.set_status(swarm_hash=DUMMY_HASH, status=0)
+        assert calls.call_count == 1
+        assert mock_chain_deps["account"].sign_transaction.call_count == 2
+
+    def test_init_mismatch_is_chain_id_mismatch_error(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+        from swarm_provenance_uploader.chain.exceptions import ChainIdMismatchError
+
+        mock_chain_deps["web3_instance"].eth.chain_id = 8453
+        with pytest.raises(ChainIdMismatchError) as exc_info:
+            ChainProvider(chain="base-sepolia", rpc_url="https://custom.rpc.io")
+        assert exc_info.value.chain == "base-sepolia"
+
+    def test_exported_from_package_exceptions(self):
+        from swarm_provenance_uploader import exceptions
+        from swarm_provenance_uploader.chain.exceptions import ChainIdMismatchError
+
+        assert exceptions.ChainIdMismatchError is ChainIdMismatchError
+
 class TestPendingNonce:
     """The nonce counts pending transactions, so a second write does not reuse it (#142)."""
 

@@ -172,6 +172,8 @@ swarm-prov-upload chain anchor <swarm_hash>
 ```bash
 # Check if a hash is registered (exit code 0=yes, 1=no).
 # The output shows the record's status (ACTIVE, RESTRICTED or DELETED) and owner.
+# "Verified:" means ACTIVE. A RESTRICTED or DELETED record prints
+# "Anchored on-chain (status: DELETED): ..." and still exits 0.
 swarm-prov-upload chain verify <swarm_hash>
 
 # Also require an ACTIVE record and a given owner (exit code 1 if either differs).
@@ -359,7 +361,7 @@ Your RPC URL doesn't match the selected chain. Ensure `CHAIN_NAME` and `CHAIN_RP
 - `base-sepolia` expects chain ID 84532
 - `base` expects chain ID 8453
 
-With `base` or `base-sepolia`, a custom RPC that reports another chain ID is a configuration error. Every command fails before it reads or signs anything. This stops a testnet configuration from signing mainnet transactions. A fallback RPC that reports another chain ID is skipped.
+With `base` or `base-sepolia`, a custom RPC that reports another chain ID is a configuration error. Every command fails before it reads or signs anything. The chain ID is also checked once before the first transaction is signed, so an RPC that was down when the command started and comes up on another chain gets nothing signed. This stops a testnet configuration from signing mainnet transactions. A fallback RPC that reports another chain ID is skipped.
 
 For a local development node (Hardhat, Anvil), use `--chain localhost` (or `CHAIN_NAME=localhost`). The `localhost` preset uses the chain ID that the node reports.
 

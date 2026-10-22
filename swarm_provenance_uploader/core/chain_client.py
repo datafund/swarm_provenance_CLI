@@ -248,17 +248,22 @@ class ChainClient:
 
     def _check_contract_code(self) -> None:
         """
-        Refuse to write if the configured contract address has no code.
+        Refuse to write to the wrong chain or to an address without code.
 
-        A transaction to an address without code succeeds and records
-        nothing. Checked once per client, before the first signature.
+        First the RPC's chain ID is confirmed (ChainProvider.confirm_chain_id),
+        then the code at the contract address is read: a transaction to an
+        address without code succeeds and records nothing. Both are checked
+        once per client, before the first signature.
 
         Raises:
+            ChainIdMismatchError: If the RPC is on another chain than a named
+                network preset.
             ChainConfigurationError: If the address has no contract code, the
                 RPC rejected the check (a JSON-RPC error answer), or the check
                 fails for a reason other than the RPC.
             ChainConnectionError: If the RPC cannot be reached.
         """
+        self._provider.confirm_chain_id()
         if self._contract_code_checked:
             return
         # The checksummed address: web3 rejects a lowercase one, and the

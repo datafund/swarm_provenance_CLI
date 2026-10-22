@@ -126,7 +126,9 @@ def _get_chain_client(verbose: bool = False):
         )
     except exceptions.ChainConfigurationError as e:
         typer.secho(f"ERROR: Chain configuration invalid: {e}", fg=typer.colors.RED, err=True)
-        typer.echo("Check PROVENANCE_WALLET_KEY environment variable and chain settings.", err=True)
+        if not isinstance(e, exceptions.ChainIdMismatchError):
+            # The mismatch message carries its own advice (--chain localhost)
+            typer.echo("Check PROVENANCE_WALLET_KEY environment variable and chain settings.", err=True)
         raise typer.Exit(code=1)
 
 
@@ -2522,6 +2524,13 @@ def chain_verify(
         typer.secho(f"Not verified: {swarm_hash} is anchored on-chain, but:", fg=typer.colors.YELLOW)
         for failure in failures:
             typer.secho(f"  - {failure}", fg=typer.colors.YELLOW)
+    elif status != "ACTIVE":
+        # Exit 0 as before, but not called "Verified"
+        typer.secho(
+            f"Anchored on-chain (status: {status}): {swarm_hash}. "
+            "The record is not ACTIVE; use --require-active to exit 1 in this case.",
+            fg=typer.colors.YELLOW,
+        )
     else:
         typer.secho(f"Verified: {swarm_hash} is anchored on-chain.", fg=typer.colors.GREEN)
     typer.echo(f"  Status: {status}")
