@@ -307,20 +307,23 @@ class GatewayClient:
             # A 402 with the gateway's own code (#139), for example a spent
             # pool allowance: say what it is, and offer --free only if the
             # free tier can get past it. An ordinary payment request has the
-            # placeholder HTTP_402, which _gateway_error drops.
+            # placeholder HTTP_402, which _gateway_error drops. A 402 to a
+            # request already on the free tier (e.g. free tier disabled) is
+            # the same: show the gateway's reason, and --free cannot help.
             code, message = self._gateway_error(response)
-            if code:
+            if code or self.free_tier:
                 resets_at = _sanitize_gateway_text(str(resets_at), limit=64) if resets_at else None
                 error = PaymentRequiredError("", payment_options=accepts, code=code,
-                                             gateway_message=message, resets_at=resets_at)
+                                             gateway_message=message, resets_at=resets_at,
+                                             free_tier_used=bool(self.free_tier))
                 if error.free_tier_helps:
                     hint = "Enable x402 with --x402 flag or use --free for free tier"
                 else:
                     hint = "Enable x402 with --x402 to pay for this request"
                     if resets_at:
                         hint += f", or wait until the allowance resets at {resets_at}"
-                error.args = (f"Payment required ({code})" + (f": {message}" if message else ".")
-                              + f" {hint}.",)
+                error.args = ("Payment required" + (f" ({code})" if code else "")
+                              + (f": {message}" if message else ".") + f" {hint}.",)
                 raise error
             if accepts:
                 amounts = [opt.get("maxAmountRequired", "?") if isinstance(opt, dict) else "?"
@@ -651,6 +654,9 @@ class GatewayClient:
             self._raise_for_paid_failure(response, payment, outstanding)
             return response
 
+    # Longest gateway message shown; the allowance refusals run to about 330.
+    _GATEWAY_MESSAGE_LIMIT = 500
+
     # How many FastAPI validation errors (422) to name before "and N more".
     _MAX_VALIDATION_ERRORS_SHOWN = 3
 
@@ -710,7 +716,7 @@ class GatewayClient:
                     message = listed
 
         return (_sanitize_gateway_text(code, limit=64),
-                _sanitize_gateway_text(message, limit=300))
+                _sanitize_gateway_text(message, limit=cls._GATEWAY_MESSAGE_LIMIT))
 
     # Not to be confused with _retry_after below: this one is the raw value,
     # shown to the user in an error message (None when the header is missing);

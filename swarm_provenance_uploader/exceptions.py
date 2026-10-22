@@ -69,6 +69,8 @@ class PaymentRequiredError(X402Error):
     When the gateway's 402 carries its own error code (not the placeholder
     HTTP_402 of an ordinary payment request), `code` and `gateway_message`
     hold it, and `resets_at` the time a spent free allowance resets (#139).
+    `free_tier_used` is True when the request was sent on the free tier;
+    `gateway_message` then holds the gateway's reason even without a code.
     """
 
     # Codes for which the free tier is no way forward: the pool allowance is
@@ -81,17 +83,20 @@ class PaymentRequiredError(X402Error):
     })
 
     def __init__(self, message: str, payment_options: list = None, code: str = None,
-                 gateway_message: str = None, resets_at: str = None):
+                 gateway_message: str = None, resets_at: str = None,
+                 free_tier_used: bool = False):
         super().__init__(message)
         self.payment_options = payment_options or []
         self.code = code
         self.gateway_message = gateway_message
         self.resets_at = resets_at
+        # The request already asked for the free tier and still got a 402
+        self.free_tier_used = free_tier_used
 
     @property
     def free_tier_helps(self) -> bool:
-        """False when the gateway's code says --free would not get past this 402."""
-        return self.code not in self.FREE_TIER_DOES_NOT_HELP
+        """False when --free would not get past this 402: it was already used, or the code says so."""
+        return not self.free_tier_used and self.code not in self.FREE_TIER_DOES_NOT_HELP
 
 
 class InsufficientBalanceError(X402Error):

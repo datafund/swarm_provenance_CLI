@@ -2705,3 +2705,65 @@ class TestDefaultMode402:
         assert str(exc.value) == ("Payment required (amounts: ['50000']). "
                                   "Enable x402 with --x402 flag or use --free for free tier")
         assert exc.value.code is None
+
+
+def _free_tier_disabled_402():
+    """swarm_connect app/x402/dependency.py: X-Payment-Mode: free on a gateway with the free
+    tier off. No code of its own, so the envelope adds the placeholder HTTP_402."""
+    accepts = [{"scheme": "exact", "network": "base", "maxAmountRequired": "50000"}]
+    detail = {"x402Version": 1, "error": "Free tier is not available. Payment required.",
+              "accepts": accepts}
+    return {**detail, "code": "HTTP_402", "message": "Free tier is not available. Payment required.",
+            "detail": detail}
+
+
+class TestFreeTier402:
+    """A 402 to a --free request: the free tier is no way forward (#139)."""
+
+    def test_free_tier_402_shows_gateway_message_and_no_free_hint(self, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(f"{GW}/api/v1/data/", status_code=402, json=_free_tier_disabled_402())
+        client = GatewayClient(base_url=GW, x402_enabled=False, free_tier=True)
+
+        with pytest.raises(PaymentRequiredError) as exc:
+            client.upload_data(b"x", DUMMY_STAMP)
+
+        text = str(exc.value)
+        assert "Free tier is not available. Payment required." in text
+        assert "--x402" in text
+        assert "--free" not in text
+        assert exc.value.free_tier_helps is False
+        assert exc.value.code is None
+
+    def test_same_402_without_free_keeps_generic_text(self, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(f"{GW}/api/v1/data/", status_code=402, json=_free_tier_disabled_402())
+        client = GatewayClient(base_url=GW, x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError) as exc:
+            client.upload_data(b"x", DUMMY_STAMP)
+
+        assert str(exc.value) == ("Payment required (amounts: ['50000']). "
+                                  "Enable x402 with --x402 flag or use --free for free tier")
+        assert exc.value.free_tier_helps is True
+
+
+class TestGatewayMessageLimit:
+    def test_allowance_429_message_is_not_cut(self, requests_mock):
+        """The testnet allowance refusal (pool.py _refuse_allowance) is about 330 characters."""
+        message = ("The daily free allowance of 5 small stamps for this application has been used "
+                   "up. It resets at 2026-10-23T00:00:00Z. To continue now, buy a stamp directly "
+                   "with POST /api/v1/stamps/ — that is not drawn from the pool, so this limit does "
+                   "not apply. It takes about a minute to become usable rather than seconds.")
+        assert len(message) > 300
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", status_code=429, json={
+            "detail": {"code": "DAILY_STAMP_ALLOWANCE_EXHAUSTED", "message": message},
+            "code": "DAILY_STAMP_ALLOWANCE_EXHAUSTED", "message": message})
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(Exception) as exc:
+            client.acquire_stamp_from_pool(size="small")
+
+        assert "rather than seconds." in str(exc.value)

@@ -5017,6 +5017,23 @@ class TestPaymentPromptReviewCases:
         assert "2026-10-23T00:00:00Z" in result.output
         assert "--free" not in result.output
 
+    def test_free_tier_402_shows_message_and_no_free_hint(self, requests_mock):
+        """#139: with --free, a 402 means the free tier is no way forward (here: disabled)."""
+        _x402_config["enabled"] = False
+        gw = "https://test.gateway.io"
+        detail = {"x402Version": 1, "error": "Free tier is not available. Payment required.",
+                  "accepts": [{"scheme": "exact", "network": "base", "maxAmountRequired": "50000"}]}
+        requests_mock.post(f"{gw}/api/v1/stamps/", status_code=402, json={
+            **detail, "code": "HTTP_402", "message": detail["error"], "detail": detail})
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--free", "--gateway-url", gw, "upload", "--file", "d.txt"])
+        assert result.exit_code == 1
+        assert "Free tier is not available. Payment required." in result.output
+        assert "--x402" in result.output
+        assert "--free" not in result.output
+
     def test_gateway_error_code_reaches_the_user(self, mocker, requests_mock):
         """#139: the gateway's code and message are printed, not a generic HTTP error."""
         requests_mock.post("https://test.gateway.io/api/v1/stamps/", status_code=403, json={

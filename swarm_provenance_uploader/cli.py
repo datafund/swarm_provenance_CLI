@@ -371,9 +371,10 @@ def _report_payment_required(e: exceptions.PaymentRequiredError):
         typer.secho(f"\nERROR: Payment not made: {e}", fg=typer.colors.RED, err=True)
         typer.echo("Nothing was signed or paid. For non-interactive use, pass --auto-pay "
                    "with a --max-pay limit that covers the amount.", err=True)
-    elif getattr(e, "code", None):
-        # The gateway's own reason for the 402 (#139), e.g. a spent pool allowance
-        typer.secho(f"\nERROR: Payment required ({e.code})"
+    elif getattr(e, "code", None) or getattr(e, "free_tier_used", False):
+        # The gateway's own reason for the 402 (#139): a spent pool allowance,
+        # or a request on the free tier that the gateway still refused
+        typer.secho("\nERROR: Payment required" + (f" ({e.code})" if e.code else "")
                     + (f": {e.gateway_message}" if e.gateway_message else "."),
                     fg=typer.colors.RED, err=True)
         if e.free_tier_helps:
