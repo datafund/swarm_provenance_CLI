@@ -303,3 +303,94 @@ def test_config_has_no_unread_x402_constants():
 
     assert not hasattr(config, "X402_PRIVATE_KEY_ENV")
     assert not hasattr(config, "X402_RPC_URL")
+
+
+# Key-shaped values of other lengths (review round 2): a key with its
+# leading zero dropped (63 digits), or any long hex string, is not a name.
+def _hex_value(length, first, prefix):
+    digits = (first + "7e3a9c51b8f20d64" * 8)[:length]
+    return prefix + digits
+
+
+HEX_VALUES = [
+    pytest.param(_hex_value(n, first, prefix), id=f"{n}-{first}-{'0x' if prefix else 'bare'}")
+    for n in (63, 40, 32)
+    for first in ("d", "1")
+    for prefix in ("", "0x")
+]
+
+
+@pytest.mark.parametrize("value", HEX_VALUES)
+def test_hex_key_env_value_is_invalid(no_key_env, value):
+    from swarm_provenance_uploader.core.x402_client import x402_private_key_env_name
+
+    no_key_env.setenv("X402_PRIVATE_KEY_ENV", value)
+    assert x402_private_key_env_name() is None
+
+
+@pytest.mark.parametrize("value", HEX_VALUES)
+def test_x402_status_never_echoes_hex_key_env(no_key_env, value):
+    no_key_env.setenv("X402_PRIVATE_KEY_ENV", value)
+
+    result = runner.invoke(app, ["x402", "status"])
+
+    assert result.exit_code == 0
+    assert value.replace("0x", "")[:12] not in result.output
+    assert INVALID_NAME_MESSAGE in result.output
+
+
+@pytest.mark.parametrize("value", HEX_VALUES)
+def test_x402_balance_never_echoes_hex_key_env(no_key_env, value):
+    no_key_env.setenv("X402_PRIVATE_KEY_ENV", value)
+
+    with patch("swarm_provenance_uploader.core.x402_client.X402Client") as client_class:
+        result = runner.invoke(app, ["x402", "balance"])
+
+    assert result.exit_code == 1
+    assert value.replace("0x", "")[:12] not in result.output
+    assert INVALID_NAME_MESSAGE in result.output
+    client_class.assert_not_called()
+
+
+@pytest.mark.parametrize("value", HEX_VALUES)
+def test_x402_client_error_never_echoes_hex_key_env(no_key_env, value):
+    from swarm_provenance_uploader.core import x402_client
+    from swarm_provenance_uploader.exceptions import X402ConfigurationError
+
+    no_key_env.setenv("X402_PRIVATE_KEY_ENV", value)
+    with patch.object(x402_client, "_import_x402_deps", return_value=(MagicMock(), MagicMock())):
+        with pytest.raises(X402ConfigurationError) as exc_info:
+            x402_client.X402Client()
+
+    assert value.replace("0x", "")[:12] not in str(exc_info.value)
+    assert INVALID_NAME_MESSAGE in str(exc_info.value)
+
+
+@pytest.mark.parametrize("name", ["deadbeef", "CAFE", "abc123"])
+def test_short_all_hex_name_is_not_printed(no_key_env, name):
+    """A valid but all-hex name is used, but never printed: it could be part of a key."""
+    from swarm_provenance_uploader.core.x402_client import x402_private_key_env_name
+
+    no_key_env.setenv("X402_PRIVATE_KEY_ENV", name)
+    assert x402_private_key_env_name() == name
+
+    status = runner.invoke(app, ["x402", "status"])
+    with patch("swarm_provenance_uploader.core.x402_client.X402Client"):
+        balance = runner.invoke(app, ["x402", "balance"])
+
+    for result in (status, balance):
+        assert name not in result.output
+        assert "the variable named by X402_PRIVATE_KEY_ENV" in result.output
+
+    no_key_env.setenv(name, KEY_A)
+    status = runner.invoke(app, ["x402", "status"])
+    assert "Configured" in status.output
+    assert name not in status.output
+
+
+def test_x402_info_mentions_key_env_and_legacy_name():
+    result = runner.invoke(app, ["x402", "info"])
+
+    assert result.exit_code == 0
+    assert "X402_PRIVATE_KEY_ENV" in result.output
+    assert "SWARM_X402_PRIVATE_KEY" in result.output
