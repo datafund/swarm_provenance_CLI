@@ -71,7 +71,7 @@ swarm-prov-upload download <swarm_hash> --output-dir ./downloads --no-verify
    ```bash
    cp .env.example .env
    ```
-   The CLI reads the `.env` of the folder you run it in. If there is none, it uses the nearest `.env` in a parent folder (up to the root, including your home folder). The folder the package is installed in does not matter. Variables already set in your environment take precedence over `.env`. Versions up to 0.11.0 searched from the folder the package was installed in, so with an editable install the repository's `.env` applied everywhere. If you relied on that, copy the `.env` to the folder you work in, or export the variables.
+   The CLI reads the `.env` of the folder you run it in. If there is none, it uses the nearest `.env` in a parent folder (up to the root, including your home folder). The folder the package is installed in does not matter. Variables already set in your environment take precedence over `.env`. Versions up to 0.12.0 searched from the folder the package was installed in, so with an editable install the repository's `.env` applied everywhere. If you relied on that, copy the `.env` to the folder you work in, or export the variables.
 3. Install in editable mode, including testing dependencies:
    ```bash
    pip install -e .[testing]
