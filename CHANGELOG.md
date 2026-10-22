@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- `chain verify --require-active` exits 1 when the record's status is RESTRICTED or DELETED. `chain verify --owner <address>` exits 1 when another address owns the record; the comparison ignores case and checksum, and a value that is not a `0x` address with 40 hex digits is a usage error (exit 2). When a check fails, the command prints `Not verified: <hash> is anchored on-chain, but:` and the failed checks. `chain verify` now always prints the record's `Status:` and `Owner:`. Without the new options, the exit codes are unchanged: a RESTRICTED or DELETED record still exits 0. `ChainClient.verify()` is unchanged and still checks registration only (#142)
+
+### Fixed
+- **Behavior change:** with `--chain base` or `--chain base-sepolia` (or `CHAIN_NAME`), a custom RPC that reports a different chain ID is now a `ChainConfigurationError` that names both chain IDs. Every command fails, reads included, before anything is read or signed. The chain ID was taken from the node, so a `base-sepolia` configuration with a mainnet RPC would have signed mainnet transactions. If you run a local node (Hardhat, Anvil) with the default `CHAIN_NAME=base-sepolia`, use `--chain localhost`; the `localhost` preset still takes the chain ID the node reports. If the custom RPC cannot be reached when the client starts, the preset's chain ID is used as before (#142)
+- A fallback RPC is no longer switched to when it reports a different chain ID than the one in use; it is skipped with a warning. `get_block_number` switched to a fallback without checking its chain ID (#142)
+- Transactions take their nonce from the `pending` block (`eth_getTransactionCount(address, "pending")`), so a write sent while an earlier one from the same wallet is not yet mined no longer reuses its nonce (#142)
+
 ## [0.12.0] - 2026-10-22
 
 ### Notes on 0.11.0

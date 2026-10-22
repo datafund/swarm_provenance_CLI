@@ -2210,6 +2210,137 @@ class TestProviderEnhancements:
         assert provider.deploy_block == 39_905_249
 
 
+def _web3_per_url(mock_chain_deps, chain_ids, down=()):
+    """Make Web3(HTTPProvider(url)) return a separate mock node for each URL.
+
+    chain_ids maps URL -> the chain ID that node reports. URLs in ``down``
+    do not connect and fail every call.
+    """
+    nodes = {}
+    for url, chain_id in chain_ids.items():
+        node = MagicMock()
+        node.to_checksum_address = lambda x: x
+        if url in down:
+            node.is_connected.return_value = False
+            type(node.eth).chain_id = PropertyMock(side_effect=ConnectionError("down"))
+            type(node.eth).block_number = PropertyMock(side_effect=ConnectionError("down"))
+        else:
+            node.is_connected.return_value = True
+            node.eth.chain_id = chain_id
+            node.eth.block_number = 100 + chain_id
+        nodes[url] = node
+
+    web3_class = mock_chain_deps["web3_class"]
+    web3_class.HTTPProvider.side_effect = lambda url, **kw: url
+    web3_class.side_effect = lambda url: nodes[url]
+    return nodes
+
+
+class TestChainIdPresetMismatch:
+    """A named preset with an RPC on another chain is an error before anything is read or signed (#142)."""
+
+    @pytest.mark.parametrize("chain,preset_id,node_id", [
+        ("base-sepolia", 84532, 8453),
+        ("base", 8453, 84532),
+    ])
+    def test_custom_rpc_on_another_chain_is_an_error(self, mock_chain_deps, chain, preset_id, node_id):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        mock_chain_deps["web3_instance"].eth.chain_id = node_id
+        with pytest.raises(ChainConfigurationError) as exc_info:
+            ChainProvider(chain=chain, rpc_url="https://custom.rpc.io", contract_address=DUMMY_CONTRACT)
+        message = str(exc_info.value)
+        assert str(preset_id) in message
+        assert str(node_id) in message
+        assert chain in message
+        assert "--chain localhost" in message
+
+    def test_custom_rpc_on_the_preset_chain_is_accepted(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        mock_chain_deps["web3_instance"].eth.chain_id = 84532
+        provider = ChainProvider(chain="base-sepolia", rpc_url="https://custom.rpc.io")
+        assert provider.chain_id == 84532
+
+    def test_localhost_preset_still_auto_detects(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        mock_chain_deps["web3_instance"].eth.chain_id = 1337
+        provider = ChainProvider(chain="localhost", rpc_url="http://127.0.0.1:8546")
+        assert provider.chain_id == 1337
+
+    def test_detection_failure_keeps_the_preset_id(self, mock_chain_deps):
+        """Unchanged: an unreachable custom RPC is reported later by health_check, not at init."""
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        type(mock_chain_deps["web3_instance"].eth).chain_id = PropertyMock(side_effect=ConnectionError("down"))
+        provider = ChainProvider(chain="base-sepolia", rpc_url="https://custom.rpc.io")
+        assert provider.chain_id == 84532
+
+    def test_client_reads_fail_on_mismatch(self, mock_chain_deps):
+        """Reads fail too: the client is never created."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        mock_chain_deps["web3_instance"].eth.chain_id = 8453
+        with pytest.raises(ChainConfigurationError, match="84532"):
+            ChainClient(chain="base-sepolia", rpc_url="https://custom.rpc.io")
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.assert_not_called()
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    def test_get_block_number_does_not_switch_to_a_fallback_on_another_chain(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+        from swarm_provenance_uploader.chain.exceptions import ChainConnectionError
+
+        primary, wrong = "https://primary.rpc.io", "https://wrong-chain.rpc.io"
+        _web3_per_url(mock_chain_deps, {primary: 84532, wrong: 8453}, down=(primary,))
+        provider = ChainProvider(chain="base-sepolia", rpc_url=primary, rpc_fallbacks=[wrong])
+        with pytest.raises(ChainConnectionError):
+            provider.get_block_number()
+        assert provider.rpc_url == primary
+
+    def test_fallback_on_the_preset_chain_is_still_used(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        primary, wrong, good = "https://primary.rpc.io", "https://wrong-chain.rpc.io", "https://good.rpc.io"
+        _web3_per_url(mock_chain_deps, {primary: 84532, wrong: 8453, good: 84532}, down=(primary,))
+        provider = ChainProvider(chain="base-sepolia", rpc_url=primary, rpc_fallbacks=[wrong, good])
+        assert provider.get_block_number() == 100 + 84532
+        assert provider.rpc_url == good
+
+    def test_preset_fallbacks_are_checked_too(self, mock_chain_deps):
+        """No custom RPC, explicit fallbacks: a fallback on another chain is skipped by health_check."""
+        from swarm_provenance_uploader.chain.provider import ChainProvider, CHAIN_PRESETS
+        from swarm_provenance_uploader.chain.exceptions import ChainConnectionError
+
+        primary = CHAIN_PRESETS["base-sepolia"]["rpc_url"]
+        wrong = "https://wrong-chain.rpc.io"
+        _web3_per_url(mock_chain_deps, {primary: 84532, wrong: 8453}, down=(primary,))
+        provider = ChainProvider(chain="base-sepolia", rpc_fallbacks=[wrong])
+        with pytest.raises(ChainConnectionError):
+            provider.health_check()
+        assert provider.rpc_url == primary
+
+
+class TestPendingNonce:
+    """The nonce counts pending transactions, so a second write does not reuse it (#142)."""
+
+    def test_send_transaction_uses_pending_nonce(self, mock_chain_deps):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
+        )
+        mock_chain_deps["web3_instance"].eth.get_transaction_count.return_value = 7
+
+        client = ChainClient(chain="base-sepolia")
+        client.anchor(swarm_hash=DUMMY_HASH)
+
+        mock_chain_deps["web3_instance"].eth.get_transaction_count.assert_called_with(DUMMY_ADDRESS, "pending")
+        tx = mock_chain_deps["account"].sign_transaction.call_args[0][0]
+        assert tx["nonce"] == 7
+
+
 class TestProvenanceChainV2StateReads:
     """Tests for provenance chain traversal using v2 state reads."""
 

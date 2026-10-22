@@ -76,6 +76,11 @@ CHAIN_PRESETS = {
 }
 
 
+# Presets for public networks: a custom or fallback RPC must report the
+# preset's chain ID. "localhost" takes the chain ID the node reports.
+STRICT_CHAIN_ID_PRESETS = ("base-sepolia", "base")
+
+
 def _preset_strings() -> List[str]:
     """Chain names and the string values of CHAIN_PRESETS: public, never redacted."""
     strings = list(CHAIN_PRESETS)
@@ -165,15 +170,29 @@ class ChainProvider:
             )
         )
 
-        # When a custom RPC is provided, auto-detect chain ID from the node
-        # (e.g. local Hardhat uses chain ID 31337, not the preset chain ID)
+        # When a custom RPC is provided, read the chain ID from the node.
+        # The localhost preset takes whatever the node reports (a local node
+        # may use 31337, 1337 or a fork's ID). A named network preset must
+        # match: otherwise a "base-sepolia" config with a mainnet RPC would
+        # sign mainnet transactions.
+        self.chain_id = preset["chain_id"]
         if self._custom_rpc:
             try:
-                self.chain_id = self._web3.eth.chain_id
+                detected = self._web3.eth.chain_id
             except Exception:
-                self.chain_id = preset["chain_id"]
-        else:
-            self.chain_id = preset["chain_id"]
+                # Unreachable now: keep the preset ID, which signatures are
+                # bound to (EIP-155); health_check reports the connection error
+                detected = None
+            if detected is not None:
+                if chain in STRICT_CHAIN_ID_PRESETS and detected != preset["chain_id"]:
+                    raise ChainConfigurationError(
+                        f"Chain ID mismatch: chain '{chain}' has chain ID "
+                        f"{preset['chain_id']}, but the RPC endpoint "
+                        f"{redact_url(self.rpc_url)} reports chain ID {detected}. "
+                        "Use an RPC for that network, or --chain localhost "
+                        "for a local development node."
+                    )
+                self.chain_id = detected
 
     @property
     def web3(self):
@@ -186,8 +205,9 @@ class ChainProvider:
 
         Iterates through remaining URLs in ``_rpc_urls`` (skipping the
         current ``rpc_url`` and any in ``tried``), attempts
-        ``is_connected()``, and switches ``_web3`` and ``rpc_url`` on the
-        first success.
+        ``is_connected()``, and switches ``_web3`` and ``rpc_url`` to the
+        first one that connects and reports the expected chain ID. An
+        endpoint on another chain is skipped.
 
         Args:
             tried: URLs already tried by the caller in this attempt. Every
@@ -215,6 +235,16 @@ class ChainProvider:
                     )
                 )
                 if candidate.is_connected():
+                    # Never switch to an endpoint on another chain
+                    candidate_chain_id = candidate.eth.chain_id
+                    if candidate_chain_id != self.chain_id:
+                        logger.warning(
+                            "RPC fallback: skipped %s, which reports chain ID %s, not %s",
+                            redact_url(url),
+                            candidate_chain_id,
+                            self.chain_id,
+                        )
+                        continue
                     logger.info(
                         "RPC fallback: switched from %s to %s",
                         redact_url(self.rpc_url),

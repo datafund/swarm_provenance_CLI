@@ -276,8 +276,10 @@ swarm-prov-upload chain get <swarm_hash> --json
 swarm-prov-upload chain get <swarm_hash> --follow           # walk transformation chain
 swarm-prov-upload chain get <swarm_hash> --follow --depth 3 # limit traversal depth
 
-# Verify a hash is registered on-chain (exit code 0=yes, 1=no)
+# Verify a hash is registered on-chain (exit code 0=yes, 1=no); prints its status and owner
 swarm-prov-upload chain verify <swarm_hash>
+swarm-prov-upload chain verify <swarm_hash> --require-active   # exit 1 if RESTRICTED or DELETED
+swarm-prov-upload chain verify <swarm_hash> --owner <address>  # exit 1 if another address owns it
 
 # Query or set data status
 swarm-prov-upload chain status <swarm_hash>                 # show current status
@@ -323,7 +325,7 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 | `CHAIN_ENABLED` | Enable blockchain features | `false` |
 | `CHAIN_NAME` | `base-sepolia` (testnet) or `base` (mainnet) | `base-sepolia` |
 | `PROVENANCE_WALLET_KEY` | Wallet private key (keep secret!) | - |
-| `CHAIN_RPC_URL` | Custom RPC URL (optional) | Uses preset |
+| `CHAIN_RPC_URL` | Custom RPC URL (optional). With `base` or `base-sepolia`, it must report the preset chain ID | Uses preset |
 | `CHAIN_CONTRACT` | Custom contract address (optional) | Uses preset |
 | `CHAIN_EXPLORER_URL` | Custom block explorer URL (optional) | Uses preset |
 | `CHAIN_GAS_LIMIT` | Explicit gas limit (optional, skips RPC estimation) | Auto-estimated |

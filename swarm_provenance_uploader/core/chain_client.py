@@ -375,8 +375,9 @@ class ChainClient:
         self._check_contract_code()
 
         try:
-            # Fill in nonce
-            tx["nonce"] = web3.eth.get_transaction_count(self._wallet.address)
+            # Fill in nonce. "pending" counts this wallet's transactions that
+            # are not mined yet, so a second write does not reuse a nonce.
+            tx["nonce"] = web3.eth.get_transaction_count(self._wallet.address, "pending")
             tx["chainId"] = self._provider.chain_id
 
             # Set gas limit: explicit value or estimate with multiplier
@@ -1208,6 +1209,10 @@ class ChainClient:
     ) -> bool:
         """
         Verify that a Swarm hash is registered on-chain.
+
+        This checks registration only: a RESTRICTED or DELETED record, or
+        one owned by any address, still returns True. Use get() to check
+        the record's status and owner.
 
         Args:
             swarm_hash: Swarm reference hash.

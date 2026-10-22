@@ -2357,32 +2357,123 @@ class TestChainGetCommand:
         assert "filtered PII" in result.stdout
 
 
+CHAIN_OWNER = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
+
+
+def _verify_record(status="ACTIVE", owner=CHAIN_OWNER):
+    """The record chain verify reads, as ChainClient.get returns it."""
+    from swarm_provenance_uploader.models import ChainProvenanceRecord, DataStatusEnum
+
+    return ChainProvenanceRecord(
+        data_hash=DUMMY_SWARM_REF,
+        owner=owner,
+        timestamp=1700000000,
+        data_type="swarm-provenance",
+        status=DataStatusEnum[status],
+        accessors=[],
+        transformations=[],
+    )
+
+
 class TestChainVerifyCommand:
     """Tests for chain verify command."""
 
+    def _invoke(self, mocker, record, *flags):
+        mock_client = mocker.MagicMock()
+        if isinstance(record, Exception):
+            mock_client.get.side_effect = record
+        else:
+            mock_client.get.return_value = record
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+        return runner.invoke(app, ["chain", "verify", DUMMY_SWARM_REF, *flags])
+
     def test_verify_registered(self, mocker):
         """Tests chain verify when hash is registered (exit 0)."""
-        mock_client = mocker.MagicMock()
-        mock_client.verify.return_value = True
-
-        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
-
-        result = runner.invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
+        result = self._invoke(mocker, _verify_record())
 
         assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
         assert "Verified" in result.stdout or "anchored" in result.stdout
 
     def test_verify_not_registered(self, mocker):
         """Tests chain verify when hash is not registered (exit 1)."""
-        mock_client = mocker.MagicMock()
-        mock_client.verify.return_value = False
-
-        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
-
-        result = runner.invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
+        result = self._invoke(
+            mocker, exceptions.DataNotRegisteredError("not registered", data_hash=DUMMY_SWARM_REF)
+        )
 
         assert result.exit_code == 1
         assert "Not found" in result.stdout or "not registered" in result.stdout.lower()
+
+    @pytest.mark.parametrize("status", ["ACTIVE", "RESTRICTED", "DELETED"])
+    def test_output_shows_status_and_owner(self, mocker, status):
+        """Without the new flags the exit code is unchanged (0), but the status and owner are shown (#142)."""
+        result = self._invoke(mocker, _verify_record(status))
+
+        assert result.exit_code == 0, result.output
+        assert f"Status: {status}" in result.stdout
+        assert f"Owner:  {CHAIN_OWNER}" in result.stdout
+
+    @pytest.mark.parametrize("status", ["RESTRICTED", "DELETED"])
+    def test_require_active_fails_for_inactive_record(self, mocker, status):
+        result = self._invoke(mocker, _verify_record(status), "--require-active")
+
+        assert result.exit_code == 1, result.output
+        assert "Verified" not in result.stdout
+        assert f"status is {status}" in result.output
+        assert "ACTIVE" in result.output
+
+    def test_require_active_passes_for_active_record(self, mocker):
+        result = self._invoke(mocker, _verify_record("ACTIVE"), "--require-active")
+
+        assert result.exit_code == 0, result.output
+        assert "Verified" in result.stdout
+
+    @pytest.mark.parametrize("given", [
+        CHAIN_OWNER,
+        CHAIN_OWNER.lower(),
+        "0x" + CHAIN_OWNER[2:].upper(),
+    ])
+    def test_owner_match_is_case_insensitive(self, mocker, given):
+        result = self._invoke(mocker, _verify_record(), "--owner", given)
+
+        assert result.exit_code == 0, result.output
+        assert "Verified" in result.stdout
+
+    def test_owner_mismatch_fails(self, mocker):
+        other = "0x" + "1" * 40
+        result = self._invoke(mocker, _verify_record(), "--owner", other)
+
+        assert result.exit_code == 1, result.output
+        assert "Verified" not in result.stdout
+        assert CHAIN_OWNER in result.output
+        assert other in result.output
+
+    def test_both_checks_reported(self, mocker):
+        other = "0x" + "1" * 40
+        result = self._invoke(mocker, _verify_record("DELETED"), "--require-active", "--owner", other)
+
+        assert result.exit_code == 1, result.output
+        assert "status is DELETED" in result.output
+        assert other in result.output
+
+    @pytest.mark.parametrize("bad", ["0x1234", "742d35Cc6634C0532925a3b844Bc9e7595f8fE00", "0x" + "g" * 40])
+    def test_malformed_owner_is_a_usage_error(self, mocker, bad):
+        mock_client = mocker.MagicMock()
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "verify", DUMMY_SWARM_REF, "--owner", bad])
+
+        assert result.exit_code == 2, result.output
+        mock_client.get.assert_not_called()
+
+    def test_not_registered_with_flags_is_still_not_found(self, mocker):
+        result = self._invoke(
+            mocker,
+            exceptions.DataNotRegisteredError("not registered", data_hash=DUMMY_SWARM_REF),
+            "--require-active", "--owner", CHAIN_OWNER,
+        )
+
+        assert result.exit_code == 1
+        assert "Not found" in result.stdout
 
 
 class TestChainBalanceCommand:
@@ -6313,7 +6404,7 @@ class TestChainErrorRedaction:
     def test_unexpected_error_is_not_a_traceback(self, mocker):
         """An error that is not an RPC failure exits 1 with its redacted text."""
         mock_client = mocker.MagicMock()
-        mock_client.verify.side_effect = ValueError(f"bad answer from {RPC_URLS_WITH_KEY[1]}")
+        mock_client.get.side_effect = ValueError(f"bad answer from {RPC_URLS_WITH_KEY[1]}")
         mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
 
         result = runner.invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
@@ -6527,7 +6618,7 @@ class TestUnexpectedChainErrorVerbose:
             raise KeyError(f"no field in answer from {RPC_URLS_WITH_KEY[0]}")
 
         mock_client = mocker.MagicMock()
-        mock_client.verify.side_effect = fail
+        mock_client.get.side_effect = fail
         mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
         return _Runner(mix_stderr=False).invoke(app, args)
 
@@ -6584,7 +6675,7 @@ class TestRpcRejectionIsNotConnectionError:
 
     def _invoke(self, mocker, error):
         mock_client = mocker.MagicMock()
-        mock_client.verify.side_effect = error
+        mock_client.get.side_effect = error
         mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
         return runner.invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
 

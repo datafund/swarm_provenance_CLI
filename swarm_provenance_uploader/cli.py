@@ -2463,21 +2463,45 @@ def chain_balance(
         typer.echo(f"Bridge ETH: {bridge}")
 
 
+def _validate_owner_address(value: Optional[str]) -> Optional[str]:
+    """Typer callback for --owner: a 0x-prefixed 20-byte hex address, any case."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", value):
+        raise typer.BadParameter("must be a 0x-prefixed 40-hex-digit address.")
+    return value
+
+
 @_chain_command("verify")
 def chain_verify(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to verify on-chain.")],
+    require_active: Annotated[bool, typer.Option(
+        "--require-active",
+        help="Also require the record status to be ACTIVE (exit 1 for RESTRICTED or DELETED).",
+    )] = False,
+    owner: Annotated[Optional[str], typer.Option(
+        "--owner",
+        help="Also require this owner address (case-insensitive; exit 1 if it differs).",
+        callback=_validate_owner_address,
+    )] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
 ):
     """
     Verify that a Swarm hash is anchored on-chain.
 
-    Exit code 0 if anchored, 1 if not found (useful for scripting).
+    Prints the record's status and owner. Exit code 0 if anchored, 1 if not
+    found (useful for scripting). Without --require-active and --owner, a
+    RESTRICTED or DELETED record, or one with any owner, still exits 0.
     """
     try:
         client = _get_chain_client(verbose=verbose)
-        is_registered = client.verify(swarm_hash, verbose=verbose)
+        record = client.get(swarm_hash, verbose=verbose)
     except typer.Exit:
         raise
+    except exceptions.DataNotRegisteredError:
+        typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
@@ -2487,10 +2511,22 @@ def chain_verify(
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
-    if is_registered:
-        typer.secho(f"Verified: {swarm_hash} is anchored on-chain.", fg=typer.colors.GREEN)
+    status = record.status.name
+    failures = []
+    if require_active and status != "ACTIVE":
+        failures.append(f"status is {status}, not ACTIVE (--require-active)")
+    if owner is not None and record.owner.lower() != owner.lower():
+        failures.append(f"owner is {record.owner}, not {owner} (--owner)")
+
+    if failures:
+        typer.secho(f"Not verified: {swarm_hash} is anchored on-chain, but:", fg=typer.colors.YELLOW)
+        for failure in failures:
+            typer.secho(f"  - {failure}", fg=typer.colors.YELLOW)
     else:
-        typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
+        typer.secho(f"Verified: {swarm_hash} is anchored on-chain.", fg=typer.colors.GREEN)
+    typer.echo(f"  Status: {status}")
+    typer.echo(f"  Owner:  {record.owner}")
+    if failures:
         raise typer.Exit(code=1)
 
 
