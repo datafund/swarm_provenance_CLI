@@ -8,12 +8,14 @@ gas estimation, signing, broadcasting, and receipt parsing.
 Requires optional dependencies (the `blockchain` extra): web3 and eth-account.
 """
 
+import ast
 import json
 import logging
 from typing import List, Optional
 
 from ..chain.contract import DataStatus
 from ..chain.exceptions import (
+    ChainError,
     ChainConfigurationError,
     ChainConnectionError,
     ChainTransactionError,
@@ -65,6 +67,52 @@ def _is_rpc_failure(error: Exception) -> bool:
     )
     return bool(rpc_errors) and isinstance(error, rpc_errors)
 
+
+
+def _is_contract_revert(error: Exception) -> bool:
+    """True if web3 reports that the contract reverted (ContractLogicError).
+
+    Matched by class name, so it also covers ContractCustomError and
+    ContractPanicError without importing web3.
+    """
+    return any(cls.__name__ == "ContractLogicError" for cls in type(error).__mro__)
+
+
+def _is_rpc_rejection(error: Exception) -> bool:
+    """True if the node answered with a JSON-RPC error (web3 Web3RPCError).
+
+    The connection worked; the node refused the request, for example
+    "nonce too low". Matched by class name, like _is_contract_revert.
+    RequestTimedOut subclasses Web3RPCError but is a timeout, not a refusal.
+    """
+    names = {cls.__name__ for cls in type(error).__mro__}
+    return "Web3RPCError" in names and "RequestTimedOut" not in names
+
+
+def _error_reason(error: Exception) -> str:
+    """The readable reason of a web3 error.
+
+    str() of a ContractLogicError is the (message, data) tuple, and a
+    Web3RPCError's message is often the repr of the JSON-RPC error object,
+    such as "{'code': -32000, 'message': 'nonce too low'}". Return only the
+    message in both cases. Never empty: falls back to the class name.
+    """
+    rpc_error = (getattr(error, "rpc_response", None) or {})
+    rpc_error = rpc_error.get("error") if isinstance(rpc_error, dict) else None
+    if isinstance(rpc_error, dict) and rpc_error.get("message"):
+        return str(rpc_error["message"])
+    message = getattr(error, "message", None)
+    if isinstance(message, str) and message.startswith("{") and len(message) <= 4096:
+        try:
+            message = ast.literal_eval(message)
+        except Exception:  # SyntaxError, ValueError, TypeError, MemoryError, RecursionError
+            pass
+    if isinstance(message, dict) and message.get("message"):
+        return str(message["message"])
+    if isinstance(message, str) and message:
+        return message
+    # An exception with no arguments has an empty str(): name its class
+    return str(error) or type(error).__name__
 
 class ChainClient:
     """High-level client for DataProvenance smart contract operations.
@@ -217,6 +265,58 @@ class ChainClient:
             )
         self._contract_code_checked = True
 
+    def _build_tx(self, build, *args, **kwargs) -> dict:
+        """
+        Call a build_*_tx method and map its errors to chain errors.
+
+        web3's build_transaction runs eth_estimateGas, so a contract revert
+        or an RPC failure can happen here, before _send_transaction. Nothing
+        has been sent at this point, so no error carries a tx_hash.
+
+        Raises:
+            InsufficientFundsError: If the RPC reports insufficient funds.
+            ChainTransactionError: If the contract reverts, the RPC answers
+                with a JSON-RPC error, or building fails for another reason.
+            ChainConnectionError: If the RPC cannot be reached or its answer
+                is not JSON-RPC.
+        """
+        try:
+            return build(*args, **kwargs)
+        except ChainError:
+            raise
+        except Exception as e:
+            if _is_contract_revert(e):
+                # str() of web3's ContractLogicError is the (message, data)
+                # tuple; _error_reason returns the readable revert reason
+                reason = _error_reason(e)
+                raise ChainTransactionError(f"Transaction reverted: {reason}") from e
+            reason = _error_reason(e)
+            if "insufficient funds" in reason.lower():
+                try:
+                    balance_wei = self._wallet.get_balance(self._provider.web3)
+                except Exception:
+                    balance_wei = None
+                raise InsufficientFundsError(
+                    f"Insufficient funds for gas: {reason}",
+                    wallet_address=self._wallet.address,
+                    balance_wei=balance_wei,
+                    estimated_cost_wei=0,
+                    chain_name=self._provider.chain,
+                ) from e
+            if _is_rpc_rejection(e):
+                # Checked before _is_rpc_failure, which also counts a JSON-RPC
+                # error answer as an RPC failure
+                reason = _error_reason(e)
+                raise ChainTransactionError(f"The RPC rejected the transaction: {reason}") from e
+            if _is_rpc_failure(e):
+                # Transport only: connection, timeout, or an answer that is not JSON-RPC
+                raise ChainConnectionError(
+                    f"The RPC endpoint failed while building the transaction: {_error_reason(e)}",
+                    rpc_url=self._provider.rpc_url,
+                ) from e
+            # No "Transaction failed:" prefix: the CLI adds its own
+            raise ChainTransactionError(f"Could not build the transaction: {_error_reason(e)}") from e
+
     def _send_transaction(
         self,
         tx: dict,
@@ -331,12 +431,15 @@ class ChainClient:
         except (ChainTransactionError, InsufficientFundsError):
             raise
         except Exception as e:
-            # Detect "insufficient funds" in RPC error messages and convert
-            if "insufficient funds" in str(e).lower():
+            reason = _error_reason(e)
+            # Detect "insufficient funds" in RPC error messages and convert.
+            # A contract revert is checked first, as in _build_tx: its reason
+            # may contain the words without being a funding problem.
+            if not _is_contract_revert(e) and "insufficient funds" in reason.lower():
                 try:
                     balance_wei = self._wallet.get_balance(self._provider.web3)
                     raise InsufficientFundsError(
-                        f"Insufficient funds for gas: {e}",
+                        f"Insufficient funds for gas: {reason}",
                         wallet_address=self._wallet.address,
                         balance_wei=balance_wei,
                         estimated_cost_wei=0,
@@ -349,10 +452,8 @@ class ChainClient:
             tx_hash_str = None
             if "tx_hash" in dir():
                 tx_hash_str = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
-            raise ChainTransactionError(
-                f"Transaction failed: {e}",
-                tx_hash=tx_hash_str,
-            ) from e
+            # No "Transaction failed:" prefix: the CLI adds its own
+            raise ChainTransactionError(reason, tx_hash=tx_hash_str) from e
 
     def _receipt_to_explorer_url(self, receipt: dict) -> Optional[str]:
         """Get explorer URL from a transaction receipt."""
@@ -402,13 +503,16 @@ class ChainClient:
         except DataNotRegisteredError:
             pass  # Not registered — proceed with anchoring
 
-        tx = self._contract.build_register_data_tx(
-            data_hash=swarm_hash,
-            data_type=data_type,
-            sender=self._wallet.address,
-            storage_ref=storage_ref,
-        )
         try:
+            # Inside the try: an "already registered" revert usually shows up
+            # in gas estimation, which building the transaction runs
+            tx = self._build_tx(
+                self._contract.build_register_data_tx,
+                data_hash=swarm_hash,
+                data_type=data_type,
+                sender=self._wallet.address,
+                storage_ref=storage_ref,
+            )
             receipt = self._send_transaction(tx, "DataRegistered", verbose=verbose)
         except ChainTransactionError as e:
             # Detect "already registered" revert that the pre-check missed
@@ -480,7 +584,8 @@ class ChainClient:
         except DataNotRegisteredError:
             pass  # Not registered — proceed with anchoring
 
-        tx = self._contract.build_register_data_for_tx(
+        tx = self._build_tx(
+            self._contract.build_register_data_for_tx,
             data_hash=swarm_hash,
             data_type=data_type,
             actual_owner=owner,
@@ -521,7 +626,8 @@ class ChainClient:
         """
         logger.debug("Batch anchor: count=%d", len(swarm_hashes))
 
-        tx = self._contract.build_batch_register_data_tx(
+        tx = self._build_tx(
+            self._contract.build_batch_register_data_tx,
             data_hashes=swarm_hashes,
             data_types=data_types,
             sender=self._wallet.address,
@@ -562,7 +668,8 @@ class ChainClient:
         """
         logger.debug("Set storage ref: hash=%s ref=%s", data_hash, storage_ref)
 
-        tx = self._contract.build_set_storage_ref_tx(
+        tx = self._build_tx(
+            self._contract.build_set_storage_ref_tx,
             data_hash=data_hash,
             storage_ref=storage_ref,
             sender=self._wallet.address,
@@ -682,7 +789,8 @@ class ChainClient:
                 except Exception as e:
                     logger.warning("Duplicate check failed, proceeding: %s", e)
 
-        tx = self._contract.build_record_transformation_tx(
+        tx = self._build_tx(
+            self._contract.build_record_transformation_tx,
             original_hash=original_hash,
             new_hash=new_hash,
             description=description,
@@ -717,7 +825,8 @@ class ChainClient:
         """
         logger.debug("Record access: hash=%s", swarm_hash)
 
-        tx = self._contract.build_record_access_tx(
+        tx = self._build_tx(
+            self._contract.build_record_access_tx,
             data_hash=swarm_hash,
             sender=self._wallet.address,
         )
@@ -749,7 +858,8 @@ class ChainClient:
         """
         logger.debug("Batch access: count=%d", len(swarm_hashes))
 
-        tx = self._contract.build_batch_record_access_tx(
+        tx = self._build_tx(
+            self._contract.build_batch_record_access_tx,
             data_hashes=swarm_hashes,
             sender=self._wallet.address,
         )
@@ -787,7 +897,8 @@ class ChainClient:
             "Set status: hash=%s status=%s", swarm_hash, DataStatus(status).name
         )
 
-        tx = self._contract.build_set_data_status_tx(
+        tx = self._build_tx(
+            self._contract.build_set_data_status_tx,
             data_hash=swarm_hash,
             status=status,
             sender=self._wallet.address,
@@ -823,7 +934,8 @@ class ChainClient:
         """
         logger.debug("Batch set status: count=%d", len(swarm_hashes))
 
-        tx = self._contract.build_batch_set_data_status_tx(
+        tx = self._build_tx(
+            self._contract.build_batch_set_data_status_tx,
             data_hashes=swarm_hashes,
             statuses=statuses,
             sender=self._wallet.address,
@@ -861,7 +973,8 @@ class ChainClient:
         """
         logger.debug("Transfer ownership: hash=%s new_owner=%s", swarm_hash, new_owner)
 
-        tx = self._contract.build_transfer_ownership_tx(
+        tx = self._build_tx(
+            self._contract.build_transfer_ownership_tx,
             data_hash=swarm_hash,
             new_owner=new_owner,
             sender=self._wallet.address,
@@ -898,7 +1011,8 @@ class ChainClient:
         action = "Authorize" if authorized else "Revoke"
         logger.debug("%s delegate: %s", action, delegate)
 
-        tx = self._contract.build_set_delegate_tx(
+        tx = self._build_tx(
+            self._contract.build_set_delegate_tx,
             delegate=delegate,
             authorized=authorized,
             sender=self._wallet.address,
@@ -946,7 +1060,8 @@ class ChainClient:
             description,
         )
 
-        tx = self._contract.build_record_merge_transformation_tx(
+        tx = self._build_tx(
+            self._contract.build_record_merge_transformation_tx,
             source_hashes=source_hashes,
             new_hash=new_hash,
             description=description,
