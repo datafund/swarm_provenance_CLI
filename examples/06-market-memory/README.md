@@ -1,15 +1,15 @@
-# Example 06: Market Memory
+# Example 06: Market memory
 
 Demonstrates market prediction memory units with canonical content hashing on Swarm.
 
-## What This Demonstrates
+## What this demonstrates
 
 - Canonical JSON hashing for deterministic content fingerprints
 - Uploading predictions with `--std "MARKET-MEMORY-V1"`
 - Linking observations back to predictions via Swarm references
 - Verifying content integrity through canonical hash recomputation
 
-## Use Case
+## Use case
 
 Trading agents produce predictions and later record observations (outcomes). Each memory unit contains a canonical content hash computed from its fields, ensuring any tampering is detectable. Observations link to their predictions via Swarm references, creating an auditable prediction→outcome chain.
 
@@ -26,7 +26,7 @@ The `content_hash` field is excluded from the hash computation to avoid circular
 1. Install the CLI: `pip install -e .`
 2. Gateway access (default, no setup needed)
 
-## Quick Start
+## Quick start
 
 ### Shell
 
@@ -41,7 +41,7 @@ chmod +x demo.sh
 python run_demo.py
 ```
 
-## Step-by-Step Walkthrough
+## Step-by-step walkthrough
 
 ### 1. Verify canonical hash
 
@@ -73,7 +73,7 @@ swarm-prov-upload download <prediction_ref> --output-dir ./downloads
 python create_memory_unit.py verify downloads/*.data
 ```
 
-## Memory Unit Helper
+## Memory unit helper
 
 `create_memory_unit.py` generates and verifies memory units:
 
@@ -89,7 +89,7 @@ python create_memory_unit.py observation --agent agent-alpha --market BTC/USD \
 python create_memory_unit.py verify prediction_001.json
 ```
 
-## Sample Data
+## Sample data
 
 ### prediction_001.json
 
@@ -105,7 +105,7 @@ An observation recording the outcome:
 - Outcome: correct, actual direction: up, 2.3% return
 - Pre-computed canonical content hash (with placeholder prediction ref)
 
-## Canonical Hashing
+## Canonical hashing
 
 The content hash is computed as:
 

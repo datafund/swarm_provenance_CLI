@@ -1,15 +1,15 @@
-# Example 08: CI/CD Integration
+# Example 08: CI/CD integration
 
 Demonstrates archiving build artifacts to Swarm from CI/CD pipelines.
 
-## What This Demonstrates
+## What this demonstrates
 
 - Uploading build artifacts with `--std "CI-ARTIFACT-V1"`
 - Saving archive receipts (JSON manifests with references, hashes, timestamps)
 - Downloading and verifying archived artifacts
 - Sample GitHub Actions and GitLab CI configurations
 
-## Use Case
+## Use case
 
 CI/CD pipelines produce build artifacts that need immutable archival for:
 
@@ -25,7 +25,7 @@ By archiving artifacts to Swarm with a provenance standard, each build gets a pe
 1. Install the CLI: `pip install -e .`
 2. Gateway access (default, no setup needed)
 
-## Quick Start
+## Quick start
 
 ### Shell
 
@@ -40,7 +40,7 @@ chmod +x demo.sh
 python run_demo.py
 ```
 
-## Step-by-Step Walkthrough
+## Step-by-step walkthrough
 
 ### 1. Upload build artifacts
 
@@ -61,7 +61,7 @@ swarm-prov-upload download <swarm_hash> --output-dir ./downloads
 
 Compare SHA-256 hashes to verify the artifact is intact.
 
-## CI/CD Configuration Templates
+## CI/CD configuration templates
 
 ### GitHub Actions
 
@@ -73,7 +73,7 @@ See `gitlab-ci.yml` for a sample pipeline configuration. Copy the relevant secti
 
 Both templates use `swarm-prov-upload` with `--std "CI-ARTIFACT-V1"` and `--usePool` for fast uploads.
 
-## Archive Artifacts Helper
+## Archive artifacts helper
 
 The `archive_artifacts.py` script automates artifact archival:
 
@@ -82,7 +82,7 @@ python archive_artifacts.py --directory ./dist
 python archive_artifacts.py --directory ./dist --std "CI-ARTIFACT-V1"
 ```
 
-## Sample Artifacts
+## Sample artifacts
 
 | File | Description |
 |------|-------------|

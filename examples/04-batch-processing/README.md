@@ -1,8 +1,8 @@
-# Example 04: Batch Processing
+# Example 04: Batch processing
 
 Demonstrates uploading multiple files efficiently by reusing a single postage stamp.
 
-## What This Demonstrates
+## What this demonstrates
 
 - Uploading multiple files with stamp reuse (`--stamp-id`)
 - Using `--size medium` for appropriate stamp sizing
@@ -10,7 +10,7 @@ Demonstrates uploading multiple files efficiently by reusing a single postage st
 - Building a manifest (JSON) mapping filenames to Swarm references
 - Downloading and verifying one file from the batch
 
-## Use Case
+## Use case
 
 When archiving multiple log files, dataset partitions, or document collections, purchasing a new stamp for each file is wasteful and slow. By capturing the stamp ID from the first upload and reusing it for subsequent uploads, you skip the stamp purchase step entirely — reducing upload time from ~60 seconds to ~5 seconds per file.
 
@@ -19,7 +19,7 @@ When archiving multiple log files, dataset partitions, or document collections, 
 1. Install the CLI: `pip install -e .`
 2. Gateway access (default, no setup needed)
 
-## Quick Start
+## Quick start
 
 ### Shell
 
@@ -34,7 +34,7 @@ chmod +x demo.sh
 python run_demo.py
 ```
 
-## Step-by-Step Walkthrough
+## Step-by-step walkthrough
 
 ### 1. Upload first file with verbose output
 
@@ -67,7 +67,7 @@ swarm-prov-upload download <swarm_hash> --output-dir ./downloads
 
 Compare SHA-256 hashes to verify integrity.
 
-## Batch Upload Helper
+## Batch upload helper
 
 The `batch_upload.py` script automates the full batch workflow:
 
@@ -78,7 +78,7 @@ python batch_upload.py --directory ./sample_files --std "PROV-STD-V1"
 
 It handles stamp capture, reuse, and manifest generation automatically.
 
-## Sample Files
+## Sample files
 
 | File | Description |
 |------|-------------|
