@@ -1406,6 +1406,15 @@ def upload_collection(
 
 # --- Stamps Subcommands ---
 
+def _format_utilization(percent: Optional[float]) -> str:
+    """The gateway's `utilizationPercent` for display (#143).
+
+    Not `utilization`: that is the raw bucket fill level, so a depth-17
+    batch at 50 % has utilization 1.
+    """
+    return "unknown" if percent is None else f"{round(percent, 1):g}%"
+
+
 def _or_unknown(value) -> str:
     """A gateway value for display; the gateway sends null when it cannot tell (#143)."""
     return "unknown" if value is None else str(value)
@@ -1479,7 +1488,7 @@ def stamps_list(
             # Pad before styling: colour codes would count towards the width
             usable_str = _format_usable(stamp.usable, 8)
             ttl_str = _format_ttl(stamp.batchTTL)
-            util_str = "unknown" if stamp.utilization is None else f"{stamp.utilization}%"
+            util_str = _format_utilization(stamp.utilizationPercent)
             line = f"{stamp_id_str:<{id_width}} {usable_str} {ttl_str:<12} {stamp.depth:<6} {util_str:<12}"
             if full:
                 line += f" {_sanitize_label(stamp.label)}"
@@ -1531,7 +1540,7 @@ def stamps_info(
             typer.echo(f"  TTL:         {_format_ttl(stamp.batchTTL)}")
             typer.echo(f"  Depth:       {stamp.depth}")
             typer.echo(f"  Amount:      {stamp.amount}")
-            typer.echo(f"  Utilization: {'unknown' if stamp.utilization is None else f'{stamp.utilization}%'}")
+            typer.echo(f"  Utilization: {_format_utilization(stamp.utilizationPercent)}")
             if stamp.label:
                 typer.echo(f"  Label:       {_sanitize_label(stamp.label)}")
         else:

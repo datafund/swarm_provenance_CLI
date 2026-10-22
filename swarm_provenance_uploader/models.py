@@ -20,7 +20,8 @@ class ProvenanceMetadata(BaseModel):
 class StampDetails(BaseModel):
     """Details of a postage stamp batch."""
     batchID: str = Field(description="The batch ID (stamp ID)")
-    utilization: Optional[int] = Field(default=None, description="Utilization percentage (may be null)")
+    utilization: Optional[int] = Field(default=None, description="Raw bucket fill level (not a percentage; may be null)")
+    utilizationPercent: Optional[float] = Field(default=None, description="Utilization as a percentage (0-100), from the gateway; null when unknown")
     usable: Optional[bool] = Field(default=None, description="Whether the stamp is usable for uploads (null when the gateway cannot tell)")
     label: Optional[str] = Field(default=None, description="Optional label for the stamp")
     depth: int = Field(description="Stamp depth")

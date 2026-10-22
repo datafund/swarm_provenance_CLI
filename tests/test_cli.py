@@ -6793,3 +6793,56 @@ class TestX402NetworkCaip2:
         result = runner.invoke(app, ["--x402-network", "eip155:1", "x402", "status"])
         assert result.exit_code == 1
         assert "Invalid x402 network" in result.stdout
+
+
+class TestStampUtilizationPercent:
+    """The percentage is `utilizationPercent`; `utilization` is the raw bucket fill level (#143)."""
+
+    @staticmethod
+    def _production_stamp(**update):
+        # A production depth-17 batch: utilization 1 is 50 % of 2^(17-16) = 2 bucket slots.
+        values = dict(batchID=DUMMY_STAMP, usable=True, depth=17, amount="1", bucketDepth=16,
+                      batchTTL=86400, utilization=1, utilizationPercent=50.0, local=True)
+        values.update(update)
+        return StampDetails(**values)
+
+    def _run(self, mocker, stamp, args):
+        mock_client = mocker.MagicMock()
+        mock_client.list_stamps.return_value = StampListResponse(stamps=[stamp], total_count=1)
+        mock_client.get_stamp.return_value = stamp
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        result = runner.invoke(app, args)
+        assert result.exit_code == 0, result.stdout
+        return result.stdout
+
+    def test_stamps_list_shows_percent_not_raw_level(self, mocker):
+        out = self._run(mocker, self._production_stamp(), ["stamps", "list"])
+        assert "50%" in out
+        assert " 1%" not in out
+
+    def test_stamps_info_shows_percent_not_raw_level(self, mocker):
+        out = self._run(mocker, self._production_stamp(), ["stamps", "info", DUMMY_STAMP])
+        assert re.search(r"Utilization:\s+50%", out)
+        assert not re.search(r"Utilization:\s+1%", out)
+
+    def test_fractional_percent_is_kept(self, mocker):
+        out = self._run(mocker, self._production_stamp(utilizationPercent=12.5), ["stamps", "info", DUMMY_STAMP])
+        assert re.search(r"Utilization:\s+12\.5%", out)
+
+    @pytest.mark.parametrize("args", [["stamps", "list"], ["stamps", "info", DUMMY_STAMP]])
+    def test_missing_percent_is_unknown_even_with_raw_level(self, mocker, args):
+        out = self._run(mocker, self._production_stamp(utilizationPercent=None), args)
+        assert "unknown" in out
+        assert "1%" not in out
+
+    def test_gateway_stamp_parses_utilization_percent(self, requests_mock):
+        from swarm_provenance_uploader.core.gateway_client import GatewayClient
+
+        gw = "https://test.gateway.io"
+        requests_mock.get(f"{gw}/api/v1/stamps/{DUMMY_STAMP}", json={
+            "batchID": DUMMY_STAMP, "amount": "1", "depth": 17, "bucketDepth": 16, "batchTTL": 86400,
+            "utilization": 1, "utilizationPercent": 50.0, "utilizationStatus": "ok",
+            "usable": True, "expectedExpiration": "2026-10-30-10-30", "local": True})
+        stamp = GatewayClient(base_url=gw).get_stamp(DUMMY_STAMP)
+        assert stamp.utilization == 1
+        assert stamp.utilizationPercent == 50.0
