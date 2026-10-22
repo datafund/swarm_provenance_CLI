@@ -341,6 +341,21 @@ class TestCodeCheckRejection:
         assert not isinstance(exc_info.value, ChainConnectionError)
         assert str(exc_info.value) == "The RPC rejected the contract code check: method not allowed"
 
+    def test_web3_rpc_error_dict_repr_without_response(self):
+        """Without rpc_response, a dict-repr text gives only the node's message, redacted."""
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        client = self._client()
+        client._provider.web3.eth.get_code.side_effect = web3_exceptions.Web3RPCError(
+            f"{{'code': -32601, 'message': 'method not allowed at {PATH_KEY_URL}'}}"
+        )
+        with pytest.raises(ChainConfigurationError) as exc_info:
+            client._check_contract_code()
+        assert not isinstance(exc_info.value, ChainConnectionError)
+        message = str(exc_info.value)
+        assert message.startswith("The RPC rejected the contract code check: method not allowed at ")
+        assert "'code'" not in message
+        assert KEY not in message
+
     def test_request_timed_out_stays_connection_error(self):
         web3_exceptions = pytest.importorskip("web3.exceptions")
         client = self._client()

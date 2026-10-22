@@ -6535,6 +6535,22 @@ class TestRpcRejectionIsNotConnectionError:
         assert "ERROR: The RPC rejected the request: rejected by https://base-sepolia.g.alchemy.com/" in result.output
         assert RPC_KEY not in result.output
 
+    def test_web3_rpc_error_dict_repr_without_response(self, mocker):
+        """Without rpc_response, a dict-repr text gives only the node's message, redacted."""
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        error = web3_exceptions.Web3RPCError(
+            f"{{'code': -32000, 'message': 'rejected by {RPC_URLS_WITH_KEY[0]}'}}"
+        )
+        result = self._invoke(mocker, error)
+        assert result.exit_code == 1
+        assert (
+            "ERROR: The RPC rejected the request: rejected by https://base-sepolia.g.alchemy.com/"
+            in result.output
+        )
+        assert "'code'" not in result.output
+        assert "-32000" not in result.output
+        assert RPC_KEY not in result.output
+
     def test_request_timed_out_is_connection_error(self, mocker):
         web3_exceptions = pytest.importorskip("web3.exceptions")
         result = self._invoke(mocker, web3_exceptions.RequestTimedOut("timed out"))

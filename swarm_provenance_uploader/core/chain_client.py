@@ -121,24 +121,14 @@ def _rpc_rejection_message(error: Exception) -> Optional[str]:
 
     A Web3RPCError means the node answered and refused the request (for
     example "nonce too low"), so it is not a connection failure. Its
-    RequestTimedOut subclass is: the node did not answer in time.
+    RequestTimedOut subclass is: the node did not answer in time. The
+    message is _error_reason's, so a Web3RPCError whose text is the repr of
+    the JSON-RPC error object gives only the node's message. Callers redact
+    it (#169).
     """
-    try:
-        from web3 import exceptions as web3_exceptions
-    except ImportError:
+    if not _is_rpc_rejection(error):
         return None
-    rpc_error = getattr(web3_exceptions, "Web3RPCError", None)
-    timed_out = getattr(web3_exceptions, "RequestTimedOut", None)
-    if not isinstance(rpc_error, type) or not isinstance(error, rpc_error):
-        return None
-    if isinstance(timed_out, type) and isinstance(error, timed_out):
-        return None
-    response = getattr(error, "rpc_response", None)
-    if isinstance(response, dict):
-        details = response.get("error")
-        if isinstance(details, dict) and details.get("message"):
-            return str(details["message"])
-    return str(error)
+    return _error_reason(error)
 
 
 class ChainClient:
