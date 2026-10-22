@@ -222,6 +222,28 @@ class TestRedactUrlsSpeed:
         assert elapsed < 1.0, f"took {elapsed:.2f} s"
 
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "a." * 100_000,
+            "Could not decode '<html><body>" + "a-" * 50_000 + "</body></html>'",
+        ],
+        ids=["dotted-run", "hyphenated-html-body"],
+    )
+    def test_long_run_of_scheme_characters(self, text):
+        """A long run of letters joined by dots or hyphens is scanned in linear time.
+
+        An unbounded scheme pattern took about 58 s on "a." * 100000.
+        """
+        import time
+
+        start = time.perf_counter()
+        out = redact_urls(text + f" {PATH_KEY_URL}")
+        elapsed = time.perf_counter() - start
+        assert out.startswith(text)
+        assert KEY not in out
+        assert elapsed < 1.0, f"took {elapsed:.2f} s"
+
 class TestRedactUrlNonString:
     def test_non_string_value_is_converted(self):
         """A non-string rpc_url (for example a mock provider attribute) does not raise."""

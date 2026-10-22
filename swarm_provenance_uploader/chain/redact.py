@@ -25,8 +25,10 @@ from urllib.parse import quote, unquote, urlsplit
 PLACEHOLDER = "…"
 
 # A URL with any scheme, also a misspelled one such as "htps://". Stops at
-# whitespace, quotes and angle brackets.
-_URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s\"'<>]+", re.IGNORECASE)
+# whitespace, quotes and angle brackets. The scheme is at most 32 characters:
+# an unbounded run made matching quadratic on long texts such as
+# "a.a.a.…" or "a-a-a-…", which web3 copies from a non-JSON RPC answer.
+_URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]{0,31}://[^\s\"'<>]+", re.IGNORECASE)
 
 # A scheme at the start of a string
 _SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
