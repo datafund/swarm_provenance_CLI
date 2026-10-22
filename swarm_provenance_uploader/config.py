@@ -1,7 +1,18 @@
 import os
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
-load_dotenv()  # Load variables from .env file
+# Load the .env file of the folder the command runs in (#141). find_dotenv
+# searches that folder, then each parent folder, and uses the first .env it
+# finds. Without usecwd=True it would search from this package's install
+# directory instead. Variables already set in the environment take precedence.
+# If the working directory was deleted, os.getcwd() fails: skip .env loading
+# then instead of crashing every command.
+try:
+    _dotenv_path = find_dotenv(usecwd=True)
+except OSError:
+    _dotenv_path = None
+if _dotenv_path:
+    load_dotenv(_dotenv_path)
 
 # --- Defaults ---
 GATEWAY_DEFAULT_URL = "https://provenance-gateway.datafund.io"
@@ -39,9 +50,8 @@ except (ValueError, TypeError):
 # Enable x402 pay-per-request mode (disabled by default)
 X402_ENABLED = os.getenv("X402_ENABLED", "false").lower() == "true"
 
-# Environment variable name that contains the private key
-# The actual private key should be in this env var, not in config
-X402_PRIVATE_KEY_ENV = os.getenv("X402_PRIVATE_KEY_ENV", "X402_PRIVATE_KEY")  # gitleaks:allow (a variable name, not a key)
+# X402_PRIVATE_KEY_ENV and X402_RPC_URL are read when they are used, by
+# core.x402_client.resolve_x402_private_key() and X402Client (#141).
 
 # Network: "base-sepolia" (testnet, default) or "base" (mainnet)
 X402_NETWORK = os.getenv("X402_NETWORK", "base-sepolia")
@@ -55,9 +65,6 @@ try:
 except (ValueError, TypeError):
     X402_MAX_AUTO_PAY_USD = 1.00
 
-# Custom RPC URL (optional, uses default if not set)
-X402_RPC_URL = os.getenv("X402_RPC_URL")
-
 # Only sign payments to this address (optional). Pin it to the gateway
 # operator's published pay-to address so a misconfigured or hostile gateway
 # cannot redirect payments.
@@ -68,14 +75,22 @@ X402_EXPECTED_PAY_TO = os.getenv("X402_EXPECTED_PAY_TO") or None
 FREE_TIER = os.getenv("FREE_TIER", "false").lower() == "true"
 
 # --- Chain / Blockchain Configuration ---
-# Enable on-chain anchoring (disabled by default)
-CHAIN_ENABLED = os.getenv("CHAIN_ENABLED", "false").lower() == "true"
-
 # Chain name: "base-sepolia" (testnet, default) or "base" (mainnet)
 CHAIN_NAME = os.getenv("CHAIN_NAME", "base-sepolia")
 
 # Custom RPC URL (optional, overrides preset for selected chain)
 CHAIN_RPC_URL = os.getenv("CHAIN_RPC_URL")
+
+
+def _split_urls(value):
+    """Split a comma-separated URL list; None when it names no URL."""
+    urls = [url.strip() for url in (value or "").split(",") if url.strip()]
+    return urls or None
+
+
+# Fallback RPC URLs, comma-separated (optional). They replace the preset
+# fallbacks and are tried in order after CHAIN_RPC_URL (or the preset RPC).
+CHAIN_RPC_URLS = _split_urls(os.getenv("CHAIN_RPC_URLS"))
 
 # Custom contract address (optional, overrides preset for selected chain)
 CHAIN_CONTRACT = os.getenv("CHAIN_CONTRACT")

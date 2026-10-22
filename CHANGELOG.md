@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- `.env` is now found from the folder you run the command in: that folder first, then each parent folder up to the root, and the first `.env` found is used. It was found from the folder the package is installed in, so with the editable install from the README the repository's `.env`, with its keys and auto-pay settings, applied wherever you ran the CLI, and with a virtual environment under your home folder `~/.env` applied. **Behaviour change:** if you kept your settings in the repository's `.env` and run the CLI from other folders, copy that `.env` to the folder you work in, or export the variables. Variables already set in the environment still take precedence over `.env` (#141)
+- The x402 signing key is now read the same way by the signer and by `x402 status` / `x402 balance` (`resolve_x402_private_key()`). If `X402_PRIVATE_KEY_ENV` names a variable other than `X402_PRIVATE_KEY`, only that variable is read; otherwise `X402_PRIVATE_KEY` is read, then the legacy `SWARM_X402_PRIVATE_KEY`. Before, `X402_PRIVATE_KEY_ENV` changed only the status display and the signer always read `X402_PRIVATE_KEY`; and a key in `SWARM_X402_PRIVATE_KEY` signed payments while `x402 status` showed "Not set". **Behaviour change:** with `X402_PRIVATE_KEY_ENV` set to another name, a key in `X402_PRIVATE_KEY` is no longer used. `x402 status` names the variable the key came from, never the key. Spaces and line breaks around the key are removed, and a blank value counts as not set. If `X402_PRIVATE_KEY_ENV` is not a valid variable name (letters, digits and `_`, not starting with a digit) or contains a run of 32 or more hex digits anywhere (it looks like a key), no key is read, and the signer, `x402 status` and `x402 balance` say "X402_PRIVATE_KEY_ENV is not a valid variable name" without repeating the value. A valid custom name made only of hex digits is used but not printed; messages say "the variable named by X402_PRIVATE_KEY_ENV" instead (#141)
+- `X402_RPC_URL` is now used for the x402 USDC balance and EIP-712 domain checks (an explicit `rpc_url` argument to `X402Client` still comes first). It was documented but ignored. Errors that repeat it are redacted like the chain RPC URLs (#141)
+- `CHAIN_RPC_URLS` (comma-separated) is now passed to the chain client as the fallback RPC URLs, replacing the preset fallbacks. It was documented but ignored (#141)
+
+### Removed
+- Removed the `CHAIN_ENABLED` setting (`config.CHAIN_ENABLED`). It was documented but nothing read it: chain commands always run when you call them (#141)
+- Removed `config.X402_PRIVATE_KEY_ENV` and `config.X402_RPC_URL`. The environment variables still work: they are read when used, by `resolve_x402_private_key()` and `X402Client` (#141)
+
 ## [0.12.0] - 2026-10-22
 
 ### Notes on 0.11.0
