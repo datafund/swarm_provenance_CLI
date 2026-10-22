@@ -1849,13 +1849,16 @@ def x402_status(
 
     # Check for private key the way the signer does (#141); show only the
     # name of the variable it came from, never the key
-    from .core.x402_client import resolve_x402_private_key, x402_private_key_env_name
-    pk_env_name = x402_private_key_env_name()
+    from .core.x402_client import (INVALID_PRIVATE_KEY_ENV_MESSAGE, resolve_x402_private_key,
+                                   x402_private_key_env_name)
+    pk_env_name = x402_private_key_env_name()  # None when invalid: never print the raw value
     pk_source = resolve_x402_private_key()[1]
     has_pk = pk_source is not None
     pk_str = (typer.style("Configured", fg=typer.colors.GREEN) + f" (from {pk_source})" if has_pk
               else typer.style("Not set", fg=typer.colors.RED))
     typer.echo(f"  Private key:  {pk_str}")
+    if pk_env_name is None:
+        typer.secho(f"  WARNING: {INVALID_PRIVATE_KEY_ENV_MESSAGE}; no key is read.", fg=typer.colors.RED)
 
     if has_pk and verbose:
         # Show wallet address (safe to display)
@@ -1869,8 +1872,12 @@ def x402_status(
     typer.echo("")
 
     if not has_pk:
-        typer.echo("To enable x402 payments, set your private key:")
-        typer.echo(f"  export {pk_env_name}=0x...")
+        if pk_env_name is None:
+            typer.echo("To enable x402 payments, set X402_PRIVATE_KEY_ENV to a variable name")
+            typer.echo("(or unset it to use X402_PRIVATE_KEY), and put your key in that variable.")
+        else:
+            typer.echo("To enable x402 payments, set your private key:")
+            typer.echo(f"  export {pk_env_name}=0x...")
         typer.echo("")
 
 
@@ -1884,10 +1891,15 @@ def x402_balance(
     import os
 
     # Check for private key, the same way the signer does (#141)
-    from .core.x402_client import resolve_x402_private_key, x402_private_key_env_name
-    pk_env_name = x402_private_key_env_name()
+    from .core.x402_client import (INVALID_PRIVATE_KEY_ENV_MESSAGE, resolve_x402_private_key,
+                                   x402_private_key_env_name)
+    pk_env_name = x402_private_key_env_name()  # None when invalid: never print the raw value
     has_pk = resolve_x402_private_key()[0] is not None
 
+    if pk_env_name is None:
+        typer.secho(f"ERROR: {INVALID_PRIVATE_KEY_ENV_MESSAGE}.", fg=typer.colors.RED, err=True)
+        typer.echo("Set it to the name of the variable that holds your key, or unset it.")
+        raise typer.Exit(code=1)
     if not has_pk:
         typer.secho(f"ERROR: No private key configured.", fg=typer.colors.RED, err=True)
         typer.echo(f"Set your private key: export {pk_env_name}=0x...")

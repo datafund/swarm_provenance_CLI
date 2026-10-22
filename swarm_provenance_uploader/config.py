@@ -43,11 +43,8 @@ except (ValueError, TypeError):
 # Enable x402 pay-per-request mode (disabled by default)
 X402_ENABLED = os.getenv("X402_ENABLED", "false").lower() == "true"
 
-# Environment variable name that contains the private key
-# The actual private key should be in this env var, not in config.
-# Signing and the status display both resolve the key with
-# core.x402_client.resolve_x402_private_key(), which reads this setting.
-X402_PRIVATE_KEY_ENV = os.getenv("X402_PRIVATE_KEY_ENV", "X402_PRIVATE_KEY")  # gitleaks:allow (a variable name, not a key)
+# X402_PRIVATE_KEY_ENV and X402_RPC_URL are read when they are used, by
+# core.x402_client.resolve_x402_private_key() and X402Client (#141).
 
 # Network: "base-sepolia" (testnet, default) or "base" (mainnet)
 X402_NETWORK = os.getenv("X402_NETWORK", "base-sepolia")
@@ -60,10 +57,6 @@ try:
     X402_MAX_AUTO_PAY_USD = float(os.getenv("X402_MAX_AUTO_PAY_USD", "1.00"))
 except (ValueError, TypeError):
     X402_MAX_AUTO_PAY_USD = 1.00
-
-# Custom RPC URL for USDC balance and EIP-712 domain checks (optional, uses
-# the network preset if not set). X402Client reads it when no rpc_url is given.
-X402_RPC_URL = os.getenv("X402_RPC_URL") or None
 
 # Only sign payments to this address (optional). Pin it to the gateway
 # operator's published pay-to address so a misconfigured or hostile gateway

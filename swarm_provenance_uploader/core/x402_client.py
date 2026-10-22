@@ -69,13 +69,26 @@ DEFAULT_PRIVATE_KEY_ENV = "X402_PRIVATE_KEY"  # gitleaks:allow (a variable name,
 LEGACY_PRIVATE_KEY_ENV = "SWARM_X402_PRIVATE_KEY"  # gitleaks:allow (a variable name, not a key)
 
 
-def x402_private_key_env_name() -> str:
+INVALID_PRIVATE_KEY_ENV_MESSAGE = "X402_PRIVATE_KEY_ENV is not a valid variable name"  # gitleaks:allow (a message, not a key)
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_HEX_KEY_RE = re.compile(r"(?:0x)?[0-9a-fA-F]{64}")
+
+
+def x402_private_key_env_name() -> Optional[str]:
     """Return the name of the variable the user should put the key in.
 
     This is the value of X402_PRIVATE_KEY_ENV when it is set, otherwise
-    X402_PRIVATE_KEY. Only the name is returned, never the key.
+    X402_PRIVATE_KEY. Returns None when X402_PRIVATE_KEY_ENV is not a valid
+    variable name, or looks like a 64-hex-digit key: someone may have put
+    the key itself there, so the value must never be printed (#141). Show
+    INVALID_PRIVATE_KEY_ENV_MESSAGE instead.
     """
-    return (os.getenv("X402_PRIVATE_KEY_ENV") or "").strip() or DEFAULT_PRIVATE_KEY_ENV
+    name = (os.getenv("X402_PRIVATE_KEY_ENV") or "").strip()
+    if not name:
+        return DEFAULT_PRIVATE_KEY_ENV
+    if not _ENV_NAME_RE.fullmatch(name) or _HEX_KEY_RE.fullmatch(name):
+        return None
+    return name
 
 
 def resolve_x402_private_key() -> Tuple[Optional[str], Optional[str]]:
@@ -86,7 +99,9 @@ def resolve_x402_private_key() -> Tuple[Optional[str], Optional[str]]:
 
     Precedence:
 
-    1. If X402_PRIVATE_KEY_ENV names a variable other than X402_PRIVATE_KEY,
+    1. If X402_PRIVATE_KEY_ENV is not a valid variable name, no key is read
+       (see x402_private_key_env_name()).
+       If it names a variable other than X402_PRIVATE_KEY,
        only that variable is read. There is no fallback, so a key in another
        variable is never used by surprise.
     2. Otherwise X402_PRIVATE_KEY.
@@ -99,6 +114,8 @@ def resolve_x402_private_key() -> Tuple[Optional[str], Optional[str]]:
         ``(key, variable_name)``, or ``(None, None)`` if no key is set.
     """
     custom = x402_private_key_env_name()
+    if custom is None:
+        return None, None
     names = ([custom] if custom != DEFAULT_PRIVATE_KEY_ENV
              else [DEFAULT_PRIVATE_KEY_ENV, LEGACY_PRIVATE_KEY_ENV])
     for name in names:
@@ -320,9 +337,11 @@ class X402Client:
         # Get private key
         self._private_key = private_key or resolve_x402_private_key()[0]
         if not self._private_key:
+            key_env = x402_private_key_env_name()
             raise X402ConfigurationError(
-                f"x402 private key not configured. Set the {x402_private_key_env_name()} "
-                "environment variable."
+                f"x402 private key not configured. Set the {key_env} environment variable."
+                if key_env else
+                f"x402 private key not configured: {INVALID_PRIVATE_KEY_ENV_MESSAGE}."
             )
 
         # Validate and derive address

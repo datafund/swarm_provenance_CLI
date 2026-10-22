@@ -195,7 +195,7 @@ swarm-prov-upload x402 info
 |---------------------|-------------|---------|
 | `X402_ENABLED` | Enable x402 payments | `false` |
 | `X402_PRIVATE_KEY` | Wallet private key (keep secret!) | - |
-| `X402_PRIVATE_KEY_ENV` | Name of the variable that holds the key. When set to another name, only that variable is read | `X402_PRIVATE_KEY` |
+| `X402_PRIVATE_KEY_ENV` | Name of the variable that holds the key. When set to another name, only that variable is read. A value that is not a valid variable name is rejected and not printed | `X402_PRIVATE_KEY` |
 | `X402_NETWORK` | `base-sepolia` (testnet) or `base` (mainnet) | `base-sepolia` |
 | `X402_AUTO_PAY` | Auto-pay without prompts | `false` |
 | `X402_MAX_AUTO_PAY_USD` | Maximum auto-pay amount per request | `1.00` |
