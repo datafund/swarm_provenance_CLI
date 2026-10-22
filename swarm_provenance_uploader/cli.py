@@ -628,6 +628,11 @@ def upload(
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
             _report_payment_outcome(e, "the pool stamp acquisition")
+        except typer.Exit:
+            # The availability check above already printed its error and chose
+            # the exit code; the catch-all would re-report it as an empty
+            # "Failed acquiring stamp from pool:" line (#164).
+            raise
         except Exception as e:
             typer.secho(f"ERROR: Failed acquiring stamp from pool: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
