@@ -5,7 +5,14 @@ from dotenv import find_dotenv, load_dotenv
 # searches that folder, then each parent folder, and uses the first .env it
 # finds. Without usecwd=True it would search from this package's install
 # directory instead. Variables already set in the environment take precedence.
-load_dotenv(find_dotenv(usecwd=True))
+# If the working directory was deleted, os.getcwd() fails: skip .env loading
+# then instead of crashing every command.
+try:
+    _dotenv_path = find_dotenv(usecwd=True)
+except OSError:
+    _dotenv_path = None
+if _dotenv_path:
+    load_dotenv(_dotenv_path)
 
 # --- Defaults ---
 GATEWAY_DEFAULT_URL = "https://provenance-gateway.datafund.io"

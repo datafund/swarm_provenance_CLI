@@ -200,7 +200,7 @@ swarm-prov-upload x402 info
 | `X402_AUTO_PAY` | Auto-pay without prompts | `false` |
 | `X402_MAX_AUTO_PAY_USD` | Maximum auto-pay amount per request | `1.00` |
 | `X402_EXPECTED_PAY_TO` | Only pay this recipient address (optional) | not set |
-| `X402_RPC_URL` | Custom RPC URL for the USDC balance and EIP-712 domain checks (optional) | Uses the network preset |
+| `X402_RPC_URL` | Custom RPC URL for the USDC balance and EIP-712 domain checks (optional). Like `CHAIN_RPC_URLS`, applies whichever `X402_NETWORK` is selected | Uses the network preset |
 
 The signing key and `x402 status` use the same lookup: the variable named by `X402_PRIVATE_KEY_ENV` if that is set to another name (and nothing else), otherwise `X402_PRIVATE_KEY`, then the legacy `SWARM_X402_PRIVATE_KEY`.
 

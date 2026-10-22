@@ -361,7 +361,7 @@ Uses python-dotenv for environment configuration. `config.py` loads `find_dotenv
 **Chain / Blockchain Configuration**:
 - `CHAIN_NAME`: `base-sepolia` (testnet, default) or `base` (mainnet)
 - `CHAIN_RPC_URL`: Custom RPC URL (optional, overrides preset)
-- `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs (optional, overrides preset fallbacks)
+- `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs (optional, replaces the preset fallbacks)
 - `CHAIN_CONTRACT`: Custom contract address (optional, overrides preset)
 - `CHAIN_EXPLORER_URL`: Custom block explorer URL (optional, overrides preset)
 - `CHAIN_GAS_LIMIT`: Explicit gas limit (optional, skips RPC estimation when set)

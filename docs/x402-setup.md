@@ -158,6 +158,8 @@ X402_EXPECTED_PAY_TO=0x...
 # X402_RPC_URL=https://your-rpc-provider.com
 ```
 
+`X402_RPC_URL` applies whichever `X402_NETWORK` is selected, the same way `CHAIN_RPC_URLS` does. If you switch networks, change the URL too.
+
 The CLI reads the `.env` of the folder you run it in, or the nearest `.env` in a parent folder. Variables already set in your environment take precedence.
 
 The key is looked up in this order, for both signing and `x402 status`:
