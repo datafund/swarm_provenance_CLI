@@ -799,6 +799,29 @@ class TestRootHelpDefaults:
     def test_help_shows_other_defaults(self, text):
         assert text in self._help()
 
+    def test_help_shows_configured_x402_values(self):
+        """X402_NETWORK / X402_MAX_AUTO_PAY_USD are what the CLI uses, so --help shows them.
+
+        The defaults are read when cli.py is imported, so this runs --help in a
+        fresh interpreter with the variables set; the test process is untouched.
+        """
+        import os
+        import subprocess
+        import sys
+        env = dict(os.environ, X402_NETWORK="base", X402_MAX_AUTO_PAY_USD="5",
+                   COLUMNS="250", TERM="dumb")
+        proc = subprocess.run(
+            [sys.executable, "-c", "from swarm_provenance_uploader.cli import app; app()", "--help"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr
+        text = re.sub(r"\x1b\[[0-9;]*m", "", proc.stdout)
+        help_text = " ".join(re.sub(r"[│╭╮╰╯─]", " ", text).split())
+        network = help_text[help_text.index("--x402-network "):][:200]
+        max_pay = help_text[help_text.index("--max-pay "):][:200]
+        assert "[default: (base)]" in network
+        assert "[default: (5.00)]" in max_pay
+
     def test_help_shows_default_chain(self):
         from swarm_provenance_uploader import config
         help_text = self._help()

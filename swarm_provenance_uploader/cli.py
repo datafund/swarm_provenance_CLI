@@ -3394,12 +3394,12 @@ def main(
     max_pay: Annotated[Optional[float], typer.Option(
         "--max-pay",
         help="Maximum auto-pay amount in USD per request.",
-        show_default="1.00",
+        show_default=f"{config.X402_MAX_AUTO_PAY_USD:.2f}",
     )] = None,
     x402_network: Annotated[Optional[str], typer.Option(
         "--x402-network",
         help="x402 network: 'base-sepolia' (testnet) or 'base' (mainnet).",
-        show_default="base-sepolia",
+        show_default=config.X402_NETWORK,
     )] = None,
     chain: Annotated[Optional[str], typer.Option(
         "--chain",
