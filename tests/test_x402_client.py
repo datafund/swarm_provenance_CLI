@@ -931,3 +931,111 @@ class TestPaymentRequirementReviewCases:
         reason = self._client().refusal_reason(_opt(**{field: "\x1b[2Jevil"}))
         assert "\x1b" not in reason
         assert "\\x1b" in reason
+
+
+class TestX402ClientSettingsSources:
+    """The key and RPC URL come from the same settings the status display reads (#141)."""
+
+    KEY_VARS = ("X402_PRIVATE_KEY_ENV", "X402_PRIVATE_KEY", "SWARM_X402_PRIVATE_KEY", "MY_X402_KEY", "X402_RPC_URL")  # gitleaks:allow (variable names, not keys)
+    SECRET_URL = "https://base-sepolia.g.alchemy.com/v2/Sup3rSecretApiKey42"
+
+    @pytest.fixture
+    def env(self, mock_eth_deps, monkeypatch):
+        for name in self.KEY_VARS:
+            monkeypatch.delenv(name, raising=False)
+        return monkeypatch
+
+    def test_signs_with_key_named_by_x402_private_key_env(self, env, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        env.setenv("X402_PRIVATE_KEY_ENV", "MY_X402_KEY")
+        env.setenv("MY_X402_KEY", "0x" + "c" * 64)
+        env.setenv("X402_PRIVATE_KEY", DUMMY_PRIVATE_KEY)
+
+        X402Client()
+
+        mock_eth_deps["account_class"].from_key.assert_called_once_with("0x" + "c" * 64)
+
+    def test_custom_key_env_does_not_fall_back(self, env, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        env.setenv("X402_PRIVATE_KEY_ENV", "MY_X402_KEY")
+        env.setenv("X402_PRIVATE_KEY", DUMMY_PRIVATE_KEY)
+
+        with pytest.raises(X402ConfigurationError) as exc_info:
+            X402Client()
+
+        assert "MY_X402_KEY" in str(exc_info.value)
+        assert "a" * 16 not in str(exc_info.value)
+        mock_eth_deps["account_class"].from_key.assert_not_called()
+
+    def test_legacy_key_still_signs(self, env, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        env.setenv("SWARM_X402_PRIVATE_KEY", DUMMY_PRIVATE_KEY)
+
+        X402Client()
+
+        mock_eth_deps["account_class"].from_key.assert_called_once_with(DUMMY_PRIVATE_KEY)
+
+    def test_x402_rpc_url_env_used(self, env, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        env.setenv("X402_PRIVATE_KEY", DUMMY_PRIVATE_KEY)
+        env.setenv("X402_RPC_URL", "https://rpc.example/x402")
+
+        client = X402Client()
+
+        assert client._rpc_url == "https://rpc.example/x402"
+        mock_eth_deps["web3_class"].HTTPProvider.assert_called_with("https://rpc.example/x402")
+
+    def test_rpc_url_argument_overrides_env(self, env, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        env.setenv("X402_PRIVATE_KEY", DUMMY_PRIVATE_KEY)
+        env.setenv("X402_RPC_URL", "https://rpc.example/x402")
+
+        client = X402Client(rpc_url="https://arg.example/rpc")
+
+        assert client._rpc_url == "https://arg.example/rpc"
+
+    def test_preset_rpc_when_unset(self, env, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client, RPC_ENDPOINTS
+
+        env.setenv("X402_PRIVATE_KEY", DUMMY_PRIVATE_KEY)
+        env.setenv("X402_RPC_URL", "  ")
+
+        client = X402Client(network="base")
+
+        assert client._rpc_url == RPC_ENDPOINTS["base"]
+
+    def test_balance_error_redacts_rpc_url(self, env, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        env.setenv("X402_PRIVATE_KEY", DUMMY_PRIVATE_KEY)
+        env.setenv("X402_RPC_URL", self.SECRET_URL)
+        mock_eth_deps["contract"].functions.balanceOf.return_value.call.side_effect = RuntimeError(
+            "The requested URL /v2/Sup3rSecretApiKey42 was not found")
+
+        client = X402Client()
+        with pytest.raises(X402ConfigurationError) as exc_info:
+            client.get_usdc_balance()
+
+        assert "Sup3rSecretApiKey42" not in str(exc_info.value)
+
+    def test_domain_validation_error_redacts_rpc_url(self, env, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        env.setenv("X402_PRIVATE_KEY", DUMMY_PRIVATE_KEY)
+        env.setenv("X402_RPC_URL", self.SECRET_URL)
+        mock_eth_deps["contract"].functions.DOMAIN_SEPARATOR.return_value.call.side_effect = RuntimeError(
+            f"401 Client Error: Unauthorized for url: {self.SECRET_URL}")
+
+        client = X402Client()
+        with patch("swarm_provenance_uploader.core.x402_client.compute_domain_separator",
+                   return_value=b"\x01" * 32), \
+                pytest.raises(X402ConfigurationError) as exc_info:
+            client.validate_domain()
+
+        assert "Sup3rSecretApiKey42" not in str(exc_info.value)
+        assert "base-sepolia.g.alchemy.com" in str(exc_info.value)
