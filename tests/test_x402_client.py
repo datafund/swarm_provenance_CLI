@@ -688,6 +688,61 @@ class TestX402ClientMultiplePaymentOptions:
             client.select_payment_option(requirements)
 
 
+class TestCaip2NetworkNames:
+    """CAIP-2 chain ids are accepted alongside x402 v1 network names (#143)."""
+
+    @staticmethod
+    def _option(network):
+        return X402PaymentOption(
+            scheme="exact", network=network, maxAmountRequired="50000",
+            resource="/test", payTo=DUMMY_PAY_TO,
+        )
+
+    @pytest.mark.parametrize("name,expected", [
+        ("eip155:84532", "base-sepolia"),
+        ("eip155:8453", "base"),
+        ("base-sepolia", "base-sepolia"),
+        ("base", "base"),
+        ("eip155:1", "eip155:1"),
+    ])
+    def test_normalize_network(self, name, expected):
+        from swarm_provenance_uploader.core.x402_client import normalize_network
+
+        assert normalize_network(name) == expected
+
+    def test_client_accepts_caip2_name(self, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        assert X402Client(network="eip155:84532", skip_domain_validation=True).network == "base-sepolia"
+
+    def test_caip2_option_matches_v1_configured_network(self, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(network="base-sepolia", skip_domain_validation=True)
+        requirements = X402PaymentRequirements(
+            accepts=[self._option("eip155:8453"), self._option("eip155:84532")])
+        option = client.select_payment_option(requirements)
+        assert option.network == "eip155:84532"
+        assert client.refusal_reason(option) is None
+
+    def test_unknown_caip2_network_is_refused(self, mock_eth_deps):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(network="base-sepolia", skip_domain_validation=True)
+        with pytest.raises(X402NetworkError):
+            client.select_payment_option(X402PaymentRequirements(accepts=[self._option("eip155:1")]))
+
+    def test_payload_repeats_the_option_network(self, mock_eth_deps):
+        """The gateway matches the payload's network against the name it advertised."""
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(network="base-sepolia", skip_domain_validation=True)
+        header = client.sign_payment(self._option("eip155:84532"))
+        assert json.loads(base64.b64decode(header))["network"] == "eip155:84532"
+        header = client.sign_payment(self._option("base-sepolia"))
+        assert json.loads(base64.b64decode(header))["network"] == "base-sepolia"
+
+
 # DOMAIN_SEPARATOR values read from the USDC contracts on 2026-10-07
 # (eth_call DOMAIN_SEPARATOR(), name(), version() on each network).
 RECORDED_DOMAIN_SEPARATORS = {

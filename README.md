@@ -194,7 +194,7 @@ swarm-prov-upload x402 info
 |---------------------|-------------|---------|
 | `X402_ENABLED` | Enable x402 payments | `false` |
 | `X402_PRIVATE_KEY` | Wallet private key (keep secret!) | - |
-| `X402_NETWORK` | `base-sepolia` (testnet) or `base` (mainnet) | `base-sepolia` |
+| `X402_NETWORK` | `base-sepolia` (testnet) or `base` (mainnet). The CAIP-2 ids `eip155:84532` and `eip155:8453` also work | `base-sepolia` |
 | `X402_AUTO_PAY` | Auto-pay without prompts | `false` |
 | `X402_MAX_AUTO_PAY_USD` | Maximum auto-pay amount per request | `1.00` |
 | `X402_EXPECTED_PAY_TO` | Only pay this recipient address (optional) | not set |
@@ -208,7 +208,7 @@ swarm-prov-upload x402 info
 | `--x402` / `--no-x402` | Enable/disable x402 for this command |
 | `--auto-pay` / `--no-auto-pay` | Enable/disable auto-pay |
 | `--max-pay FLOAT` | Maximum auto-pay amount in USD |
-| `--x402-network TEXT` | Network: `base-sepolia` or `base` |
+| `--x402-network TEXT` | Network: `base-sepolia` or `base` (or the CAIP-2 ids `eip155:84532` and `eip155:8453`) |
 | `--idempotency-key TEXT` | Idempotency-Key for this command's paid requests; pass the key printed by a failed run to repeat it without paying twice (on a gateway that supports it) |
 
 ### Testnet setup

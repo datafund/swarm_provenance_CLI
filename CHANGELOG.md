@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Gateway answers with null fields no longer fail validation. The gateway can send null for `StampDetails.usable` and `immutableFlag`, `WalletResponse.bzzBalance`, `ChequebookResponse.availableBalance` and `totalBalance`, and `DataDownloadResponse.content_type`; the CLI required them, so `stamps list`, `stamps info`, `wallet` and `chequebook` failed with a pydantic validation error. These fields are now optional, and the CLI prints `unknown` (or `Unknown` for usability) instead of `None` or `None%`. With the gateway backend, `stamps info` shows `Local: Yes/No` (the batch is on this gateway's node) instead of `Exists`: the gateway sends no `exists` field, so the line always read `No`. The verbose usability check of `upload` no longer prints `Exists=` either. `StampDetails.exists` stays, always `None` from the gateway (#143)
+- `stamps list` and `stamps info` show the stamp's utilization as the gateway's `utilizationPercent`. They printed `utilization` followed by `%`, but that field is the raw bucket fill level: a depth-17 batch at 50 % showed `1%`. `StampDetails` has the new optional field `utilizationPercent`; `utilization` is unchanged. When the percentage is null, the CLI prints `unknown` (#143)
+- `ManifestUploadTiming` now has the gateway's fields (`stamp_validate_ms`, `file_read_ms`, `bee_upload_ms`, `total_ms`, `tar_validate_ms`, `tar_count_ms`, `file_count`, `ms_per_file`, `files_per_second`) as floats. It declared `stamp_check_ms`, `upload_ms` and `total_ms` as integers, so a fractional `total_ms` failed validation after the upload had succeeded; `upload-collection --verbose` asks for timing. `stamp_check_ms` and `upload_ms` are kept for older gateways (#143)
+- An upload answer without a Swarm reference (missing, empty or whitespace only) is an error for `upload_data`, `upload_data_with_signing` and `upload_manifest`. Unpaid uploads raise `ConnectionError` ("the gateway answered HTTP 200 but sent no Swarm reference"); paid uploads raise `PaymentSettledNotDeliveredError`. Before, only paid signed and manifest uploads were checked: the others returned an empty reference and the CLI printed SUCCESS (#143)
+- A success whose `X-PAYMENT-RESPONSE` receipt says `success: false` now raises `PaymentOutcomeUnknownError`, on the first attempt as on retries. On the first attempt it raised `PaymentTransactionFailedError` with "The gateway may have used free tier instead". The gateway sends the receipt only after a successful settlement and never falls back to the free tier, so that text was wrong. `PaymentTransactionFailedError` is still exported but no longer raised (#143)
+- `GatewayClient.list_pool_stamps()` calls `GET /api/v1/pool/available`, the gateway's route, and reads its bare list. It called `/api/v1/pool/stamps`, which does not exist (#143)
+- Notary refusals of a signed upload are shown as text. `INVALID_DOCUMENT_FORMAT` printed the gateway's whole error object as a dict, and the `ValueError` for `INVALID_SIGN_OPTION` was caught by the client itself and replaced by a generic HTTP error. The four notary codes are now read the same way as other gateway errors, so they are also recognized on older gateways that send the code only under `detail`. This covers #194 (#143)
+- A 422 validation error shows each field's full message; each was cut at 60 characters. The whole message is still limited to 500 characters, and "and N more" stays at the end. This covers #193
+
+### Added
+- x402 accepts CAIP-2 chain ids as network names alongside the x402 v1 names: `eip155:84532` is `base-sepolia` and `eip155:8453` is `base`. This works for `X402_NETWORK`, `--x402-network`, `X402Client(network=...)` and the network of a payment option in a 402 answer. The signed payload repeats the option's own network name. The production gateway sends v1 names; x402 v2 headers and payloads are not supported (#143)
+
+### Notes
+- Owner proofs (`X-Owner-Timestamp` and `X-Owner-Signature`, for uploading to your own stamp without paying again) are on the gateway but not yet in the CLI; #202 tracks them (#143)
+
 ## [0.12.0] - 2026-10-22
 
 ### Notes on 0.11.0
