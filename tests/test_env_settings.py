@@ -394,3 +394,80 @@ def test_x402_info_mentions_key_env_and_legacy_name():
     assert result.exit_code == 0
     assert "X402_PRIVATE_KEY_ENV" in result.output
     assert "SWARM_X402_PRIVATE_KEY" in result.output
+
+
+# A valid name that embeds a key (review round 3): any unbroken run of 32 or
+# more hex digits anywhere in the value makes it key-shaped.
+RUN64 = ("e" + "7e3a9c51b8f20d64" * 4)[:64]
+EMBEDDED = [
+    pytest.param("KEY_" + RUN64, RUN64, id="prefix"),
+    pytest.param(RUN64 + "_KEY", RUN64, id="suffix"),
+    pytest.param("A_" + RUN64 + "_B", RUN64, id="both-sides"),
+    pytest.param("_" + RUN64, RUN64, id="underscore"),
+    pytest.param("K_0x" + RUN64, RUN64, id="0x-embedded"),
+    pytest.param("KEY_" + RUN64[:32], RUN64[:32], id="prefix-32"),
+]
+
+
+@pytest.mark.parametrize("value, run", EMBEDDED)
+def test_embedded_key_makes_key_env_invalid(no_key_env, value, run):
+    from swarm_provenance_uploader.core.x402_client import (
+        printable_key_env_name, x402_private_key_env_name)
+
+    no_key_env.setenv("X402_PRIVATE_KEY_ENV", value)
+    assert x402_private_key_env_name() is None
+    assert run not in printable_key_env_name(value)
+
+
+@pytest.mark.parametrize("value, run", EMBEDDED)
+def test_embedded_key_never_printed(no_key_env, value, run):
+    from swarm_provenance_uploader.core import x402_client
+    from swarm_provenance_uploader.exceptions import X402ConfigurationError
+
+    no_key_env.setenv("X402_PRIVATE_KEY_ENV", value)
+    no_key_env.setenv(value, KEY_A) if "x" not in value else None
+
+    status = runner.invoke(app, ["x402", "status"])
+    info = runner.invoke(app, ["x402", "info"])
+    with patch("swarm_provenance_uploader.core.x402_client.X402Client"):
+        balance = runner.invoke(app, ["x402", "balance"])
+    with patch.object(x402_client, "_import_x402_deps", return_value=(MagicMock(), MagicMock())):
+        with pytest.raises(X402ConfigurationError) as exc_info:
+            x402_client.X402Client()
+
+    for text in (status.output, info.output, balance.output, str(exc_info.value)):
+        assert run[:16] not in text
+    assert INVALID_NAME_MESSAGE in status.output
+    assert INVALID_NAME_MESSAGE in balance.output
+    assert INVALID_NAME_MESSAGE in str(exc_info.value)
+
+
+def test_31_digit_hex_run_stays_valid(no_key_env):
+    from swarm_provenance_uploader.core.x402_client import (
+        printable_key_env_name, x402_private_key_env_name)
+
+    name = "KEY_" + RUN64[:31]
+    no_key_env.setenv("X402_PRIVATE_KEY_ENV", name)
+    assert x402_private_key_env_name() == name
+    assert printable_key_env_name(name) == name
+
+
+@pytest.mark.parametrize("raw", [KEY_A + "\n", "  " + KEY_A + " ", KEY_A + "\r\n"])
+def test_resolved_key_is_stripped(no_key_env, raw):
+    from swarm_provenance_uploader.core.x402_client import resolve_x402_private_key
+
+    no_key_env.setenv("X402_PRIVATE_KEY", raw)
+    assert resolve_x402_private_key() == (KEY_A, "X402_PRIVATE_KEY")  # gitleaks:allow (variable name, not a key)
+
+
+def test_blank_key_is_unset(no_key_env):
+    from swarm_provenance_uploader.core.x402_client import resolve_x402_private_key
+
+    no_key_env.setenv("X402_PRIVATE_KEY", "  \n")
+    no_key_env.setenv("SWARM_X402_PRIVATE_KEY", KEY_C)
+    assert resolve_x402_private_key() == (KEY_C, "SWARM_X402_PRIVATE_KEY")  # gitleaks:allow (variable name, not a key)
+
+    no_key_env.setenv("SWARM_X402_PRIVATE_KEY", " ")
+    assert resolve_x402_private_key() == (None, None)
+    result = runner.invoke(app, ["x402", "status"])
+    assert "Not set" in result.output
