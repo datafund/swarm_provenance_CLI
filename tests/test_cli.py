@@ -4989,6 +4989,34 @@ class TestPaymentPromptReviewCases:
         assert "--x402" in result.output
         assert "--free for the free tier" in result.output
 
+    def test_allowance_402_shows_code_and_no_free_hint(self, requests_mock):
+        """#139: the pool's allowance 402 (x402 on, paid bypass honoured) keeps its code and
+        message; --free would not help, because the free tier draws on the same allowance."""
+        _x402_config["enabled"] = False
+        gw = "https://test.gateway.io"
+        message = ("The daily free allowance of 5 small stamps for this application has been used "
+                   "up. It resets at 2026-10-23T00:00:00Z. To continue now, pay with x402.")
+        detail = {"x402Version": 1, "error": message,
+                  "accepts": [{"scheme": "exact", "network": "base", "maxAmountRequired": "50000"}],
+                  "code": "DAILY_STAMP_ALLOWANCE_EXHAUSTED", "size": "small", "allowance": 5,
+                  "used": 5, "resets_at": "2026-10-23T00:00:00Z", "message": message}
+        requests_mock.get(f"{gw}/api/v1/pool/status", json={
+            "enabled": True, "reserve_config": {"17": 5}, "current_levels": {"17": 1},
+            "available_stamps": {"17": [DUMMY_STAMP]}, "total_stamps": 1,
+            "low_reserve_warning": False, "errors": []})
+        requests_mock.post(f"{gw}/api/v1/pool/acquire", status_code=402,
+                           json={**detail, "detail": detail})
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--gateway-url", gw, "upload", "--file", "d.txt", "--usePool"])
+        assert result.exit_code == 1
+        assert "DAILY_STAMP_ALLOWANCE_EXHAUSTED" in result.output
+        assert "The daily free allowance of 5 small stamps" in result.output
+        assert "--x402" in result.output
+        assert "2026-10-23T00:00:00Z" in result.output
+        assert "--free" not in result.output
+
     def test_gateway_error_code_reaches_the_user(self, mocker, requests_mock):
         """#139: the gateway's code and message are printed, not a generic HTTP error."""
         requests_mock.post("https://test.gateway.io/api/v1/stamps/", status_code=403, json={

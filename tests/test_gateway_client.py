@@ -2459,6 +2459,22 @@ class TestGatewayErrorMessages:
         assert "field3" not in text
         assert "and 3 more" in text
 
+    def test_validation_more_suffix_survives_long_field_names(self, requests_mock):
+        errors = [{"loc": ["body", "f" * 200 + str(i)], "msg": "m" * 200, "type": "value_error"}
+                  for i in range(6)]
+        requests_mock.post(f"{GW}/api/v1/stamps/", status_code=422, json={
+            "detail": errors, "code": "VALIDATION_ERROR",
+            "message": "The request is invalid; see detail for the fields."})
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError) as exc:
+            client.purchase_stamp(duration_hours=24)
+
+        text = str(exc.value)
+        assert "The request is invalid" in text
+        assert "and 3 more" in text
+        assert len(text) < 600
+
     def test_validation_errors_without_top_level_message(self, requests_mock):
         requests_mock.post(f"{GW}/api/v1/stamps/", status_code=422, json={
             "detail": [{"loc": ["body", "duration_hours"], "msg": "must be at least 24"}]})
@@ -2598,3 +2614,94 @@ class TestPaidFailureMessages:
         text = str(exc.value)
         assert "Gateway: lost" in text
         assert "\x1b" not in text and "\u202e" not in text
+
+
+def _allowance_402(code="DAILY_STAMP_ALLOWANCE_EXHAUSTED", resets_at="2026-10-23T00:00:00Z"):
+    """The 402 swarm_connect's pool.py _refuse_allowance sends where paying bypasses the
+    allowance, after the x402 middleware lifts the payment request to the top level."""
+    message = (f"The daily free allowance of 5 small stamps for this application has been used up. "
+               f"It resets at {resets_at}. To continue now, pay with x402: send an X-PAYMENT header "
+               "with this same request and you get a pooled stamp immediately, without drawing on "
+               "the allowance.")
+    detail = {
+        "x402Version": 1,
+        "error": message,
+        "accepts": [{"scheme": "exact", "network": "base", "maxAmountRequired": "50000",
+                     "resource": "/api/v1/pool/acquire", "payTo": "0x" + "1" * 40,
+                     "asset": "0x" + "2" * 40}],
+        "code": code, "size": "small", "allowance": 5, "used": 5, "resets_at": resets_at,
+        "alternative": {"endpoint": "POST /api/v1/pool/acquire", "payment": "x402",
+                        "header": "X-PAYMENT"},
+        "message": message,
+    }
+    return {**detail, "code": code, "message": message, "detail": detail}
+
+
+class TestDefaultMode402:
+    """A 402 with x402 off keeps the gateway's code and message (#139)."""
+
+    def test_allowance_exhausted_shows_code_and_message(self, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", status_code=402, json=_allowance_402())
+        client = GatewayClient(base_url=GW, x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError) as exc:
+            client.acquire_stamp_from_pool(size="small")
+
+        err = exc.value
+        text = str(err)
+        assert "DAILY_STAMP_ALLOWANCE_EXHAUSTED" in text
+        assert "The daily free allowance of 5 small stamps" in text
+        assert "--x402" in text
+        assert "--free" not in text
+        assert err.code == "DAILY_STAMP_ALLOWANCE_EXHAUSTED"
+        assert err.resets_at == "2026-10-23T00:00:00Z"
+        assert err.gateway_message.startswith("The daily free allowance")
+        assert err.payment_options and err.payment_options[0]["maxAmountRequired"] == "50000"
+
+    def test_per_client_allowance_is_treated_the_same(self, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", status_code=402,
+                           json=_allowance_402(code="DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED"))
+        client = GatewayClient(base_url=GW, x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError) as exc:
+            client.acquire_stamp_from_pool(size="small")
+
+        assert "DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED" in str(exc.value)
+        assert "--free" not in str(exc.value)
+
+    def test_gateway_text_is_sanitized(self, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        body = _allowance_402(resets_at="soon\x1b[2J‮")
+        body["message"] = "used up\x1b[31m‮"
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", status_code=402, json=body)
+        client = GatewayClient(base_url=GW, x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError) as exc:
+            client.acquire_stamp_from_pool(size="small")
+
+        text = str(exc.value)
+        assert "\x1b" not in text and "‮" not in text
+        assert "\x1b" not in exc.value.resets_at and "‮" not in exc.value.resets_at
+
+    def test_ordinary_402_keeps_generic_text(self, requests_mock):
+        """The plain x402 payment request carries the placeholder code HTTP_402."""
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        accepts = [{"scheme": "exact", "network": "base-sepolia", "maxAmountRequired": "50000"}]
+        requests_mock.post(f"{GW}/api/v1/stamps/", status_code=402, json={
+            "x402Version": 1, "error": "Payment required", "accepts": accepts,
+            "code": "HTTP_402", "message": "Payment required",
+            "detail": {"x402Version": 1, "error": "Payment required", "accepts": accepts}})
+        client = GatewayClient(base_url=GW, x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError) as exc:
+            client.purchase_stamp()
+
+        assert str(exc.value) == ("Payment required (amounts: ['50000']). "
+                                  "Enable x402 with --x402 flag or use --free for free tier")
+        assert exc.value.code is None

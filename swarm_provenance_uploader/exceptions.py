@@ -64,11 +64,34 @@ class X402Error(ProvenanceError):
 
 
 class PaymentRequiredError(X402Error):
-    """HTTP 402 received but x402 payments not configured or disabled."""
+    """HTTP 402 received but x402 payments not configured or disabled.
 
-    def __init__(self, message: str, payment_options: list = None):
+    When the gateway's 402 carries its own error code (not the placeholder
+    HTTP_402 of an ordinary payment request), `code` and `gateway_message`
+    hold it, and `resets_at` the time a spent free allowance resets (#139).
+    """
+
+    # Codes for which the free tier is no way forward: the pool allowance is
+    # what the free tier draws on, and the others refuse the free tier.
+    FREE_TIER_DOES_NOT_HELP = frozenset({
+        "DAILY_STAMP_ALLOWANCE_EXHAUSTED",
+        "DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED",
+        "FREE_TIER_DISABLED",
+        "PAYMENT_REQUIRED",
+    })
+
+    def __init__(self, message: str, payment_options: list = None, code: str = None,
+                 gateway_message: str = None, resets_at: str = None):
         super().__init__(message)
         self.payment_options = payment_options or []
+        self.code = code
+        self.gateway_message = gateway_message
+        self.resets_at = resets_at
+
+    @property
+    def free_tier_helps(self) -> bool:
+        """False when the gateway's code says --free would not get past this 402."""
+        return self.code not in self.FREE_TIER_DOES_NOT_HELP
 
 
 class InsufficientBalanceError(X402Error):

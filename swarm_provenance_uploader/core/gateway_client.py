@@ -290,21 +290,46 @@ class GatewayClient:
         """
         if not self.x402_enabled:
             # Parse 402 response for useful error message
+            accepts, resets_at = [], None
             try:
                 body = response.json()
-                # Unwrap detail wrapper from new gateway format
-                if "detail" in body and isinstance(body["detail"], dict):
-                    body = body["detail"]
-                accepts = body.get("accepts", [])
-                if accepts:
-                    amounts = [opt.get("maxAmountRequired", "?") for opt in accepts]
-                    raise PaymentRequiredError(
-                        f"Payment required (amounts: {amounts}). "
-                        "Enable x402 with --x402 flag or use --free for free tier",
-                        payment_options=accepts,
-                    )
-            except (ValueError, KeyError):
+                if isinstance(body, dict):
+                    resets_at = body.get("resets_at")
+                    # Unwrap detail wrapper from new gateway format
+                    if isinstance(body.get("detail"), dict):
+                        body = body["detail"]
+                    accepts = body.get("accepts") or []
+                    resets_at = resets_at or body.get("resets_at")
+            except ValueError:
                 pass
+            if not isinstance(accepts, list):
+                accepts = []
+            # A 402 with the gateway's own code (#139), for example a spent
+            # pool allowance: say what it is, and offer --free only if the
+            # free tier can get past it. An ordinary payment request has the
+            # placeholder HTTP_402, which _gateway_error drops.
+            code, message = self._gateway_error(response)
+            if code:
+                resets_at = _sanitize_gateway_text(str(resets_at), limit=64) if resets_at else None
+                error = PaymentRequiredError("", payment_options=accepts, code=code,
+                                             gateway_message=message, resets_at=resets_at)
+                if error.free_tier_helps:
+                    hint = "Enable x402 with --x402 flag or use --free for free tier"
+                else:
+                    hint = "Enable x402 with --x402 to pay for this request"
+                    if resets_at:
+                        hint += f", or wait until the allowance resets at {resets_at}"
+                error.args = (f"Payment required ({code})" + (f": {message}" if message else ".")
+                              + f" {hint}.",)
+                raise error
+            if accepts:
+                amounts = [opt.get("maxAmountRequired", "?") if isinstance(opt, dict) else "?"
+                           for opt in accepts]
+                raise PaymentRequiredError(
+                    f"Payment required (amounts: {amounts}). "
+                    "Enable x402 with --x402 flag or use --free for free tier",
+                    payment_options=accepts,
+                )
             raise PaymentRequiredError(
                 "Payment required. Enable x402 with --x402 flag or use --free for free tier"
             )
@@ -672,13 +697,17 @@ class GatewayClient:
                 if isinstance(item, dict):
                     loc = ".".join(str(part) for part in item.get("loc") or [])
                     msg = str(item.get("msg") or "invalid")
-                    fields.append(f"{loc}: {msg}" if loc else msg)
+                    # Each field bounded, so "and N more" survives the limit below
+                    fields.append(_sanitize_gateway_text(f"{loc}: {msg}" if loc else msg, limit=60))
             if fields:
                 listed = "; ".join(fields)
                 more = len(detail) - cls._MAX_VALIDATION_ERRORS_SHOWN
                 if more > 0:
                     listed += f"; and {more} more"
-                message = f"{message} ({listed})" if message else listed
+                if message:
+                    message = f"{_sanitize_gateway_text(message, limit=100)} ({listed})"
+                else:
+                    message = listed
 
         return (_sanitize_gateway_text(code, limit=64),
                 _sanitize_gateway_text(message, limit=300))
