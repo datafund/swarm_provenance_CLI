@@ -50,7 +50,7 @@ Once a Swarm hash is anchored on-chain, anyone can independently verify its regi
 
 ## Prerequisites
 
-- Python 3.8+
+- Python 3.9+
 - An Ethereum wallet (MetaMask, hardware wallet, etc.)
 - Base Sepolia ETH (for gas fees on testnet)
 

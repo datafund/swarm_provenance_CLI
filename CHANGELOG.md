@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Known issues in 0.11.0
+- Base mainnet x402 payments do not work yet. The gateway on swarm_connect `main` still advertises `"USDC"` as the EIP-712 name for `base`, so CLI 0.11.0 declines that option before it signs. The fix (datafund/swarm_connect#467) is merged to swarm_connect `dev` in datafund/swarm_connect#500 and is not on `main` yet (checked 2026-10-21). Base mainnet x402 also needs CLI 0.11.0 or later: older versions sign with `"USDC"`, which the Base mainnet USDC contract rejects (#126)
+- The 0.11.0 notes say `Idempotency-Key` needs datafund/swarm_connect#422 "on `dev`": it (`app/x402/idempotency.py`) is on swarm_connect `main` too as of 2026-10-21 (#124)
+
+### Fixed
+- `import swarm_provenance_uploader.chain.provider` (or `core.chain_client`, `chain.exceptions`) failed with a circular `ImportError` (cannot import `ChainError`) unless `swarm_provenance_uploader.exceptions` was imported first; `import swarm_provenance_uploader.chain` on its own set `BLOCKCHAIN_AVAILABLE = False` even with web3 installed. The chain exceptions are now re-exported from `swarm_provenance_uploader.exceptions` lazily
+
+### Changed
+- `requires-python` is `>=3.9` (was `>=3.8`); CI tests 3.9 to 3.13
+- The `x402` and `blockchain` extras cap web3 below the next major version: `web3>=7.0.0,<9`
+- `project.license` is the SPDX expression `"MIT"` with `license-files`, which clears the setuptools deprecation warning on build; building needs setuptools 77 or later
+
 ## [0.11.0] - 2026-10-21
 
 Payment safety (epic #145).

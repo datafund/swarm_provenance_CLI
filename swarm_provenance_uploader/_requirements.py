@@ -3,10 +3,11 @@
 They must match the `x402` and `blockchain` extras in pyproject.toml (a test
 checks this). The floors are what the code needs: `sign_typed_data` exists
 from eth-account 0.13.5, `raw_transaction` from 0.13.0, and web3 7 is the
-first line that accepts those eth-account versions.
+first line that accepts those eth-account versions. web3 is capped below
+the next untested major version (9).
 """
 
-WEB3_REQUIREMENT = "web3>=7.0.0"
+WEB3_REQUIREMENT = "web3>=7.0.0,<9"
 ETH_ACCOUNT_REQUIREMENT = "eth-account>=0.13.5"
 
 #: Shell command that installs the signing dependencies (x402 and chain)

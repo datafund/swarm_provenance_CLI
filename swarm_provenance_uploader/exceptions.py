@@ -303,16 +303,33 @@ class SignatureVerificationError(NotaryError):
 
 # --- Chain / Blockchain Exceptions ---
 # Canonical definitions live in chain/exceptions.py; re-exported here
-# for backward compatibility.
+# for backward compatibility. The re-export is lazy: chain/exceptions.py
+# imports ProvenanceError from this module, so importing it eagerly here
+# made `import swarm_provenance_uploader.chain.provider` (or anything that
+# reaches chain/exceptions.py first) fail with a circular ImportError.
 
-from .chain.exceptions import (  # noqa: F401, E402
-    ChainError,
-    ChainConfigurationError,
-    ChainConnectionError,
-    ChainTransactionError,
-    ChainValidationError,
-    InsufficientFundsError,
-    DataNotRegisteredError,
-    DataAlreadyRegisteredError,
-    TransformationAlreadyExistsError,
-)
+_CHAIN_EXCEPTIONS = frozenset({
+    "ChainError",
+    "ChainConfigurationError",
+    "ChainConnectionError",
+    "ChainTransactionError",
+    "ChainValidationError",
+    "InsufficientFundsError",
+    "DataNotRegisteredError",
+    "DataAlreadyRegisteredError",
+    "TransformationAlreadyExistsError",
+})
+
+
+def __getattr__(name):
+    if name in _CHAIN_EXCEPTIONS:
+        from .chain import exceptions as _chain_exceptions
+
+        value = getattr(_chain_exceptions, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals()) | _CHAIN_EXCEPTIONS)
