@@ -275,6 +275,7 @@ The application follows a modular architecture with clear separation of concerns
 - `StampDetails`, `StampListResponse`, `StampPurchaseResponse`
 - `DataUploadResponse`, `DataDownloadResponse`
 - `WalletResponse`, `ChequebookResponse`
+- Fields the gateway can send as null are `Optional` here (#143): `StampDetails.usable` and `immutableFlag`, `WalletResponse.bzzBalance`, `ChequebookResponse.availableBalance` and `totalBalance`, `DataDownloadResponse.content_type`. The CLI shows them as `unknown`. Check a new field against swarm_connect `app/api/models` before making it required
 
 **x402 Payment Models**: Schemas for x402 payment handling:
 - `X402PaymentOption`: Individual payment option from 402 response
@@ -297,7 +298,7 @@ The application follows a modular architecture with clear separation of concerns
 - `SignedDocumentResponse`: Response from upload with sign=notary
 
 **Collection Models**: Schemas for collection/manifest uploads:
-- `ManifestUploadTiming`: Optional timing breakdown from manifest upload
+- `ManifestUploadTiming`: Optional timing breakdown from manifest upload, with the gateway's float millisecond fields (`file_read_ms`, `bee_upload_ms`, `total_ms`, `tar_*`, ...)
 - `ManifestUploadResponse`: Response with reference, file_count, timing
 - `CollectionFileInfo`: Per-file info (path, size, content_hash)
 - `CollectionProvenanceMetadata`: Full provenance metadata for a collection upload
@@ -330,6 +331,7 @@ The codebase implements comprehensive error handling:
 - Paid requests: once `X-PAYMENT` has been sent, `GatewayClient._make_paid_request` reports a timeout, dropped connection, Ctrl-C or 5xx as `PaymentOutcomeUnknownError`, not a plain `ConnectionError`; `PaymentSettledNotDeliveredError` / `StampPurchasePendingError` when the gateway confirms it collected the payment, and also (via `_reading_paid_result`) when a paid 2xx body cannot be parsed. They carry payer, nonce, amount, pay-to, `valid_before` and transaction; the CLI prints them via `_report_payment_outcome`. Ordinary errors remain for a `ConnectTimeout` (never connected, so never sent), a 4xx the gateway refused before settling, and the 5xx answers that state nothing was charged (`_says_not_charged`). Paid calls use `GatewayClient.PAID_REQUEST_TIMEOUT` ((10, 240) s connect/read)
 - Idempotency-Key (#124): `_make_paid_request` sends one key per paid operation (the CLI passes one per command, `--idempotency-key` to reuse a failed run's) resending the same authorization after IN_PROGRESS / UNAVAILABLE (the gateway releases it) and signing a new one (no new prompt, at most `MAX_SIGNATURES_PER_OPERATION`) only after an attempt with no answer. While such an attempt is outstanding, any answer other than an IDEMPOTENCY_* code or a success is reported as an unknown outcome naming it. It retries only `IDEMPOTENCY_KEY_IN_PROGRESS` / `IDEMPOTENCY_UNAVAILABLE`, and a timeout only once the gateway has answered with such a code; `_raise_for_idempotency_answer` maps SETTLEMENT_UNKNOWN / SETTLED_PENDING / DELIVERED_NOT_STORED / REUSED / INVALID to exceptions. `PaymentDeliveredNotStoredError` is a success: the CLI exits 0 when it is the command's last step
 - Gateway error responses (#139): every non-2xx answer that no special case handles goes through `GatewayClient._raise_for_gateway_error`, which raises `GatewayHTTPError` (a `requests.exceptions.HTTPError` that keeps `.response`, with `code`, `gateway_message` and `retry_after`). The public methods wrap it in `ConnectionError`, `PoolAcquisitionError` or similar, so callers reach it as `e.__cause__`. It reads `code`/`message` from the top level of the body (swarm_connect #381), then from `detail` (dict, string, or a 422 field list, at most 3 fields then "and N more"), drops a placeholder `HTTP_<status>` code and adds the Retry-After header. Example as the CLI prints it: `Failed to upload data: HTTP 403 STAMP_OWNERSHIP_DENIED: <message>`. A body with nothing readable raises requests' own HTTPError unchanged. The URL is left out of the text; `--verbose` prints it. Messages are cut at `_GATEWAY_MESSAGE_LIMIT` (500) characters. With x402 off, a 402 that has a real code, or that answers a `--free` request, raises `PaymentRequiredError` with `code`, `gateway_message`, `resets_at` and `free_tier_used`; `free_tier_helps` decides whether the CLI suggests `--free`
+- Upload answers (#143): `upload_data`, `upload_data_with_signing` and `upload_manifest` read the reference through `GatewayClient._require_reference`. A 2xx without a reference (missing, empty or whitespace) raises `ConnectionError`, or `PaymentSettledNotDeliveredError` when a payment was sent. A 2xx whose `X-PAYMENT-RESPONSE` receipt says `success: false` raises `PaymentOutcomeUnknownError`: the gateway sends the receipt only after a successful settlement. `PaymentTransactionFailedError` is no longer raised. Notary 400s (`NOTARY_NOT_ENABLED`, `NOTARY_NOT_CONFIGURED`, `INVALID_DOCUMENT_FORMAT`, `INVALID_SIGN_OPTION`) are read through `_gateway_error`, so every body shape gives text
 - Chain pre-flight balance check: `_send_transaction()` estimates gas cost and raises `InsufficientFundsError` with actionable guidance (wallet address, balance, estimated cost, faucet/bridge URL) before broadcasting
 
 ### Configuration management
@@ -351,7 +353,7 @@ Uses python-dotenv for environment configuration:
 **x402 Payment Configuration**:
 - `X402_ENABLED`: Enable x402 payment support (default: false)
 - `X402_PRIVATE_KEY`: Wallet private key for signing payments
-- `X402_NETWORK`: `base-sepolia` (testnet) or `base` (mainnet)
+- `X402_NETWORK`: `base-sepolia` (testnet) or `base` (mainnet). The CAIP-2 ids `eip155:84532` and `eip155:8453` are accepted too (`normalize_network()` in `core/x402_client.py`); a payment option named either way matches, and the signed payload repeats the option's own name
 - `X402_AUTO_PAY`: Enable auto-pay without prompts (default: false; `--no-auto-pay` overrides it per command)
 - `X402_MAX_AUTO_PAY_USD`: Maximum auto-pay amount per request (default: 1.00). A hard cap: above it the CLI prompts (default No) and library use without a callback refuses before signing
 - `X402_EXPECTED_PAY_TO`: Only sign payments to this address (optional). Independently of it, `X402Client.refusal_reason()` refuses non-`exact` schemes, a non-USDC `asset` and malformed amounts or recipients before signing
