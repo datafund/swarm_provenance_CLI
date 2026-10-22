@@ -471,3 +471,25 @@ def test_blank_key_is_unset(no_key_env):
     assert resolve_x402_private_key() == (None, None)
     result = runner.invoke(app, ["x402", "status"])
     assert "Not set" in result.output
+
+
+def test_config_imports_in_deleted_working_directory(tmp_path):
+    """find_dotenv(usecwd=True) calls os.getcwd(); a deleted cwd must not crash the CLI."""
+    gone = tmp_path / "gone"
+    code = (
+        "import os\n"
+        f"os.makedirs({str(gone)!r})\n"
+        f"os.chdir({str(gone)!r})\n"
+        f"os.rmdir({str(gone)!r})\n"
+        "import swarm_provenance_uploader.config as c\n"
+        "print(c.GATEWAY_URL)\n"
+    )
+    script = tmp_path / "run_deleted_cwd.py"
+    script.write_text(code)
+
+    result = subprocess.run([sys.executable, str(script)], cwd=str(tmp_path), env=_clean_env(),
+                            capture_output=True, text=True, timeout=120)
+
+    assert result.returncode == 0, result.stderr
+    assert "Traceback" not in result.stderr
+    assert result.stdout.strip() == "https://provenance-gateway.datafund.io"
