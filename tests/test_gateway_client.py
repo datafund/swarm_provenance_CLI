@@ -2273,3 +2273,497 @@ class TestIdempotencyVerificationCases:
     def test_non_string_code_does_not_crash(self, idem_x402, requests_mock):
         with pytest.raises(ConnectionError):
             self._purchase(idem_x402, requests_mock, [{"status_code": 400, "json": {"code": 1}}])
+
+
+# =============================================================================
+# GATEWAY ERROR CODES AND MESSAGES (#139)
+# =============================================================================
+
+GW = "https://test.gateway.io"
+
+
+def _envelope(code, message, **detail):
+    """The gateway's error body (swarm_connect #381): detail plus top-level code and message."""
+    return {"detail": {"code": code, "message": message, **detail}, "code": code, "message": message}
+
+
+class TestGatewayErrorMessages:
+    """Every gateway error shows the gateway's code and message (#139)."""
+
+    def test_upload_shows_code_and_message(self, requests_mock):
+        requests_mock.post(f"{GW}/api/v1/data/", status_code=403, json=_envelope(
+            "STAMP_OWNERSHIP_DENIED", "This stamp belongs to another wallet."))
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError) as exc:
+            client.upload_data(b"x", DUMMY_STAMP)
+
+        text = str(exc.value)
+        assert "HTTP 403 STAMP_OWNERSHIP_DENIED: This stamp belongs to another wallet." in text
+        assert "Client Error" not in text
+        assert "for url" not in text
+
+    def test_cause_is_http_error_that_keeps_the_response(self, requests_mock):
+        from swarm_provenance_uploader.exceptions import GatewayHTTPError
+
+        requests_mock.post(f"{GW}/api/v1/data/", status_code=403, json=_envelope(
+            "STAMP_OWNERSHIP_DENIED", "Not yours."))
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError) as exc:
+            client.upload_data(b"x", DUMMY_STAMP)
+
+        cause = exc.value.__cause__
+        assert isinstance(cause, requests.exceptions.HTTPError)
+        assert isinstance(cause, GatewayHTTPError)
+        assert cause.response.status_code == 403
+        assert cause.status_code == 403
+        assert cause.code == "STAMP_OWNERSHIP_DENIED"
+        assert cause.gateway_message == "Not yours."
+
+    def test_extend_too_small(self, requests_mock):
+        requests_mock.patch(f"{GW}/api/v1/stamps/{DUMMY_STAMP}/extend", status_code=400, json=_envelope(
+            "EXTENSION_TOO_SMALL", "The extension adds less than one hour."))
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError, match="HTTP 400 EXTENSION_TOO_SMALL: The extension adds less"):
+            client.extend_stamp(DUMMY_STAMP, 1)
+
+    def test_pool_allowance_exhausted(self, requests_mock):
+        from swarm_provenance_uploader.exceptions import PoolAcquisitionError
+
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", status_code=429, json=_envelope(
+            "DAILY_STAMP_ALLOWANCE_EXHAUSTED", "Daily allowance used up.", resets_at="tomorrow"))
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(PoolAcquisitionError,
+                           match="HTTP 429 DAILY_STAMP_ALLOWANCE_EXHAUSTED: Daily allowance used up."):
+            client.acquire_stamp_from_pool(size="small")
+
+    def test_file_too_large(self, requests_mock):
+        requests_mock.post(f"{GW}/api/v1/data/", status_code=413, json=_envelope(
+            "FILE_TOO_LARGE", "Upload exceeds maximum size of 10 MB."))
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError, match="HTTP 413 FILE_TOO_LARGE: Upload exceeds maximum size"):
+            client.upload_data(b"x", DUMMY_STAMP)
+
+    def test_rate_limit_shows_retry_after(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/stamps/", status_code=429, headers={"Retry-After": "42"}, json={
+            "error": "Rate limit exceeded",
+            "detail": "Too many requests. Try again in 42 seconds.",
+            "retry_after": 42,
+            "code": "RATE_LIMIT_EXCEEDED",
+            "message": "Too many requests. Try again in 42 seconds.",
+        })
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError) as exc:
+            client.list_stamps()
+
+        assert "HTTP 429 RATE_LIMIT_EXCEEDED: Too many requests." in str(exc.value)
+        assert "Retry after 42 s." in str(exc.value)
+        assert exc.value.__cause__.retry_after == 42
+
+    def test_placeholder_code_not_repeated(self, requests_mock):
+        """The free-tier 429 has no code of its own: the gateway sends HTTP_429.
+
+        Body as app/x402/dependency.py sends it: the generic message at the top
+        level, the specific reason in detail.detail.
+        """
+        generic = "Free tier rate limit exceeded. Use x402 payment for higher limits."
+        requests_mock.get(f"{GW}/api/v1/wallet", status_code=429, headers={"Retry-After": "60"}, json={
+            "detail": {"error": "Rate limit exceeded",
+                       "detail": "3 requests per 60 s allowed on the free tier",
+                       "message": generic,
+                       "payment_info": {"price_usd": "0.05", "network": "base-sepolia",
+                                        "pay_to": "0x" + "1" * 40}},
+            "code": "HTTP_429",
+            "message": generic,
+        })
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError) as exc:
+            client.get_wallet()
+
+        text = str(exc.value)
+        assert "HTTP 429: Free tier rate limit exceeded." in text
+        assert "3 requests per 60 s allowed on the free tier" in text
+        assert "HTTP_429" not in text
+        assert "Retry after 60 s." in text
+
+    def test_inner_reason_not_repeated_when_same_as_message(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/wallet", status_code=400, json={
+            "detail": {"code": "X", "message": "Same text.", "detail": "Same text."},
+            "code": "X", "message": "Same text."})
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError) as exc:
+            client.get_wallet()
+
+        assert str(exc.value).count("Same text.") == 1
+
+    def test_inner_reason_is_sanitized_and_bounded(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/wallet", status_code=429, json={
+            "detail": {"message": "Generic.", "detail": "reason\x1b[2J\u202e" + "r" * 5000},
+            "code": "HTTP_429", "message": "Generic."})
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError) as exc:
+            client.get_wallet()
+
+        text = str(exc.value)
+        assert "reason" in text
+        assert "\x1b" not in text and "\u202e" not in text
+        assert len(text) < 600
+
+    def test_older_gateway_code_under_detail(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/chequebook", status_code=503, json={
+            "detail": {"code": "BEE_UNAVAILABLE", "message": "The Bee node is not reachable."}})
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError, match="HTTP 503 BEE_UNAVAILABLE: The Bee node is not reachable."):
+            client.get_chequebook()
+
+    def test_older_gateway_error_field_under_detail(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/chequebook", status_code=400, json={
+            "detail": {"code": "SOMETHING", "error": "Something went wrong."}})
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError, match="HTTP 400 SOMETHING: Something went wrong."):
+            client.get_chequebook()
+
+    def test_plain_string_detail(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/wallet", status_code=500,
+                          json={"detail": "Internal server error. You were not charged."})
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError, match="HTTP 500: Internal server error. You were not charged."):
+            client.get_wallet()
+
+    def test_validation_errors_list_fields_bounded(self, requests_mock):
+        errors = [{"loc": ["body", f"field{i}"], "msg": f"problem {i}", "type": "value_error"}
+                  for i in range(6)]
+        requests_mock.post(f"{GW}/api/v1/stamps/", status_code=422, json={
+            "detail": errors, "code": "VALIDATION_ERROR",
+            "message": "The request is invalid; see detail for the fields."})
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError) as exc:
+            client.purchase_stamp(duration_hours=24)
+
+        text = str(exc.value)
+        assert "HTTP 422 VALIDATION_ERROR: The request is invalid" in text
+        assert "body.field0: problem 0" in text
+        assert "body.field2: problem 2" in text
+        assert "field3" not in text
+        assert "and 3 more" in text
+
+    def test_validation_more_suffix_survives_long_field_names(self, requests_mock):
+        errors = [{"loc": ["body", "f" * 200 + str(i)], "msg": "m" * 200, "type": "value_error"}
+                  for i in range(6)]
+        requests_mock.post(f"{GW}/api/v1/stamps/", status_code=422, json={
+            "detail": errors, "code": "VALIDATION_ERROR",
+            "message": "The request is invalid; see detail for the fields."})
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError) as exc:
+            client.purchase_stamp(duration_hours=24)
+
+        text = str(exc.value)
+        assert "The request is invalid" in text
+        assert "and 3 more" in text
+        assert len(text) < 600
+
+    def test_validation_errors_without_top_level_message(self, requests_mock):
+        requests_mock.post(f"{GW}/api/v1/stamps/", status_code=422, json={
+            "detail": [{"loc": ["body", "duration_hours"], "msg": "must be at least 24"}]})
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError, match="HTTP 422: body.duration_hours: must be at least 24"):
+            client.purchase_stamp(duration_hours=1)
+
+    def test_non_json_body_keeps_requests_text(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/wallet", status_code=502, text="<html>Bad Gateway</html>")
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError) as exc:
+            client.get_wallet()
+
+        assert "502 Server Error" in str(exc.value)
+        assert isinstance(exc.value.__cause__, requests.exceptions.HTTPError)
+        assert exc.value.__cause__.response.status_code == 502
+
+    def test_gateway_text_is_sanitized(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/wallet", status_code=400, json={
+            "code": "BAD\x1b[2J", "message": "evil\x1b[31m text‮ here"})
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError) as exc:
+            client.get_wallet()
+
+        text = str(exc.value)
+        assert "\x1b" not in text
+        assert "‮" not in text
+        assert "evil" in text
+
+    def test_long_message_is_truncated(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/wallet", status_code=400, json={"code": "X", "message": "a" * 5000})
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError) as exc:
+            client.get_wallet()
+
+        assert len(str(exc.value)) < 600
+
+    def test_special_cases_unchanged(self, requests_mock):
+        """404 mappings still apply before the generic error."""
+        from swarm_provenance_uploader.exceptions import NotaryNotEnabledError
+
+        requests_mock.get(f"{GW}/api/v1/stamps/{DUMMY_STAMP}", status_code=404, json=_envelope(
+            "HTTP_404", "Not Found"))
+        requests_mock.get(f"{GW}/api/v1/notary/info", status_code=404, json=_envelope("HTTP_404", "Not Found"))
+        client = GatewayClient(base_url=GW)
+
+        assert client.get_stamp(DUMMY_STAMP) is None
+        with pytest.raises(NotaryNotEnabledError):
+            client.get_notary_info()
+
+    def test_notary_code_mapping_unchanged(self, requests_mock):
+        from swarm_provenance_uploader.exceptions import NotaryNotEnabledError
+
+        requests_mock.post(f"{GW}/api/v1/data/", status_code=400, json=_envelope(
+            "NOTARY_NOT_ENABLED", "Notary is off."))
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(NotaryNotEnabledError):
+            client.upload_data_with_signing(b'{"data": 1}', DUMMY_STAMP)
+
+    def test_verbose_still_prints_the_url(self, requests_mock, capsys):
+        requests_mock.get(f"{GW}/api/v1/wallet", status_code=400, json=_envelope("X", "Bad."))
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(ConnectionError):
+            client.get_wallet(verbose=True)
+
+        assert f"{GW}/api/v1/wallet" in capsys.readouterr().out
+
+
+class TestPaidFailureMessages:
+    """Paid-path failures show the gateway code; gateway text is sanitised (#139, part of #151)."""
+
+    def test_settlement_failed_shows_code(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRejectedError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 402,
+            "json": {"code": "PAYMENT_SETTLEMENT_FAILED",
+                     "message": "The payment could not be settled (insufficient_funds).",
+                     "x402_status": "settlement_failed"},
+        }])
+        with pytest.raises(PaymentRejectedError) as exc:
+            paying_client.purchase_stamp()
+
+        assert str(exc.value) == ("The gateway did not accept the payment (PAYMENT_SETTLEMENT_FAILED): "
+                                  "The payment could not be settled (insufficient_funds).")
+
+    def test_rejected_without_code_keeps_old_text(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRejectedError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 402, "json": {"error": "authorization expired"}}])
+        with pytest.raises(PaymentRejectedError) as exc:
+            paying_client.purchase_stamp()
+
+        assert str(exc.value) == "The gateway did not accept the payment: authorization expired"
+
+    def test_rejected_text_is_sanitized(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRejectedError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 402,
+            "json": {"code": "BAD\x1b[2J", "message": "evil\x1b[31m text\u202e here"}}])
+        with pytest.raises(PaymentRejectedError) as exc:
+            paying_client.purchase_stamp()
+
+        text = str(exc.value)
+        assert "\x1b" not in text and "\u202e" not in text
+        assert "evil" in text and "BAD" in text
+
+    def test_outcome_unknown_suffix_is_sanitized(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 502, "json": {"code": "X", "message": "boom\x1b[2J\u202e"}}])
+        with pytest.raises(PaymentOutcomeUnknownError) as exc:
+            paying_client.purchase_stamp()
+
+        text = str(exc.value)
+        assert "Gateway: boom" in text
+        assert "\x1b" not in text and "\u202e" not in text
+
+    def test_settled_not_delivered_suffix_is_sanitized(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        requests_mock.post(f"{GW}/api/v1/data/", [PAYMENT_REQUIRED, {
+            "status_code": 500,
+            "json": {"code": "DELIVERY_FAILED_AFTER_PAYMENT", "message": "lost\x1b[2J\u202e"}}])
+        with pytest.raises(PaymentSettledNotDeliveredError) as exc:
+            paying_client.upload_data(b"x", DUMMY_STAMP)
+
+        text = str(exc.value)
+        assert "Gateway: lost" in text
+        assert "\x1b" not in text and "\u202e" not in text
+
+
+def _allowance_402(code="DAILY_STAMP_ALLOWANCE_EXHAUSTED", resets_at="2026-10-23T00:00:00Z"):
+    """The 402 swarm_connect's pool.py _refuse_allowance sends where paying bypasses the
+    allowance, after the x402 middleware lifts the payment request to the top level."""
+    message = (f"The daily free allowance of 5 small stamps for this application has been used up. "
+               f"It resets at {resets_at}. To continue now, pay with x402: send an X-PAYMENT header "
+               "with this same request and you get a pooled stamp immediately, without drawing on "
+               "the allowance.")
+    detail = {
+        "x402Version": 1,
+        "error": message,
+        "accepts": [{"scheme": "exact", "network": "base", "maxAmountRequired": "50000",
+                     "resource": "/api/v1/pool/acquire", "payTo": "0x" + "1" * 40,
+                     "asset": "0x" + "2" * 40}],
+        "code": code, "size": "small", "allowance": 5, "used": 5, "resets_at": resets_at,
+        "alternative": {"endpoint": "POST /api/v1/pool/acquire", "payment": "x402",
+                        "header": "X-PAYMENT"},
+        "message": message,
+    }
+    return {**detail, "code": code, "message": message, "detail": detail}
+
+
+class TestDefaultMode402:
+    """A 402 with x402 off keeps the gateway's code and message (#139)."""
+
+    def test_allowance_exhausted_shows_code_and_message(self, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", status_code=402, json=_allowance_402())
+        client = GatewayClient(base_url=GW, x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError) as exc:
+            client.acquire_stamp_from_pool(size="small")
+
+        err = exc.value
+        text = str(err)
+        assert "DAILY_STAMP_ALLOWANCE_EXHAUSTED" in text
+        assert "The daily free allowance of 5 small stamps" in text
+        assert "--x402" in text
+        assert "--free" not in text
+        assert err.code == "DAILY_STAMP_ALLOWANCE_EXHAUSTED"
+        assert err.resets_at == "2026-10-23T00:00:00Z"
+        assert err.gateway_message.startswith("The daily free allowance")
+        assert err.payment_options and err.payment_options[0]["maxAmountRequired"] == "50000"
+
+    def test_per_client_allowance_is_treated_the_same(self, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", status_code=402,
+                           json=_allowance_402(code="DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED"))
+        client = GatewayClient(base_url=GW, x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError) as exc:
+            client.acquire_stamp_from_pool(size="small")
+
+        assert "DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED" in str(exc.value)
+        assert "--free" not in str(exc.value)
+
+    def test_gateway_text_is_sanitized(self, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        body = _allowance_402(resets_at="soon\x1b[2J‮")
+        body["message"] = "used up\x1b[31m‮"
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", status_code=402, json=body)
+        client = GatewayClient(base_url=GW, x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError) as exc:
+            client.acquire_stamp_from_pool(size="small")
+
+        text = str(exc.value)
+        assert "\x1b" not in text and "‮" not in text
+        assert "\x1b" not in exc.value.resets_at and "‮" not in exc.value.resets_at
+
+    def test_ordinary_402_keeps_generic_text(self, requests_mock):
+        """The plain x402 payment request carries the placeholder code HTTP_402."""
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        accepts = [{"scheme": "exact", "network": "base-sepolia", "maxAmountRequired": "50000"}]
+        requests_mock.post(f"{GW}/api/v1/stamps/", status_code=402, json={
+            "x402Version": 1, "error": "Payment required", "accepts": accepts,
+            "code": "HTTP_402", "message": "Payment required",
+            "detail": {"x402Version": 1, "error": "Payment required", "accepts": accepts}})
+        client = GatewayClient(base_url=GW, x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError) as exc:
+            client.purchase_stamp()
+
+        assert str(exc.value) == ("Payment required (amounts: ['50000']). "
+                                  "Enable x402 with --x402 flag or use --free for free tier")
+        assert exc.value.code is None
+
+
+def _free_tier_disabled_402():
+    """swarm_connect app/x402/dependency.py: X-Payment-Mode: free on a gateway with the free
+    tier off. No code of its own, so the envelope adds the placeholder HTTP_402."""
+    accepts = [{"scheme": "exact", "network": "base", "maxAmountRequired": "50000"}]
+    detail = {"x402Version": 1, "error": "Free tier is not available. Payment required.",
+              "accepts": accepts}
+    return {**detail, "code": "HTTP_402", "message": "Free tier is not available. Payment required.",
+            "detail": detail}
+
+
+class TestFreeTier402:
+    """A 402 to a --free request: the free tier is no way forward (#139)."""
+
+    def test_free_tier_402_shows_gateway_message_and_no_free_hint(self, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(f"{GW}/api/v1/data/", status_code=402, json=_free_tier_disabled_402())
+        client = GatewayClient(base_url=GW, x402_enabled=False, free_tier=True)
+
+        with pytest.raises(PaymentRequiredError) as exc:
+            client.upload_data(b"x", DUMMY_STAMP)
+
+        text = str(exc.value)
+        assert "Free tier is not available. Payment required." in text
+        assert "--x402" in text
+        assert "--free" not in text
+        assert exc.value.free_tier_helps is False
+        assert exc.value.code is None
+
+    def test_same_402_without_free_keeps_generic_text(self, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.post(f"{GW}/api/v1/data/", status_code=402, json=_free_tier_disabled_402())
+        client = GatewayClient(base_url=GW, x402_enabled=False)
+
+        with pytest.raises(PaymentRequiredError) as exc:
+            client.upload_data(b"x", DUMMY_STAMP)
+
+        assert str(exc.value) == ("Payment required (amounts: ['50000']). "
+                                  "Enable x402 with --x402 flag or use --free for free tier")
+        assert exc.value.free_tier_helps is True
+
+
+class TestGatewayMessageLimit:
+    def test_allowance_429_message_is_not_cut(self, requests_mock):
+        """The testnet allowance refusal (pool.py _refuse_allowance) is about 330 characters."""
+        message = ("The daily free allowance of 5 small stamps for this application has been used "
+                   "up. It resets at 2026-10-23T00:00:00Z. To continue now, buy a stamp directly "
+                   "with POST /api/v1/stamps/ — that is not drawn from the pool, so this limit does "
+                   "not apply. It takes about a minute to become usable rather than seconds.")
+        assert len(message) > 300
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", status_code=429, json={
+            "detail": {"code": "DAILY_STAMP_ALLOWANCE_EXHAUSTED", "message": message},
+            "code": "DAILY_STAMP_ALLOWANCE_EXHAUSTED", "message": message})
+        client = GatewayClient(base_url=GW)
+
+        with pytest.raises(Exception) as exc:
+            client.acquire_stamp_from_pool(size="small")
+
+        assert "rather than seconds." in str(exc.value)

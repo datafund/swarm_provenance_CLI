@@ -3,6 +3,8 @@
 Provides unified error handling across both gateway and local Bee backends.
 """
 
+import requests
+
 
 class ProvenanceError(Exception):
     """Base exception for all provenance CLI errors."""
@@ -62,11 +64,39 @@ class X402Error(ProvenanceError):
 
 
 class PaymentRequiredError(X402Error):
-    """HTTP 402 received but x402 payments not configured or disabled."""
+    """HTTP 402 received but x402 payments not configured or disabled.
 
-    def __init__(self, message: str, payment_options: list = None):
+    When the gateway's 402 carries its own error code (not the placeholder
+    HTTP_402 of an ordinary payment request), `code` and `gateway_message`
+    hold it, and `resets_at` the time a spent free allowance resets (#139).
+    `free_tier_used` is True when the request was sent on the free tier;
+    `gateway_message` then holds the gateway's reason even without a code.
+    """
+
+    # Codes for which the free tier is no way forward: the pool allowance is
+    # what the free tier draws on, and the others refuse the free tier.
+    FREE_TIER_DOES_NOT_HELP = frozenset({
+        "DAILY_STAMP_ALLOWANCE_EXHAUSTED",
+        "DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED",
+        "FREE_TIER_DISABLED",
+        "PAYMENT_REQUIRED",
+    })
+
+    def __init__(self, message: str, payment_options: list = None, code: str = None,
+                 gateway_message: str = None, resets_at: str = None,
+                 free_tier_used: bool = False):
         super().__init__(message)
         self.payment_options = payment_options or []
+        self.code = code
+        self.gateway_message = gateway_message
+        self.resets_at = resets_at
+        # The request already asked for the free tier and still got a 402
+        self.free_tier_used = free_tier_used
+
+    @property
+    def free_tier_helps(self) -> bool:
+        """False when --free would not get past this 402: it was already used, or the code says so."""
+        return not self.free_tier_used and self.code not in self.FREE_TIER_DOES_NOT_HELP
 
 
 class InsufficientBalanceError(X402Error):
@@ -232,6 +262,25 @@ class StampPurchasePendingError(PaymentSettledNotDeliveredError):
         self.lookup = lookup
 
 
+class GatewayHTTPError(requests.exceptions.HTTPError):
+    """
+    An error response from the gateway, with the gateway's own code and message (#139).
+
+    A `requests.exceptions.HTTPError`, so code that catches that (and reads
+    `e.response.status_code`) keeps working. `code` is the gateway's error code
+    (for example STAMP_OWNERSHIP_DENIED), `gateway_message` its message, and
+    `retry_after` the Retry-After header in seconds, when the gateway sent one.
+    """
+
+    def __init__(self, message: str, response: requests.Response = None, code: str = None,
+                 gateway_message: str = None, retry_after: int = None):
+        super().__init__(message, response=response)
+        self.status_code = response.status_code if response is not None else None
+        self.code = code
+        self.gateway_message = gateway_message
+        self.retry_after = retry_after
+
+
 # --- Stamp Pool Exceptions ---
 
 class PoolError(ProvenanceError):
@@ -303,16 +352,36 @@ class SignatureVerificationError(NotaryError):
 
 # --- Chain / Blockchain Exceptions ---
 # Canonical definitions live in chain/exceptions.py; re-exported here
-# for backward compatibility.
+# for backward compatibility. The re-export is lazy: chain/exceptions.py
+# imports ProvenanceError from this module, so importing it eagerly here
+# made `import swarm_provenance_uploader.chain.provider` (or anything that
+# reaches chain/exceptions.py first) fail with a circular ImportError.
 
-from .chain.exceptions import (  # noqa: F401, E402
-    ChainError,
-    ChainConfigurationError,
-    ChainConnectionError,
-    ChainTransactionError,
-    ChainValidationError,
-    InsufficientFundsError,
-    DataNotRegisteredError,
-    DataAlreadyRegisteredError,
-    TransformationAlreadyExistsError,
-)
+_CHAIN_EXCEPTIONS = frozenset({
+    "ChainError",
+    "ChainConfigurationError",
+    "ChainConnectionError",
+    "ChainTransactionError",
+    "ChainValidationError",
+    "InsufficientFundsError",
+    "TransactionUnconfirmedError",
+    "TransactionNotRecordedError",
+    "TransactionNotVerifiedError",
+    "DataNotRegisteredError",
+    "DataAlreadyRegisteredError",
+    "TransformationAlreadyExistsError",
+})
+
+
+def __getattr__(name):
+    if name in _CHAIN_EXCEPTIONS:
+        from .chain import exceptions as _chain_exceptions
+
+        value = getattr(_chain_exceptions, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals()) | _CHAIN_EXCEPTIONS)

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/datafund/swarm_provenance_CLI/actions/workflows/ci.yml/badge.svg)](https://github.com/datafund/swarm_provenance_CLI/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.txt)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 
 A CLI toolkit to wrap data files within a metadata structure
 and upload them to the Swarm decentralized storage network.
@@ -11,7 +11,7 @@ and upload them to the Swarm decentralized storage network.
 - **Gateway** (default): Uses `provenance-gateway.datafund.io` - no local Bee node required
 - **Local**: Direct Bee node communication for development/self-hosted setups
 
-## Quick Start
+## Quick start
 
 ```bash
 # Install
@@ -76,9 +76,9 @@ swarm-prov-upload download <swarm_hash> --output-dir ./downloads --no-verify
    pip install -e .[testing]
    ```
 
-## Backend Configuration
+## Backend configuration
 
-### Gateway Backend (Default)
+### Gateway backend (default)
 No local Bee node required. Uses the Datafund provenance gateway.
 
 ```bash
@@ -92,7 +92,7 @@ swarm-prov-upload --backend gateway upload --file data.txt
 swarm-prov-upload --gateway-url https://custom.gateway.io upload --file data.txt
 ```
 
-### Local Backend
+### Local backend
 For development or self-hosted Swarm nodes.
 
 ```bash
@@ -103,7 +103,20 @@ swarm-prov-upload --backend local upload --file data.txt
 swarm-prov-upload --backend local upload --file data.txt --bee-url http://localhost:1633
 ```
 
-### Environment Variables
+### Gateway errors
+
+When the gateway refuses a request, the CLI prints the gateway's error code and message, and the wait time when the gateway sends a `Retry-After` header:
+
+```
+ERROR: Failed uploading data: Failed to upload data: HTTP 403 STAMP_OWNERSHIP_DENIED: <message>
+ERROR: Failed to list stamps: Failed to list stamps: HTTP 429 RATE_LIMIT_EXCEEDED: Too many requests. Try again in 42 seconds. Retry after 42 s.
+```
+
+The code tells you what went wrong (for example `EXTENSION_TOO_SMALL`, `DAILY_STAMP_ALLOWANCE_EXHAUSTED` or `FILE_TOO_LARGE`). Run the command with `--verbose` to also see the request URL. A response the gateway could not explain (for example an HTML error page from a proxy) is shown as the plain HTTP error.
+
+If a request needs payment and x402 is not enabled, the CLI says so: use `--x402` to pay, or `--free` for the free tier. When the gateway gives its own reason for the 402, the CLI prints its code and message. If the free daily pool allowance is used up (`DAILY_STAMP_ALLOWANCE_EXHAUSTED`), `--free` does not help, because the free tier draws on the same allowance: pay with `--x402`, or wait until the time the message gives.
+
+### Environment variables
 
 ```bash
 PROVENANCE_BACKEND=gateway           # gateway (default) or local
@@ -114,7 +127,7 @@ DEFAULT_POSTAGE_DURATION_HOURS=25    # Stamp validity in hours (gateway only, mi
 DEFAULT_POSTAGE_AMOUNT=1000000000    # Legacy: for local backend
 ```
 
-## Free Tier Mode (Optional)
+## Free tier mode (optional)
 
 For development and testing, use the gateway free tier — no wallet or payment configuration needed. Rate-limited to 3 requests/minute.
 
@@ -134,11 +147,11 @@ swarm-prov-upload upload --file data.txt
 |---------------------|-------------|---------|
 | `FREE_TIER` | Use gateway free tier (rate-limited) | `false` |
 
-## x402 Payment Mode (Optional)
+## x402 payment mode (optional)
 
 x402 enables pay-per-request payments using USDC on Base chain. When the gateway requires payment (HTTP 402), the CLI automatically handles the payment flow.
 
-### Quick Start
+### Quick start
 
 ```bash
 # Install with x402 support
@@ -162,7 +175,7 @@ swarm-prov-upload --x402 upload --file data.txt
 swarm-prov-upload --x402 --auto-pay --max-pay 1.00 upload --file data.txt
 ```
 
-### x402 Commands
+### x402 commands
 
 ```bash
 # Show configuration status
@@ -175,7 +188,7 @@ swarm-prov-upload x402 balance
 swarm-prov-upload x402 info
 ```
 
-### x402 Configuration
+### x402 configuration
 
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
@@ -187,7 +200,7 @@ swarm-prov-upload x402 info
 | `X402_EXPECTED_PAY_TO` | Only pay this recipient address (optional) | not set |
 | `X402_RPC_URL` | Custom RPC URL (optional) | Uses default |
 
-### Global Flags
+### Global flags
 
 | Flag | Description |
 |------|-------------|
@@ -198,7 +211,7 @@ swarm-prov-upload x402 info
 | `--x402-network TEXT` | Network: `base-sepolia` or `base` |
 | `--idempotency-key TEXT` | Idempotency-Key for this command's paid requests; pass the key printed by a failed run to repeat it without paying twice (on a gateway that supports it) |
 
-### Testnet Setup
+### Testnet setup
 
 1. **Get testnet ETH** (for gas): https://www.alchemy.com/faucets/base-sepolia
 2. **Get testnet USDC**: https://faucet.circle.com/
@@ -206,11 +219,11 @@ swarm-prov-upload x402 info
 
 See [docs/x402-setup.md](docs/x402-setup.md) for detailed setup instructions.
 
-## Blockchain Anchoring (Optional)
+## Blockchain anchoring (optional)
 
 On-chain provenance anchoring registers Swarm hashes on the DataProvenance smart contract (Base chain), providing immutable proof of data registration, ownership, and transformation lineage.
 
-### Quick Start
+### Quick start
 
 ```bash
 # Install with blockchain support
@@ -233,7 +246,7 @@ swarm-prov-upload chain get <swarm_hash>
 swarm-prov-upload chain verify <swarm_hash>
 ```
 
-### Chain Commands
+### Chain commands
 
 ```bash
 # Wallet balance and chain info
@@ -296,14 +309,14 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 
 > **`chain protect` vs separate commands**: `chain protect` combines verify + anchor + transform + restrict into one command. If the restrict step fails, the command shows a warning (transform already succeeded) and exits 0 with `partial_failure: true` in JSON output. Use `chain transform --restrict-original` for the two-step version without the pre-flight ACTIVE check.
 
-### Global Flags
+### Global flags
 
 | Flag | Description |
 |------|-------------|
 | `--chain TEXT` | Blockchain: `base-sepolia` (testnet) or `base` (mainnet) |
 | `--chain-rpc TEXT` | Custom RPC URL for blockchain connection |
 
-### Blockchain Configuration
+### Blockchain configuration
 
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
@@ -316,7 +329,7 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 | `CHAIN_GAS_LIMIT` | Explicit gas limit (optional, skips RPC estimation) | Auto-estimated |
 | `CHAIN_RPC_URLS` | Comma-separated fallback RPC URLs (optional) | Uses preset fallbacks |
 
-### Testnet Setup
+### Testnet setup
 
 1. **Get testnet ETH** (for gas): https://www.alchemy.com/faucets/base-sepolia
 2. **Get testnet USDC** (if using x402): https://faucet.circle.com/
@@ -355,9 +368,9 @@ print(f"TX: {result.explorer_url}")
 - `balance()` - Get wallet balance and chain info
 - `health_check()` - Check RPC connectivity
 
-## Run Tests
+## Run tests
 
-### Unit Tests (Mocked)
+### Unit tests (mocked)
 
 Unit tests use mocks and do not require a live Bee node or gateway.
 
@@ -369,7 +382,7 @@ pytest
 pytest --ignore=tests/test_integration.py
 ```
 
-### Integration Tests (Real Backends)
+### Integration tests (real backends)
 
 Integration tests hit real services. They auto-skip if backends are unavailable.
 
@@ -398,7 +411,7 @@ pytest -m "blockchain and slow"
 
 ## Usage
 
-### Data Operations
+### Data operations
 
 ```bash
 # Upload data to Swarm (default: 25 hour stamp validity)
@@ -420,7 +433,7 @@ swarm-prov-upload upload --file /path/to/data.txt --usePool
 swarm-prov-upload download <swarm_hash> --output-dir ./downloads --verbose
 ```
 
-### Collection Upload (Gateway only)
+### Collection upload (gateway only)
 
 Upload a directory as a Swarm manifest. Files are accessible via path-based URLs (`bzz/<reference>/path/to/file`).
 
@@ -525,7 +538,7 @@ You can also use any Swarm gateway or a local Bee node to access the files.
 | `--sign` | Sign document with notary service (value: `notary`, gateway only) |
 | `--amount` | Legacy: PLUR amount (local backend) |
 
-### Stamp Management (Gateway only)
+### Stamp management (gateway only)
 
 ```bash
 # List all stamps
@@ -547,7 +560,7 @@ swarm-prov-upload stamps check <stamp_id>
 swarm-prov-upload stamps pool-status
 ```
 
-#### Stamp Health Check
+#### Stamp health check
 
 The `stamps check` command performs a detailed health check on a stamp:
 
@@ -578,13 +591,13 @@ Stamp Health Check:
 
 Use `-v` (verbose) for detailed metrics including TTL, utilization percentage, and expiration date.
 
-### Stamp Pool (Gateway only)
+### Stamp pool (gateway only)
 
-#### What is a Stamp Pool?
+#### What is a stamp pool?
 
 Normally, purchasing a postage stamp on Swarm takes >1 minute because the transaction must be confirmed on-chain and the stamp must sync across the network. The gateway maintains a **pool of pre-purchased stamps** that can be acquired instantly (~5 seconds).
 
-#### When to Use `--usePool`
+#### When to use `--usePool`
 
 | Scenario | Recommendation |
 |----------|----------------|
@@ -593,7 +606,7 @@ Normally, purchasing a postage stamp on Swarm takes >1 minute because the transa
 | Pool is empty (check with `stamps pool-status`) | Use regular purchase (omit `--usePool`) |
 | Need specific stamp configuration | Use regular purchase with `--duration`/`--depth` |
 
-#### Size Presets
+#### Size presets
 
 Stamps come in three sizes based on storage capacity:
 
@@ -603,7 +616,7 @@ Stamps come in three sizes based on storage capacity:
 | `medium` | 20 | Medium files (1-100MB) |
 | `large` | 22 | Large files (>100MB) |
 
-#### Usage Examples
+#### Usage examples
 
 ```bash
 # Upload using a pooled stamp (uses 'small' size by default)
@@ -616,7 +629,7 @@ swarm-prov-upload upload --file data.txt --usePool --size medium
 swarm-prov-upload stamps pool-status
 ```
 
-#### Pool Status Output
+#### Pool status output
 
 ```
 Stamp Pool Status:
@@ -634,7 +647,7 @@ Stamp Pool Status:
 - **Total**: All stamps in pool (including recently acquired ones being replenished)
 - **Target**: The gateway's target reserve level for each size
 
-#### Error Handling
+#### Error handling
 
 If the pool is empty or unavailable, the CLI provides helpful guidance:
 
@@ -652,11 +665,11 @@ Try again later, use a different size, or use regular purchase (without --usePoo
 - **Automatic fallback**: Larger stamps substituted if exact size unavailable
 - **Same pricing**: x402 costs are identical to regular purchases
 
-### Notary Signing (Gateway only)
+### Notary signing (gateway only)
 
 The notary service adds cryptographic signatures to uploaded data, providing proof of authenticity and integrity.
 
-#### How It Works
+#### How it works
 
 When you upload with `--sign notary`, the gateway's notary service:
 1. Receives your data payload
@@ -682,7 +695,7 @@ swarm-prov-upload notary status
 swarm-prov-upload notary verify --file signed_document.json
 ```
 
-#### Verification on Download
+#### Verification on download
 
 Signature verification is enabled by default when downloading signed documents. A signature that does not verify, or cannot be checked, fails the download (exit 1) and nothing is saved:
 
@@ -708,7 +721,7 @@ Against the Swarm reference itself:
 
 The expected signer comes from `GET /api/v1/notary/info` on the same gateway, so a gateway serving forged documents could also name its own key; pin the notary address you trust with `--notary-address` or `NOTARY_ADDRESS`. The saved `<hash>.meta.json` is the document as downloaded, signatures included, so it can be checked again later with `swarm-prov-upload notary verify --file <hash>.meta.json`. `--strict` is kept as an alias of `--require-signature`.
 
-#### Signature Structure
+#### Signature structure
 
 The notary adds a signature entry in the following format:
 
@@ -739,7 +752,7 @@ The notary adds a signature entry in the following format:
 | `hashed_fields` | Fields whose values were hashed (typically `["data"]`) |
 | `signed_message_format` | Format pattern of the signed message |
 
-#### Verifying Signatures Manually
+#### Verifying signatures manually
 
 The signature can be verified with any Ethereum library:
 
@@ -762,7 +775,7 @@ recovered = Account.recover_message(signable, signature=signature["signature"])
 assert recovered.lower() == expected_address.lower()
 ```
 
-### Information Commands
+### Information commands
 
 ```bash
 # Check backend health
@@ -795,7 +808,7 @@ The [`examples/`](examples/) directory contains real-world usage demos with shel
 
 See [examples/README.md](examples/README.md) for the full guide with walkthroughs.
 
-## Architecture & Features
+## Architecture & features
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
@@ -1030,7 +1043,7 @@ See [examples/README.md](examples/README.md) for the full guide with walkthrough
 │                               TECHNOLOGY STACK                                 │
 │                                                                                 │
 │  🐍 CORE TECHNOLOGIES              📚 KEY LIBRARIES                            │
-│  • Python 3.8+                    • Typer - CLI framework                     │
+│  • Python 3.9+                    • Typer - CLI framework                     │
 │  • Modular architecture           • Pydantic v2 - Data validation             │
 │  • Type hints throughout          • Requests - HTTP client                    │
 │  • Async-ready design             • Python-dotenv - Config management         │
@@ -1060,7 +1073,7 @@ This architecture diagram shows the **Swarm Provenance Uploader** as a layered s
 - ✅ **Decentralized storage** (Swarm network)
 - ✅ **Production ready** (error handling, retries, logging)
 
-## Project Directory Structure
+## Project directory structure
 
 ```
 swarm_provenance_uploader/

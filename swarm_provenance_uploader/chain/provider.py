@@ -11,6 +11,7 @@ import logging
 from typing import List, Optional
 
 from .exceptions import ChainConfigurationError, ChainConnectionError
+from .redact import redact_url, register_url_secrets
 from .._requirements import INSTALL_SIGNING_DEPS
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,18 @@ CHAIN_PRESETS = {
 }
 
 
+def _preset_strings() -> List[str]:
+    """Chain names and the string values of CHAIN_PRESETS: public, never redacted."""
+    strings = list(CHAIN_PRESETS)
+    for preset in CHAIN_PRESETS.values():
+        for value in preset.values():
+            if isinstance(value, str):
+                strings.append(value)
+            elif isinstance(value, (list, tuple)):
+                strings.extend(v for v in value if isinstance(v, str))
+    return strings
+
+
 class ChainProvider:
     """Provider for Web3 connections to supported EVM chains.
 
@@ -134,6 +147,9 @@ class ChainProvider:
         else:
             # Custom RPC with no explicit fallbacks — primary only
             self._rpc_urls = [self.rpc_url]
+        # Error texts can repeat parts of these URLs without the URL around
+        # them (an HTML page quoting the path): remember them for redaction
+        register_url_secrets(self._rpc_urls, public=_preset_strings())
 
         if not self.contract_address:
             raise ChainConfigurationError(
@@ -201,8 +217,8 @@ class ChainProvider:
                 if candidate.is_connected():
                     logger.info(
                         "RPC fallback: switched from %s to %s",
-                        self.rpc_url,
-                        url,
+                        redact_url(self.rpc_url),
+                        redact_url(url),
                     )
                     self._web3 = candidate
                     self.rpc_url = url
@@ -226,7 +242,7 @@ class ChainProvider:
             try:
                 if not self._web3.is_connected():
                     raise ChainConnectionError(
-                        f"Cannot connect to RPC endpoint: {self.rpc_url}",
+                        f"Cannot connect to RPC endpoint: {redact_url(self.rpc_url)}",
                         rpc_url=self.rpc_url,
                     )
                 actual_chain_id = self._web3.eth.chain_id

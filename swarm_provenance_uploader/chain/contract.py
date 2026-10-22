@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .exceptions import ChainConfigurationError, ChainValidationError
+from .redact import redact_urls
 
 logger = logging.getLogger(__name__)
 
@@ -558,7 +559,7 @@ class DataProvenanceContract:
             # Reconstruct the record from the scalar mapping.
             if self.supports_transformation_links():
                 raise  # genuine error on v2+ — re-raise
-            logger.debug("getDataRecord decode failed on older contract, using fallback: %s", e)
+            logger.debug("getDataRecord decode failed on older contract, using fallback: %s", redact_urls(str(e)))
             return self._get_data_record_v1_fallback(hash_bytes)
 
     def _get_data_record_v1_fallback(self, hash_bytes: bytes) -> Tuple:
@@ -950,6 +951,31 @@ class DataProvenanceContract:
         except Exception:
             # Contract may not have DataMerged event (v1)
             return []
+
+    # --- Receipt events ---
+
+    def count_receipt_events(self, event_name: str, receipt) -> int:
+        """
+        Count the events of one type that this contract emitted in a receipt.
+
+        Logs from other addresses are not counted, even when they decode as
+        the same event: web3 decodes by event signature only.
+
+        Args:
+            event_name: Event name from the ABI (e.g. 'DataRegistered').
+            receipt: Transaction receipt.
+
+        Returns:
+            Number of matching events emitted by this contract address.
+        """
+        from web3.logs import DISCARD
+
+        event = getattr(self._contract.events, event_name)()
+        logs = event.process_receipt(receipt, errors=DISCARD)
+        return sum(
+            1 for log in logs
+            if str(log["address"]).lower() == self._address.lower()
+        )
 
     # --- Gas estimation ---
 

@@ -1,14 +1,14 @@
-# Example 02: Audit Trail
+# Example 02: Audit trail
 
 Demonstrates using Swarm as an immutable audit log for compliance records.
 
-## What This Demonstrates
+## What this demonstrates
 
 - Uploading multiple audit records with a provenance standard (`--std "AUDIT-LOG-V1"`)
 - Immutable storage of compliance-critical events
 - Downloading and verifying record integrity via SHA-256
 
-## Use Case
+## Use case
 
 Organizations subject to SOX, GDPR, or ISO 27001 need tamper-proof audit trails. By uploading audit events to Swarm with a provenance standard tag, each record gets:
 
@@ -23,7 +23,7 @@ No one — not even the data owner — can alter a record after upload without c
 1. Install the CLI: `pip install -e .`
 2. Gateway access (default, no setup needed)
 
-## Quick Start
+## Quick start
 
 ### Shell
 
@@ -38,7 +38,7 @@ chmod +x demo.sh
 python run_demo.py
 ```
 
-## Step-by-Step Walkthrough
+## Step-by-step walkthrough
 
 ### 1. Upload audit records
 
@@ -69,7 +69,7 @@ shasum -a 256 downloads/*.data
 
 If the hashes match, the record is intact.
 
-## Sample Records
+## Sample records
 
 | File | Event Type | Description |
 |------|-----------|-------------|
@@ -77,7 +77,7 @@ If the hashes match, the record is intact.
 | `audit_record_002.json` | Data access | Analyst queries EU customer dataset |
 | `audit_record_003.json` | Config change | Sysadmin modifies firewall rules |
 
-## Metadata Envelope
+## Metadata envelope
 
 When uploaded with `--std "AUDIT-LOG-V1"`, the metadata envelope includes:
 

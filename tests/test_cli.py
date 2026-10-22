@@ -3498,8 +3498,8 @@ class TestChainProtectCommand:
         assert result.exit_code == 1
         assert "not registered" in result.stdout.lower()
 
-    def test_protect_restrict_failure_warns(self, mocker):
-        """Tests protect continues with warning when restrict fails after successful transform."""
+    def test_protect_restrict_failure_exits_1(self, mocker):
+        """A failed restrict step exits 1 and still prints the transform transaction (#175)."""
         from swarm_provenance_uploader.models import (
             ChainProvenanceRecord, DataStatusEnum, TransformResult,
         )
@@ -3530,12 +3530,14 @@ class TestChainProtectCommand:
             app, ["chain", "protect", DUMMY_SWARM_REF, "c" * 64]
         )
 
-        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
-        assert "WARNING" in result.stdout
-        assert "partially complete" in result.stdout.lower() or "restrict failed" in result.stdout.lower()
+        assert result.exit_code == 1, result.output
+        assert "Failed to restrict original: reverted" in result.output
+        assert DUMMY_TX_HASH in result.output
+        assert "Restrict manually" in result.output
+        assert "Protect complete" not in result.output
 
     def test_protect_restrict_failure_json(self, mocker):
-        """Tests protect JSON output includes partial_failure when restrict fails."""
+        """A failed restrict step exits 1 with partial_failure and the error (#175)."""
         from swarm_provenance_uploader.models import (
             ChainProvenanceRecord, DataStatusEnum, TransformResult,
         )
@@ -3566,15 +3568,14 @@ class TestChainProtectCommand:
             app, ["chain", "protect", DUMMY_SWARM_REF, "c" * 64, "--json"]
         )
 
-        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
-        assert "WARNING" in result.stdout
-        # Extract JSON from mixed output (CliRunner merges stderr into stdout)
+        assert result.exit_code == 1, result.output
         import json
-        json_start = result.stdout.index("{")
-        output = json.loads(result.stdout[json_start:])
+        output = json.loads(result.output)  # JSON only, no warning text
         assert output["partial_failure"] is True
         assert output["restrict"] is None
-        assert "transform" in output
+        assert output["transform"]["tx_hash"] == DUMMY_TX_HASH
+        assert output["failed_step"] == "restrict"
+        assert output["error"]["error"] == "transaction_failed"
 
     def test_protect_anchor_new_failure(self, mocker):
         """Tests protect exits when anchor-new fails."""
@@ -4034,9 +4035,10 @@ class TestChainTransformAdditional:
         assert "transform" in output
         assert "restrict" in output
         assert output["restrict"] is not None
+        assert output["partial_failure"] is False
 
-    def test_restrict_original_failure_warns(self, mocker):
-        """Tests --restrict-original shows warning when set_status fails."""
+    def test_restrict_original_failure_exits_1(self, mocker):
+        """A failed restrict step exits 1 and still prints the transform transaction (#175)."""
         from swarm_provenance_uploader.models import TransformResult
         from swarm_provenance_uploader.exceptions import ChainTransactionError
 
@@ -4058,12 +4060,13 @@ class TestChainTransformAdditional:
             app, ["chain", "transform", DUMMY_SWARM_REF, "c" * 64, "--restrict-original"]
         )
 
-        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
-        assert "WARNING" in result.stdout
-        assert "Transformation recorded" in result.stdout
+        assert result.exit_code == 1, result.output
+        assert "Failed to restrict original: reverted" in result.output
+        assert DUMMY_TX_HASH in result.output
+        assert "Restrict manually" in result.output
 
     def test_restrict_original_failure_json(self, mocker):
-        """Tests --restrict-original --json with failed restrict shows null."""
+        """--restrict-original --json with a failed restrict exits 1 with partial_failure (#175)."""
         from swarm_provenance_uploader.models import TransformResult
         from swarm_provenance_uploader.exceptions import ChainTransactionError
 
@@ -4085,14 +4088,13 @@ class TestChainTransformAdditional:
             app, ["chain", "transform", DUMMY_SWARM_REF, "c" * 64, "--restrict-original", "--json"]
         )
 
-        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
-        assert "WARNING" in result.stdout
-        # Extract JSON from mixed output (CliRunner merges stderr into stdout)
+        assert result.exit_code == 1, result.output
         import json
-        json_start = result.stdout.index("{")
-        output = json.loads(result.stdout[json_start:])
+        output = json.loads(result.output)  # JSON only, no warning text
         assert output["restrict"] is None
         assert output["transform"]["tx_hash"] == DUMMY_TX_HASH
+        assert output["partial_failure"] is True
+        assert output["failed_step"] == "restrict"
 
 
 # =============================================================================
@@ -4973,6 +4975,78 @@ class TestPaymentPromptReviewCases:
         assert "Payment not made: Payment of $0.050000 declined by user" in result.output
         assert "Use --x402 to enable" not in result.output
 
+    def test_payment_required_hint_mentions_free_when_x402_off(self, mocker):
+        """#139: a 402 in default mode names both ways forward, --x402 and --free."""
+        _x402_config["enabled"] = False
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.side_effect = exceptions.PaymentRequiredError("Payment required")
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["upload", "--file", "d.txt"])
+        assert result.exit_code == 1
+        assert "--x402" in result.output
+        assert "--free for the free tier" in result.output
+
+    def test_allowance_402_shows_code_and_no_free_hint(self, requests_mock):
+        """#139: the pool's allowance 402 (x402 on, paid bypass honoured) keeps its code and
+        message; --free would not help, because the free tier draws on the same allowance."""
+        _x402_config["enabled"] = False
+        gw = "https://test.gateway.io"
+        message = ("The daily free allowance of 5 small stamps for this application has been used "
+                   "up. It resets at 2026-10-23T00:00:00Z. To continue now, pay with x402.")
+        detail = {"x402Version": 1, "error": message,
+                  "accepts": [{"scheme": "exact", "network": "base", "maxAmountRequired": "50000"}],
+                  "code": "DAILY_STAMP_ALLOWANCE_EXHAUSTED", "size": "small", "allowance": 5,
+                  "used": 5, "resets_at": "2026-10-23T00:00:00Z", "message": message}
+        requests_mock.get(f"{gw}/api/v1/pool/status", json={
+            "enabled": True, "reserve_config": {"17": 5}, "current_levels": {"17": 1},
+            "available_stamps": {"17": [DUMMY_STAMP]}, "total_stamps": 1,
+            "low_reserve_warning": False, "errors": []})
+        requests_mock.post(f"{gw}/api/v1/pool/acquire", status_code=402,
+                           json={**detail, "detail": detail})
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--gateway-url", gw, "upload", "--file", "d.txt", "--usePool"])
+        assert result.exit_code == 1
+        assert "DAILY_STAMP_ALLOWANCE_EXHAUSTED" in result.output
+        assert "The daily free allowance of 5 small stamps" in result.output
+        assert "--x402" in result.output
+        assert "2026-10-23T00:00:00Z" in result.output
+        assert "--free" not in result.output
+
+    def test_free_tier_402_shows_message_and_no_free_hint(self, requests_mock):
+        """#139: with --free, a 402 means the free tier is no way forward (here: disabled)."""
+        _x402_config["enabled"] = False
+        gw = "https://test.gateway.io"
+        detail = {"x402Version": 1, "error": "Free tier is not available. Payment required.",
+                  "accepts": [{"scheme": "exact", "network": "base", "maxAmountRequired": "50000"}]}
+        requests_mock.post(f"{gw}/api/v1/stamps/", status_code=402, json={
+            **detail, "code": "HTTP_402", "message": detail["error"], "detail": detail})
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--free", "--gateway-url", gw, "upload", "--file", "d.txt"])
+        assert result.exit_code == 1
+        assert "Free tier is not available. Payment required." in result.output
+        assert "--x402" in result.output
+        assert "--free" not in result.output
+
+    def test_gateway_error_code_reaches_the_user(self, mocker, requests_mock):
+        """#139: the gateway's code and message are printed, not a generic HTTP error."""
+        requests_mock.post("https://test.gateway.io/api/v1/stamps/", status_code=403, json={
+            "detail": {"code": "STAMP_OWNERSHIP_DENIED", "message": "Not your stamp."},
+            "code": "STAMP_OWNERSHIP_DENIED", "message": "Not your stamp."})
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--gateway-url", "https://test.gateway.io", "upload", "--file", "d.txt"])
+        assert result.exit_code == 1
+        assert "HTTP 403 STAMP_OWNERSHIP_DENIED: Not your stamp." in result.output
+        assert "Client Error" not in result.output
+
     def test_total_printed_when_command_fails_after_paying(self, mocker):
         from swarm_provenance_uploader.cli import _record_x402_payment
 
@@ -5358,3 +5432,1259 @@ class TestDownloadWithoutEthAccount:
         assert result.exit_code == 1
         assert "eth-account is not installed" in result.output
         assert "FAILED" not in result.output
+
+
+class TestChainNotRecorded:
+    """A transaction that succeeded without the contract's events is reported as not recorded (#166)."""
+
+    COMMANDS = [
+        ("anchor", ["chain", "anchor", DUMMY_SWARM_REF]),
+        ("set_storage_ref", ["chain", "set-storage-ref", DUMMY_SWARM_REF, "c" * 64]),
+        ("access", ["chain", "access", DUMMY_SWARM_REF]),
+        ("set_status", ["chain", "status", DUMMY_SWARM_REF, "--set", "restricted"]),
+        ("transfer_ownership", ["chain", "transfer", DUMMY_SWARM_REF, "--to", DUMMY_ADDRESS]),
+        ("set_delegate", ["chain", "delegate", DUMMY_ADDRESS, "--authorize"]),
+        ("transform", ["chain", "transform", DUMMY_SWARM_REF, "c" * 64, "--description", "d"]),
+        ("merge_transform", ["chain", "merge", "a" * 64, "b" * 64, "c" * 64, "--description", "d"]),
+    ]
+
+    def _error(self):
+        from swarm_provenance_uploader.exceptions import TransactionNotRecordedError
+
+        return TransactionNotRecordedError(
+            f"Not recorded: transaction {DUMMY_TX_HASH} succeeded",
+            tx_hash=DUMMY_TX_HASH,
+            event_name="DataAccessed",
+            expected_count=1,
+            emitted_count=0,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=DUMMY_EXPLORER_URL,
+        )
+
+    @pytest.mark.parametrize("method,args", COMMANDS, ids=[c[0] for c in COMMANDS])
+    def test_not_recorded_exits_nonzero(self, mocker, method, args):
+        """Each write command prints "not recorded" with the tx hash and exits 1."""
+        mock_client = mocker.MagicMock()
+        getattr(mock_client, method).side_effect = self._error()
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        assert "not recorded" in result.output.lower()
+        assert DUMMY_TX_HASH in result.output
+        assert DUMMY_EXPLORER_URL in result.output
+        assert "Transaction failed" not in result.output
+
+    @pytest.mark.parametrize("method,args", COMMANDS, ids=[c[0] for c in COMMANDS])
+    def test_not_recorded_json(self, mocker, method, args):
+        """With --json, the error is a JSON object with the tx hash."""
+        mock_client = mocker.MagicMock()
+        getattr(mock_client, method).side_effect = self._error()
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, args + ["--json"])
+
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.output)
+        assert output["error"] == "not_recorded"
+        assert output["tx_hash"] == DUMMY_TX_HASH
+        assert output["explorer_url"] == DUMMY_EXPLORER_URL
+        assert output["expected_count"] == 1
+        assert output["emitted_count"] == 0
+
+    def test_not_verified_output(self, mocker):
+        """Events that could not be decoded are reported as not verified, not as not recorded."""
+        from swarm_provenance_uploader.exceptions import TransactionNotVerifiedError
+
+        error = TransactionNotVerifiedError(
+            f"Not verified: transaction {DUMMY_TX_HASH} was mined, but its DataAccessed events could not be verified: boom",
+            tx_hash=DUMMY_TX_HASH,
+            event_name="DataAccessed",
+            expected_count=1,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=DUMMY_EXPLORER_URL,
+            reason="boom",
+        )
+        mock_client = mocker.MagicMock()
+        mock_client.access.side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+        assert result.exit_code == 1, result.output
+        assert "Not verified" in result.output
+        assert "Not recorded." not in result.output
+        assert DUMMY_TX_HASH in result.output
+        assert DUMMY_EXPLORER_URL in result.output
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF, "--json"])
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.output)
+        assert output["error"] == "not_verified"
+        assert output["tx_hash"] == DUMMY_TX_HASH
+        assert output["reason"] == "boom"
+        assert "emitted_count" not in output
+
+
+class TestChainCompositeNotRecorded:
+    """protect and transform --restrict-original exit 1 when a step is not recorded (#166)."""
+
+    ANCHOR_TX = "0x" + "a1" * 32
+    TRANSFORM_TX = "0x" + "b2" * 32
+    STEP_TX = "0x" + "c3" * 32
+    STEP_EXPLORER = "https://base-sepolia.blockscout.com/tx/" + STEP_TX
+
+    def _error(self, event):
+        from swarm_provenance_uploader.exceptions import TransactionNotRecordedError
+
+        return TransactionNotRecordedError(
+            f"Not recorded: transaction {self.STEP_TX} succeeded",
+            tx_hash=self.STEP_TX,
+            event_name=event,
+            expected_count=1,
+            emitted_count=0,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=self.STEP_EXPLORER,
+        )
+
+    def _client(self, mocker):
+        from swarm_provenance_uploader.models import (
+            AnchorResult, ChainProvenanceRecord, DataStatusEnum, TransformResult,
+        )
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            status=DataStatusEnum.ACTIVE,
+            accessors=[],
+            transformations=[],
+        )
+        mock_client.anchor.return_value = AnchorResult(
+            tx_hash=self.ANCHOR_TX, block_number=1, gas_used=1,
+            explorer_url="https://base-sepolia.blockscout.com/tx/" + self.ANCHOR_TX,
+            swarm_hash="c" * 64, data_type="swarm-provenance", owner=DUMMY_ADDRESS,
+        )
+        mock_client.transform.return_value = TransformResult(
+            tx_hash=self.TRANSFORM_TX, block_number=2, gas_used=1, explorer_url=None,
+            original_hash=DUMMY_SWARM_REF, new_hash="c" * 64, description="d",
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+        return mock_client
+
+    PROTECT = ["chain", "protect", DUMMY_SWARM_REF, "c" * 64, "--description", "d", "--anchor-new"]
+    TRANSFORM = ["chain", "transform", DUMMY_SWARM_REF, "c" * 64, "--description", "d", "--restrict-original"]
+
+    def test_transform_restrict_not_recorded(self, mocker):
+        client = self._client(mocker)
+        client.set_status.side_effect = self._error("DataStatusChanged")
+
+        result = runner.invoke(app, self.TRANSFORM)
+
+        assert result.exit_code == 1, result.output
+        assert "Not recorded" in result.output
+        assert self.STEP_TX in result.output
+        assert self.STEP_EXPLORER in result.output
+        assert self.TRANSFORM_TX in result.output  # the step that succeeded
+
+    def test_transform_restrict_not_recorded_json(self, mocker):
+        client = self._client(mocker)
+        client.set_status.side_effect = self._error("DataStatusChanged")
+
+        result = runner.invoke(app, self.TRANSFORM + ["--json"])
+
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.output)
+        assert output["transform"]["tx_hash"] == self.TRANSFORM_TX
+        assert output["restrict"] is None
+        assert output["partial_failure"] is True
+        assert output["unconfirmed"]["error"] == "not_recorded"
+        assert output["unconfirmed"]["tx_hash"] == self.STEP_TX
+
+    @pytest.mark.parametrize(
+        "step,method,event,done",
+        [
+            ("anchor", "anchor", "DataRegistered", []),
+            ("transform", "transform", "DataTransformed", ["ANCHOR_TX"]),
+            ("restrict", "set_status", "DataStatusChanged", ["ANCHOR_TX", "TRANSFORM_TX"]),
+        ],
+        ids=["anchor", "transform", "restrict"],
+    )
+    def test_protect_step_not_recorded(self, mocker, step, method, event, done):
+        client = self._client(mocker)
+        getattr(client, method).side_effect = self._error(event)
+
+        result = runner.invoke(app, self.PROTECT)
+
+        assert result.exit_code == 1, result.output
+        assert "Not recorded" in result.output
+        assert self.STEP_TX in result.output
+        assert self.STEP_EXPLORER in result.output
+        for name in done:
+            assert getattr(self, name) in result.output
+        assert "Protect complete" not in result.output
+
+    @pytest.mark.parametrize(
+        "step,method,event",
+        [
+            ("anchor", "anchor", "DataRegistered"),
+            ("transform", "transform", "DataTransformed"),
+            ("restrict", "set_status", "DataStatusChanged"),
+        ],
+        ids=["anchor", "transform", "restrict"],
+    )
+    def test_protect_step_not_recorded_json(self, mocker, step, method, event):
+        client = self._client(mocker)
+        getattr(client, method).side_effect = self._error(event)
+
+        result = runner.invoke(app, self.PROTECT + ["--json"])
+
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.output)
+        # Partial only when an earlier step was recorded
+        assert output["partial_failure"] is (step != "anchor")
+        assert output["unconfirmed"]["tx_hash"] == self.STEP_TX
+        assert output["unconfirmed"]["event"] == event
+        assert output["restrict"] is None
+        if step == "anchor":
+            assert "anchor" not in output
+            assert output["transform"] is None
+        else:
+            assert output["anchor"]["tx_hash"] == self.ANCHOR_TX
+        if step == "restrict":
+            assert output["transform"]["tx_hash"] == self.TRANSFORM_TX
+        if step == "transform":
+            assert output["transform"] is None
+
+    def test_not_verified_step_json(self, mocker):
+        """A not-verified step is reported under the neutral "unconfirmed" key."""
+        from swarm_provenance_uploader.exceptions import TransactionNotVerifiedError
+
+        client = self._client(mocker)
+        client.set_status.side_effect = TransactionNotVerifiedError(
+            f"Not verified: transaction {self.STEP_TX} was mined",
+            tx_hash=self.STEP_TX,
+            event_name="DataStatusChanged",
+            expected_count=1,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=self.STEP_EXPLORER,
+            reason="boom",
+        )
+
+        for args in (self.PROTECT, self.TRANSFORM):
+            result = runner.invoke(app, args + ["--json"])
+            assert result.exit_code == 1, result.output
+            output = json.loads(result.output)
+            assert "not_recorded" not in output
+            assert output["unconfirmed"]["error"] == "not_verified"
+            assert output["unconfirmed"]["tx_hash"] == self.STEP_TX
+            assert output["partial_failure"] is True
+
+    def test_protect_restrict_other_error(self, mocker):
+        """Other restrict errors also exit 1, but are not reported as "Not recorded" (#175)."""
+        from swarm_provenance_uploader.exceptions import ChainTransactionError
+
+        client = self._client(mocker)
+        client.set_status.side_effect = ChainTransactionError("reverted", tx_hash=self.STEP_TX)
+
+        result = runner.invoke(app, self.PROTECT)
+
+        assert result.exit_code == 1, result.output
+        assert "Failed to restrict original" in result.output
+        assert "Not recorded" not in result.output
+
+
+class TestChainCompositeStepFailures:
+    """Every step failure in protect and transform --restrict-original exits 1,
+    keeps the completed transactions, and uses the same JSON keys (#175)."""
+
+    ANCHOR_TX = "0x" + "a1" * 32
+    ANCHOR_EXPLORER = "https://base-sepolia.blockscout.com/tx/" + "0x" + "a1" * 32
+    TRANSFORM_TX = "0x" + "b2" * 32
+    TRANSFORM_EXPLORER = "https://base-sepolia.blockscout.com/tx/" + "0x" + "b2" * 32
+    REVERT_TX = "0x" + "d4" * 32
+
+    PROTECT = ["chain", "protect", DUMMY_SWARM_REF, "c" * 64, "--description", "d", "--anchor-new"]
+    TRANSFORM = ["chain", "transform", DUMMY_SWARM_REF, "c" * 64, "--description", "d", "--restrict-original"]
+
+    # (step, client method, transactions completed before it)
+    PROTECT_STEPS = [
+        ("anchor", "anchor", []),
+        ("transform", "transform", ["ANCHOR_TX"]),
+        ("restrict", "set_status", ["ANCHOR_TX", "TRANSFORM_TX"]),
+    ]
+    TRANSFORM_STEPS = [
+        ("transform", "transform", []),
+        ("restrict", "set_status", ["TRANSFORM_TX"]),
+    ]
+
+    def _client(self, mocker):
+        from swarm_provenance_uploader.models import (
+            AnchorResult, ChainProvenanceRecord, DataStatusEnum, TransformResult,
+        )
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            status=DataStatusEnum.ACTIVE,
+            accessors=[],
+            transformations=[],
+        )
+        mock_client.anchor.return_value = AnchorResult(
+            tx_hash=self.ANCHOR_TX, block_number=1, gas_used=1,
+            explorer_url=self.ANCHOR_EXPLORER,
+            swarm_hash="c" * 64, data_type="swarm-provenance", owner=DUMMY_ADDRESS,
+        )
+        mock_client.transform.return_value = TransformResult(
+            tx_hash=self.TRANSFORM_TX, block_number=2, gas_used=1,
+            explorer_url=self.TRANSFORM_EXPLORER,
+            original_hash=DUMMY_SWARM_REF, new_hash="c" * 64, description="d",
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+        return mock_client
+
+    def _revert(self):
+        from swarm_provenance_uploader.exceptions import ChainTransactionError
+
+        return ChainTransactionError("Transaction reverted", tx_hash=self.REVERT_TX)
+
+    def _assert_text(self, result, step, done):
+        assert result.exit_code == 1, result.output
+        assert "complete!" not in result.output
+        assert "Transformation recorded!" not in result.output
+        error_at = result.output.index("ERROR:")
+        assert self.REVERT_TX in result.output[error_at:]
+        for name in done:
+            tx = getattr(self, name)
+            explorer = getattr(self, name.replace("_TX", "_EXPLORER"))
+            # Completed steps are printed with their explorer links, before the error
+            assert -1 < result.output.find(tx) < error_at
+            assert -1 < result.output.find(explorer) < error_at
+        if step == "restrict":
+            assert "Restrict manually" in result.output
+
+    def _assert_json(self, result, step, done, error):
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.output)
+        assert output["failed_step"] == step
+        assert output["partial_failure"] is bool(done)
+        assert output["error"]["error"] == error
+        assert "unconfirmed" not in output
+        assert output["restrict"] is None
+        if "ANCHOR_TX" in done:
+            assert output["anchor"]["tx_hash"] == self.ANCHOR_TX
+        else:
+            assert "anchor" not in output
+        if "TRANSFORM_TX" in done:
+            assert output["transform"]["tx_hash"] == self.TRANSFORM_TX
+        else:
+            assert output["transform"] is None
+        return output
+
+    @pytest.mark.parametrize("step,method,done", PROTECT_STEPS, ids=[s[0] for s in PROTECT_STEPS])
+    def test_protect_step_reverts(self, mocker, step, method, done):
+        client = self._client(mocker)
+        getattr(client, method).side_effect = self._revert()
+
+        result = runner.invoke(app, self.PROTECT)
+
+        self._assert_text(result, step, done)
+
+    @pytest.mark.parametrize("step,method,done", PROTECT_STEPS, ids=[s[0] for s in PROTECT_STEPS])
+    def test_protect_step_reverts_json(self, mocker, step, method, done):
+        client = self._client(mocker)
+        getattr(client, method).side_effect = self._revert()
+
+        result = runner.invoke(app, self.PROTECT + ["--json"])
+
+        output = self._assert_json(result, step, done, "transaction_failed")
+        assert output["error"]["tx_hash"] == self.REVERT_TX
+        assert output["error"]["message"] == "Transaction reverted"
+
+    @pytest.mark.parametrize("step,method,done", TRANSFORM_STEPS, ids=[s[0] for s in TRANSFORM_STEPS])
+    def test_transform_step_reverts(self, mocker, step, method, done):
+        client = self._client(mocker)
+        getattr(client, method).side_effect = self._revert()
+
+        result = runner.invoke(app, self.TRANSFORM)
+
+        self._assert_text(result, step, done)
+
+    @pytest.mark.parametrize("step,method,done", TRANSFORM_STEPS, ids=[s[0] for s in TRANSFORM_STEPS])
+    def test_transform_step_reverts_json(self, mocker, step, method, done):
+        client = self._client(mocker)
+        getattr(client, method).side_effect = self._revert()
+
+        result = runner.invoke(app, self.TRANSFORM + ["--json"])
+
+        output = self._assert_json(result, step, done, "transaction_failed")
+        assert output["error"]["tx_hash"] == self.REVERT_TX
+
+    @pytest.mark.parametrize(
+        "args,method,step,done",
+        [
+            (PROTECT, "transform", "transform", ["ANCHOR_TX"]),
+            (PROTECT, "set_status", "restrict", ["ANCHOR_TX", "TRANSFORM_TX"]),
+            (TRANSFORM, "set_status", "restrict", ["TRANSFORM_TX"]),
+        ],
+        ids=["protect-transform", "protect-restrict", "transform-restrict"],
+    )
+    def test_connection_error_mid_flow(self, mocker, args, method, step, done):
+        from swarm_provenance_uploader.exceptions import ChainConnectionError
+
+        client = self._client(mocker)
+        getattr(client, method).side_effect = ChainConnectionError("connection refused")
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        error_at = result.output.index("ERROR:")
+        assert "Cannot connect to chain: connection refused" in result.output
+        for name in done:
+            assert -1 < result.output.find(getattr(self, name)) < error_at
+
+        result = runner.invoke(app, args + ["--json"])
+
+        output = self._assert_json(result, step, done, "connection_failed")
+        assert output["error"]["message"] == "connection refused"
+
+    def test_insufficient_funds_mid_flow(self, mocker):
+        """The funding advice is kept, after the completed steps."""
+        from swarm_provenance_uploader.exceptions import InsufficientFundsError
+
+        client = self._client(mocker)
+        client.transform.side_effect = InsufficientFundsError(
+            "Insufficient funds",
+            wallet_address=DUMMY_ADDRESS,
+            balance_wei=0,
+            estimated_cost_wei=10**15,
+            chain_name="base-sepolia",
+        )
+
+        result = runner.invoke(app, self.PROTECT)
+
+        assert result.exit_code == 1, result.output
+        error_at = result.output.index("ERROR:")
+        assert -1 < result.output.find(self.ANCHOR_TX) < error_at
+        # One error line, naming the step
+        assert "ERROR: Failed to record transformation: insufficient funds for gas." in result.output
+        assert result.output.count("ERROR:") == 1
+        assert DUMMY_ADDRESS in result.output[error_at:]
+
+        result = runner.invoke(app, self.PROTECT + ["--json"])
+
+        output = self._assert_json(result, "transform", ["ANCHOR_TX"], "insufficient_funds")
+        assert output["error"]["wallet_address"] == DUMMY_ADDRESS
+        assert output["error"]["estimated_cost_eth"] == "0.001000"
+
+    def test_not_recorded_has_failed_step(self, mocker):
+        """An unconfirmed write keeps the "unconfirmed" key and adds "failed_step"."""
+        from swarm_provenance_uploader.exceptions import TransactionNotRecordedError
+
+        client = self._client(mocker)
+        client.set_status.side_effect = TransactionNotRecordedError(
+            "Not recorded",
+            tx_hash=self.REVERT_TX,
+            event_name="DataStatusChanged",
+            expected_count=1,
+            emitted_count=0,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=None,
+        )
+
+        for args in (self.PROTECT, self.TRANSFORM):
+            result = runner.invoke(app, args + ["--json"])
+            assert result.exit_code == 1, result.output
+            output = json.loads(result.output)
+            assert output["failed_step"] == "restrict"
+            assert output["unconfirmed"]["error"] == "not_recorded"
+            assert "error" not in output
+
+    @pytest.mark.parametrize(
+        "args,method,event,label",
+        [
+            (PROTECT, "anchor", "DataRegistered", "Failed to anchor new hash"),
+            (PROTECT, "transform", "DataTransformed", "Failed to record transformation"),
+            (PROTECT, "set_status", "DataStatusChanged", "Failed to restrict original"),
+            (TRANSFORM, "transform", "DataTransformed", "Failed to record transformation"),
+            (TRANSFORM, "set_status", "DataStatusChanged", "Failed to restrict original"),
+        ],
+        ids=["protect-anchor", "protect-transform", "protect-restrict", "transform-transform", "transform-restrict"],
+    )
+    def test_not_recorded_names_the_step(self, mocker, args, method, event, label):
+        from swarm_provenance_uploader.exceptions import TransactionNotRecordedError
+
+        client = self._client(mocker)
+        getattr(client, method).side_effect = TransactionNotRecordedError(
+            "Not recorded",
+            tx_hash=self.REVERT_TX,
+            event_name=event,
+            expected_count=1,
+            emitted_count=0,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=None,
+        )
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        assert f"ERROR: {label}. Not recorded." in result.output
+        assert result.output.count("ERROR:") == 1
+
+    def test_same_keys_on_success(self, mocker):
+        """Both commands print the same keys when every step succeeds."""
+        from swarm_provenance_uploader.models import AnchorResult
+
+        client = self._client(mocker)
+        client.set_status.return_value = AnchorResult(
+            tx_hash="0x" + "e5" * 32, block_number=3, gas_used=1, explorer_url=None,
+            swarm_hash=DUMMY_SWARM_REF, data_type="", owner=DUMMY_ADDRESS,
+        )
+
+        protect = json.loads(runner.invoke(app, self.PROTECT + ["--json"]).output)
+        transform = json.loads(runner.invoke(app, self.TRANSFORM + ["--json"]).output)
+
+        assert set(protect) == {"anchor", "transform", "restrict", "partial_failure"}
+        assert set(transform) == {"transform", "restrict", "partial_failure"}
+        assert protect["partial_failure"] is False
+        assert transform["partial_failure"] is False
+
+    def _revert_in_gas_estimation(self, mocker, client):
+        """Run the real ChainClient.set_status with a build that reverts in eth_estimateGas."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        try:
+            from web3.exceptions import ContractLogicError
+        except ImportError:  # the [testing] extra has no web3
+            class ContractLogicError(Exception):
+                def __init__(self, message, data):
+                    super().__init__(message, data)  # str() is the tuple, as in web3
+                    self.message = message
+
+        inner = mocker.MagicMock()
+        inner._build_tx = lambda build, *a, **k: ChainClient._build_tx(inner, build, *a, **k)
+        inner._contract.build_set_data_status_tx.side_effect = ContractLogicError(
+            "execution reverted: Not owner", "0x08c379a0" + "00" * 100
+        )
+        client.set_status.side_effect = lambda *a, **k: ChainClient.set_status(inner, *a, **k)
+
+    def test_plain_transform_build_error_single_prefix(self, mocker):
+        """An error while building is printed with one "Transaction failed:" prefix."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        client = self._client(mocker)
+        inner = mocker.MagicMock()
+        inner._build_tx = lambda build, *a, **k: ChainClient._build_tx(inner, build, *a, **k)
+        inner._provider.deploy_block = None
+        inner._contract.build_record_transformation_tx.side_effect = TypeError("unexpected argument")
+        client.transform.side_effect = lambda *a, **k: ChainClient.transform(inner, *a, **k)
+
+        result = runner.invoke(app, ["chain", "transform", DUMMY_SWARM_REF, "c" * 64])
+
+        assert result.exit_code == 1, result.output
+        assert "ERROR: Transaction failed: Could not build the transaction: unexpected argument" in result.output
+        assert result.output.count("Transaction failed") == 1
+
+    def test_plain_transform_send_error_single_prefix(self, mocker):
+        """A send-path error is printed with one "Transaction failed:" prefix."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        client = self._client(mocker)
+        inner = mocker.MagicMock()
+        inner._build_tx = lambda build, *a, **k: {"from": DUMMY_ADDRESS}
+        inner._provider.deploy_block = None
+        inner._gas_limit = 100_000
+        inner._provider.web3.eth.send_raw_transaction.side_effect = Exception("nonce too low")
+        inner._send_transaction = lambda *a, **k: ChainClient._send_transaction(inner, *a, **k)
+        client.transform.side_effect = lambda *a, **k: ChainClient.transform(inner, *a, **k)
+
+        result = runner.invoke(app, ["chain", "transform", DUMMY_SWARM_REF, "c" * 64])
+
+        assert result.exit_code == 1, result.output
+        assert "ERROR: Transaction failed: nonce too low" in result.output
+        assert result.output.count("Transaction failed") == 1
+
+    @pytest.mark.parametrize("args", [PROTECT, TRANSFORM], ids=["protect", "transform"])
+    def test_restrict_reverts_in_gas_estimation(self, mocker, args):
+        """A revert raised by building the transaction keeps the completed hashes (#175)."""
+        client = self._client(mocker)
+        self._revert_in_gas_estimation(mocker, client)
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        error_at = result.output.index("ERROR: Failed to restrict original")
+        assert "execution reverted: Not owner" in result.output
+        assert "0x08c379a0" not in result.output
+        assert -1 < result.output.find(self.TRANSFORM_TX) < error_at
+
+        result = runner.invoke(app, args + ["--json"])
+
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.output)
+        assert output["failed_step"] == "restrict"
+        assert output["transform"]["tx_hash"] == self.TRANSFORM_TX
+        assert output["error"]["error"] == "transaction_failed"
+        assert output["error"]["tx_hash"] is None
+        assert output["error"]["message"] == "Transaction reverted: execution reverted: Not owner"
+
+    def test_transform_not_registered_json(self, mocker):
+        """With --json, "not registered" is reported in the composite format."""
+        from swarm_provenance_uploader.exceptions import DataNotRegisteredError
+
+        client = self._client(mocker)
+        client.transform.side_effect = DataNotRegisteredError(
+            f"Data hash {DUMMY_SWARM_REF} is not registered on-chain", data_hash=DUMMY_SWARM_REF,
+        )
+
+        result = runner.invoke(app, self.TRANSFORM + ["--json"])
+
+        output = self._assert_json(result, "transform", [], "not_registered")
+        assert output["error"]["data_hash"] == DUMMY_SWARM_REF
+        client.set_status.assert_not_called()
+
+        # Text mode keeps its own message and the anchor hint
+        result = runner.invoke(app, self.TRANSFORM)
+        assert result.exit_code == 1, result.output
+        assert "Original hash is not registered on-chain" in result.output
+        assert "Anchor it first" in result.output
+
+    def test_protect_not_registered_json(self, mocker):
+        from swarm_provenance_uploader.exceptions import DataNotRegisteredError
+
+        client = self._client(mocker)
+        client.get.side_effect = DataNotRegisteredError("not registered", data_hash=DUMMY_SWARM_REF)
+
+        result = runner.invoke(app, self.PROTECT + ["--json"])
+
+        output = self._assert_json(result, "verify", [], "not_registered")
+        assert output["error"]["data_hash"] == DUMMY_SWARM_REF
+        client.anchor.assert_not_called()
+
+    def test_protect_not_active_json(self, mocker):
+        from swarm_provenance_uploader.models import DataStatusEnum
+
+        client = self._client(mocker)
+        client.get.return_value.status = DataStatusEnum.RESTRICTED
+
+        result = runner.invoke(app, self.PROTECT + ["--json"])
+
+        output = self._assert_json(result, "verify", [], "not_active")
+        assert output["error"]["status"] == "RESTRICTED"
+        assert "expected ACTIVE" in output["error"]["message"]
+        client.anchor.assert_not_called()
+
+    def _insufficient_funds(self):
+        from swarm_provenance_uploader.exceptions import InsufficientFundsError
+
+        return InsufficientFundsError(
+            "Insufficient funds",
+            wallet_address=DUMMY_ADDRESS,
+            balance_wei=0,
+            estimated_cost_wei=10**15,
+            chain_name="base-sepolia",
+        )
+
+    @pytest.mark.parametrize("step,method,done", TRANSFORM_STEPS, ids=[s[0] for s in TRANSFORM_STEPS])
+    def test_transform_insufficient_funds(self, mocker, step, method, done):
+        client = self._client(mocker)
+        getattr(client, method).side_effect = self._insufficient_funds()
+
+        result = runner.invoke(app, self.TRANSFORM)
+
+        assert result.exit_code == 1, result.output
+        error_at = result.output.index("ERROR:")
+        assert "insufficient funds for gas" in result.output[error_at:]
+        assert result.output.count("ERROR:") == 1
+        for name in done:
+            assert -1 < result.output.find(getattr(self, name)) < error_at
+
+        result = runner.invoke(app, self.TRANSFORM + ["--json"])
+
+        output = self._assert_json(result, step, done, "insufficient_funds")
+        assert output["error"]["wallet_address"] == DUMMY_ADDRESS
+
+    @pytest.mark.parametrize(
+        "args,method,step,done",
+        [
+            (PROTECT, "transform", "transform", ["ANCHOR_TX"]),
+            (TRANSFORM, "set_status", "restrict", ["TRANSFORM_TX"]),
+        ],
+        ids=["protect-transform", "transform-restrict"],
+    )
+    @pytest.mark.parametrize("error_cls", ["ChainConfigurationError", "ChainValidationError"])
+    def test_other_chain_error_mid_flow(self, mocker, args, method, step, done, error_cls):
+        from swarm_provenance_uploader import exceptions as exc
+
+        client = self._client(mocker)
+        getattr(client, method).side_effect = getattr(exc, error_cls)("bad input")
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        error_at = result.output.index("ERROR:")
+        assert ": bad input" in result.output[error_at:]
+        for name in done:
+            assert -1 < result.output.find(getattr(self, name)) < error_at
+
+        result = runner.invoke(app, args + ["--json"])
+
+        output = self._assert_json(result, step, done, "chain_error")
+        assert output["error"]["message"] == "bad input"
+
+    @pytest.mark.parametrize(
+        "args,method,step,event",
+        [
+            (PROTECT, "anchor", "anchor", "DataRegistered"),
+            (PROTECT, "transform", "transform", "DataTransformed"),
+            (TRANSFORM, "transform", "transform", "DataTransformed"),
+            (TRANSFORM, "set_status", "restrict", "DataStatusChanged"),
+        ],
+        ids=["protect-anchor", "protect-transform", "transform-transform", "transform-restrict"],
+    )
+    def test_not_verified_failed_step(self, mocker, args, method, step, event):
+        from swarm_provenance_uploader.exceptions import TransactionNotVerifiedError
+
+        client = self._client(mocker)
+        getattr(client, method).side_effect = TransactionNotVerifiedError(
+            "Not verified",
+            tx_hash=self.REVERT_TX,
+            event_name=event,
+            expected_count=1,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=None,
+            reason="boom",
+        )
+
+        result = runner.invoke(app, args + ["--json"])
+
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.output)
+        assert output["failed_step"] == step
+        assert output["unconfirmed"]["error"] == "not_verified"
+        assert "error" not in output
+
+    @pytest.mark.parametrize("output_json", [False, True], ids=["text", "json"])
+    @pytest.mark.parametrize("kind", ["revert", "connection", "insufficient_funds"])
+    def test_transform_without_restrict_unchanged(self, mocker, kind, output_json):
+        """Plain transform is not a composite command and keeps its output."""
+        from swarm_provenance_uploader.exceptions import ChainConnectionError
+
+        client = self._client(mocker)
+        client.transform.side_effect = {
+            "revert": self._revert(),
+            "connection": ChainConnectionError("connection refused"),
+            "insufficient_funds": self._insufficient_funds(),
+        }[kind]
+
+        args = ["chain", "transform", DUMMY_SWARM_REF, "c" * 64]
+        result = runner.invoke(app, args + (["--json"] if output_json else []))
+
+        assert result.exit_code == 1, result.output
+        assert "failed_step" not in result.output
+        assert "Completed before the failure" not in result.output
+        assert "Failed to record transformation" not in result.output
+        if kind == "revert":
+            assert "ERROR: Transaction failed: Transaction reverted" in result.output
+            assert f"Transaction: {self.REVERT_TX}" in result.output
+        elif kind == "connection":
+            assert "ERROR: Cannot connect to chain: connection refused" in result.output
+        elif output_json:
+            # The standalone top-level insufficient-funds object
+            output = json.loads(result.output)
+            assert output["error"] == "insufficient_funds"
+            assert output["wallet_address"] == DUMMY_ADDRESS
+        else:
+            assert "ERROR: Insufficient funds for gas." in result.output
+
+
+class TestChainCodeCheckRpcError:
+    """A failed contract code check that is the RPC's fault prints the RPC URL (#166)."""
+
+    def test_access_prints_rpc_url(self, mocker):
+        from swarm_provenance_uploader.exceptions import ChainConnectionError
+
+        rpc = "https://rpc.example.invalid"
+        mock_client = mocker.MagicMock()
+        mock_client.access.side_effect = ChainConnectionError(
+            "The RPC endpoint did not answer the contract code check: Expecting value",
+            rpc_url=rpc,
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1, result.output
+        assert "Cannot connect to chain" in result.output
+        assert f"RPC URL: {rpc}" in result.output
+
+
+# RPC URL redaction in chain error output (#169)
+
+RPC_KEY = "SECRETKEYSECRETKEY"
+RPC_URLS_WITH_KEY = [
+    f"https://base-sepolia.g.alchemy.com/v2/{RPC_KEY}",
+    f"https://rpc.example.org/base?apikey={RPC_KEY}",
+    f"https://rpcuser:{RPC_KEY}@rpc.example.org",
+]
+RPC_URL_IDS = ["path", "query", "basic-auth"]
+RPC_HOST = {0: "https://base-sepolia.g.alchemy.com/", 1: "https://rpc.example.org/", 2: "https://rpc.example.org/"}
+
+# (command line, client method that raises)
+CHAIN_COMMANDS = [
+    (["chain", "balance"], "balance"),
+    (["chain", "balance", "--json"], "balance"),
+    (["chain", "get", DUMMY_SWARM_REF], "get"),
+    (["chain", "get", DUMMY_SWARM_REF, "--json"], "get"),
+    (["chain", "anchor", DUMMY_SWARM_REF], "anchor"),
+    (["chain", "anchor", DUMMY_SWARM_REF, "--json"], "anchor"),
+    (["chain", "access", DUMMY_SWARM_REF, "--json"], "access"),
+]
+CHAIN_COMMAND_IDS = [" ".join(c[0][1:]).replace(DUMMY_SWARM_REF, "<hash>") for c in CHAIN_COMMANDS]
+
+
+class TestChainErrorRedaction:
+    """Chain error output never shows the path, query or credentials of the RPC URL."""
+
+    @pytest.mark.parametrize("args,method", CHAIN_COMMANDS, ids=CHAIN_COMMAND_IDS)
+    @pytest.mark.parametrize("url_index", range(3), ids=RPC_URL_IDS)
+    def test_connection_error_from_code_check(self, mocker, args, method, url_index):
+        """The ChainConnectionError of the contract code check (#166): message and RPC URL line."""
+        rpc_url = RPC_URLS_WITH_KEY[url_index]
+        error = exceptions.ChainConnectionError(
+            "The RPC endpoint did not answer the contract code check: "
+            f"401 Client Error: Unauthorized for url: {rpc_url}",
+            rpc_url=rpc_url,
+        )
+        mock_client = mocker.MagicMock()
+        getattr(mock_client, method).side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        assert RPC_KEY not in result.output
+        assert "ERROR: Cannot connect to chain" in result.output
+        assert "401 Client Error: Unauthorized" in result.output
+        assert f"RPC URL: {RPC_HOST[url_index]}" in result.output
+
+    @pytest.mark.parametrize("args,method", CHAIN_COMMANDS, ids=CHAIN_COMMAND_IDS)
+    def test_raw_rpc_error(self, mocker, args, method):
+        """A requests error that no handler wrapped: it was an uncaught traceback with the URL."""
+        import requests
+
+        mock_client = mocker.MagicMock()
+        getattr(mock_client, method).side_effect = requests.exceptions.HTTPError(
+            f"429 Client Error: Too Many Requests for url: {RPC_URLS_WITH_KEY[0]}"
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert RPC_KEY not in result.output
+        assert "ERROR: Cannot connect to chain: 429 Client Error: Too Many Requests" in result.output
+        assert "https://base-sepolia.g.alchemy.com/" in result.output
+
+    def test_raw_connection_error_path_only(self, mocker):
+        """urllib3's "Max retries exceeded with url: /v2/<key>" has no scheme or host."""
+        import requests
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.side_effect = requests.exceptions.ConnectionError(
+            "HTTPSConnectionPool(host='base-sepolia.g.alchemy.com', port=443): Max retries "
+            f"exceeded with url: /v2/{RPC_KEY} (Caused by NewConnectionError('refused'))"
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "get", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1, result.output
+        assert RPC_KEY not in result.output
+        assert "base-sepolia.g.alchemy.com" in result.output
+
+    def test_unexpected_error_is_not_a_traceback(self, mocker):
+        """An error that is not an RPC failure exits 1 with its redacted text."""
+        mock_client = mocker.MagicMock()
+        mock_client.verify.side_effect = ValueError(f"bad answer from {RPC_URLS_WITH_KEY[1]}")
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert RPC_KEY not in result.output
+        assert "ERROR: Chain command failed: ValueError: bad answer from https://rpc.example.org/" in result.output
+
+    def test_json_stdout_has_no_error_text(self, mocker):
+        """With --json, the error and the RPC URL line go to stderr, not into the JSON stream."""
+        from typer.testing import CliRunner as _Runner
+
+        error = exceptions.ChainConnectionError("RPC health check failed", rpc_url=RPC_URLS_WITH_KEY[0])
+        mock_client = mocker.MagicMock()
+        mock_client.balance.side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "balance", "--json"])
+
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert "RPC URL: https://base-sepolia.g.alchemy.com/" in result.stderr
+        assert RPC_KEY not in result.stderr
+
+    def test_not_verified_reason(self, mocker):
+        """The "reason" of a not-verified write, in text and in --json."""
+        from swarm_provenance_uploader.exceptions import TransactionNotVerifiedError
+
+        reason = f"504 Server Error: Gateway Timeout for url: {RPC_URLS_WITH_KEY[0]}"
+        error = TransactionNotVerifiedError(
+            f"Not verified: {reason}",
+            tx_hash=DUMMY_TX_HASH,
+            event_name="DataAccessed",
+            expected_count=1,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=DUMMY_EXPLORER_URL,
+            reason=reason,
+        )
+        mock_client = mocker.MagicMock()
+        mock_client.access.side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+        assert result.exit_code == 1, result.output
+        assert RPC_KEY not in result.output
+        assert "504 Server Error: Gateway Timeout" in result.output
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF, "--json"])
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.output)
+        assert RPC_KEY not in output["reason"]
+        assert output["reason"].startswith("504 Server Error: Gateway Timeout for url: https://base-sepolia.g.alchemy.com/")
+
+
+@pytest.fixture
+def echo_rpc_server():
+    """A local "RPC" that answers HTTP 200 with an HTML page quoting the request path."""
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = f"<html><body>The requested URL {self.path} was not found</body></html>".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server.server_port
+    server.shutdown()
+    server.server_close()
+
+
+class TestChainErrorRedactionRealProvider:
+    """The real provider and web3 with RPC URLs whose errors repeat the key without a usable URL."""
+
+    @pytest.mark.parametrize("args", [
+        ["chain", "get", DUMMY_SWARM_REF],
+        ["chain", "balance", "--json"],
+    ], ids=["get", "balance-json"])
+    @pytest.mark.parametrize("kind", ["no-scheme", "htps", "body-echo"])
+    def test_key_never_shown(self, monkeypatch, echo_rpc_server, args, kind):
+        pytest.importorskip("web3")
+        rpc_url = {
+            "no-scheme": f"127.0.0.1:{echo_rpc_server}/v2/{RPC_KEY}",
+            "htps": f"htps://127.0.0.1:{echo_rpc_server}/v2/{RPC_KEY}",
+            "body-echo": f"http://127.0.0.1:{echo_rpc_server}/v2/{RPC_KEY}",
+        }[kind]
+        monkeypatch.setenv("PROVENANCE_WALLET_KEY", "0x" + "a" * 64)
+        monkeypatch.setitem(_chain_config, "chain", "base-sepolia")
+        monkeypatch.setitem(_chain_config, "rpc_url", rpc_url)
+        monkeypatch.setitem(_chain_config, "contract", None)
+        monkeypatch.setitem(_chain_config, "wallet_key_env", "PROVENANCE_WALLET_KEY")
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert "ERROR: Cannot connect to chain" in result.output
+        assert RPC_KEY not in result.output
+        if kind == "body-echo":
+            assert "The requested URL /\u2026 was not found" in result.output
+        else:
+            assert "No connection adapters were found for '" in result.output
+            assert "127.0.0.1:" in result.output
+
+
+class TestNonSecretUrlsKept:
+    """Guard (#169): explorer, faucet and bridge links are shown in full, not redacted."""
+
+    @pytest.mark.parametrize("error_cls", ["TransactionNotRecordedError", "TransactionNotVerifiedError"])
+    def test_explorer_url(self, mocker, error_cls):
+        error = getattr(exceptions, error_cls)(
+            "Not confirmed",
+            tx_hash=DUMMY_TX_HASH,
+            event_name="DataAccessed",
+            expected_count=1,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=DUMMY_EXPLORER_URL,
+        )
+        assert error.explorer_url == DUMMY_EXPLORER_URL
+        mock_client = mocker.MagicMock()
+        mock_client.access.side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+        assert f"Explorer:    {DUMMY_EXPLORER_URL}" in result.output
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF, "--json"])
+        assert json.loads(result.output)["explorer_url"] == DUMMY_EXPLORER_URL
+
+    @pytest.mark.parametrize("chain,key", [("base-sepolia", "faucet_url"), ("base", "bridge_url")])
+    def test_faucet_and_bridge_urls(self, mocker, chain, key):
+        from swarm_provenance_uploader.chain.provider import CHAIN_PRESETS
+
+        url = CHAIN_PRESETS[chain][key]
+        mock_client = mocker.MagicMock()
+        mock_client.anchor.side_effect = exceptions.InsufficientFundsError(
+            "Insufficient funds",
+            wallet_address=DUMMY_ADDRESS,
+            balance_wei=0,
+            estimated_cost_wei=1,
+            chain_name=chain,
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF])
+        assert url in result.output
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
+        assert json.loads(result.output)[key] == url
+
+
+class TestJsonStdoutOnChainErrors:
+    """With --json, error and hint lines go to stderr, so stdout is empty or valid JSON."""
+
+    @staticmethod
+    def _assert_stdout_empty_or_json(result):
+        if result.stdout.strip():
+            json.loads(result.stdout)
+
+    def test_anchor_without_wallet_key(self, monkeypatch):
+        """No wallet key ("Check PROVENANCE_WALLET_KEY..."), or no blockchain extra ("Install with:")."""
+        from typer.testing import CliRunner as _Runner
+
+        monkeypatch.delenv("PROVENANCE_WALLET_KEY", raising=False)
+        monkeypatch.setitem(_chain_config, "wallet_key_env", "PROVENANCE_WALLET_KEY_UNSET_FOR_TEST")
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
+
+        assert result.exit_code == 1
+        self._assert_stdout_empty_or_json(result)
+        assert "PROVENANCE_WALLET_KEY" in result.stderr or "Install with:" in result.stderr
+
+    @pytest.mark.parametrize("args,method,error", [
+        (["chain", "transform", DUMMY_SWARM_REF, "b" * 64, "--description", "d", "--json"],
+         "transform", "DataNotRegisteredError"),
+        (["chain", "anchor", DUMMY_SWARM_REF, "--json"], "anchor", "ChainTransactionError"),
+    ], ids=["transform-not-registered", "anchor-transaction-failed"])
+    def test_hint_lines(self, mocker, args, method, error):
+        from typer.testing import CliRunner as _Runner
+
+        kwargs = {"tx_hash": DUMMY_TX_HASH} if error == "ChainTransactionError" else {}
+        mock_client = mocker.MagicMock()
+        getattr(mock_client, method).side_effect = getattr(exceptions, error)("failed", **kwargs)
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = _Runner(mix_stderr=False).invoke(app, args)
+
+        assert result.exit_code == 1
+        self._assert_stdout_empty_or_json(result)
+        assert "ERROR" in result.stderr
+
+
+class TestUnexpectedChainErrorVerbose:
+    """An error no chain handler catches: one line by default, a redacted traceback with -v."""
+
+    def _invoke(self, mocker, args):
+        from typer.testing import CliRunner as _Runner
+
+        def fail(*a, **kw):
+            raise KeyError(f"no field in answer from {RPC_URLS_WITH_KEY[0]}")
+
+        mock_client = mocker.MagicMock()
+        mock_client.verify.side_effect = fail
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+        return _Runner(mix_stderr=False).invoke(app, args)
+
+    def test_default_is_one_line(self, mocker):
+        result = self._invoke(mocker, ["chain", "verify", DUMMY_SWARM_REF])
+        assert result.exit_code == 1
+        assert "Traceback" not in result.stderr
+        assert result.stderr.strip().count("\n") == 0
+        assert "ERROR: Chain command failed: KeyError" in result.stderr
+        assert RPC_KEY not in result.stderr
+
+    @pytest.mark.parametrize("flag", ["-v", "--verbose"])
+    def test_verbose_prints_redacted_traceback(self, mocker, flag):
+        result = self._invoke(mocker, ["chain", "verify", DUMMY_SWARM_REF, flag])
+        assert result.exit_code == 1
+        assert "Traceback (most recent call last)" in result.stderr
+        assert "in fail" in result.stderr
+        assert "KeyError" in result.stderr
+        assert "https://base-sepolia.g.alchemy.com/" in result.stderr
+        assert RPC_KEY not in result.stderr
+        assert "ERROR: Chain command failed: KeyError" in result.stderr
+
+
+class TestMergeErrorLinesOnStderr:
+    """chain merge: the Usage line and the not-registered Hash line go to stderr with the ERROR."""
+
+    def test_usage_line(self):
+        from typer.testing import CliRunner as _Runner
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "merge", "a" * 64, "b" * 64])
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert "Usage: swarm-prov-upload chain merge" in result.stderr
+
+    def test_not_registered_hash_line(self, mocker):
+        from typer.testing import CliRunner as _Runner
+
+        mock_client = mocker.MagicMock()
+        mock_client.merge_transform.side_effect = exceptions.DataNotRegisteredError(
+            "not registered", data_hash="a" * 64
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = _Runner(mix_stderr=False).invoke(
+            app, ["chain", "merge", "a" * 64, "b" * 64, "c" * 64, "--json"]
+        )
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert f"Hash: {'a' * 64}" in result.stderr
+
+
+class TestRpcRejectionIsNotConnectionError:
+    """A JSON-RPC error answer means the node answered: it is not "Cannot connect to chain"."""
+
+    def _invoke(self, mocker, error):
+        mock_client = mocker.MagicMock()
+        mock_client.verify.side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+        return runner.invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
+
+    def test_web3_rpc_error_uses_node_message(self, mocker):
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        error = web3_exceptions.Web3RPCError(
+            "{'code': -32000, 'message': 'nonce too low'}",
+            rpc_response={"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "nonce too low"}},
+        )
+        result = self._invoke(mocker, error)
+        assert result.exit_code == 1
+        assert "ERROR: The RPC rejected the request: nonce too low" in result.output
+        assert "Cannot connect to chain" not in result.output
+
+    def test_web3_rpc_error_without_response_uses_text(self, mocker):
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        error = web3_exceptions.Web3RPCError(f"rejected by {RPC_URLS_WITH_KEY[0]}")
+        result = self._invoke(mocker, error)
+        assert result.exit_code == 1
+        assert "ERROR: The RPC rejected the request: rejected by https://base-sepolia.g.alchemy.com/" in result.output
+        assert RPC_KEY not in result.output
+
+    def test_web3_rpc_error_dict_repr_without_response(self, mocker):
+        """Without rpc_response, a dict-repr text gives only the node's message, redacted."""
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        error = web3_exceptions.Web3RPCError(
+            f"{{'code': -32000, 'message': 'rejected by {RPC_URLS_WITH_KEY[0]}'}}"
+        )
+        result = self._invoke(mocker, error)
+        assert result.exit_code == 1
+        assert (
+            "ERROR: The RPC rejected the request: rejected by https://base-sepolia.g.alchemy.com/"
+            in result.output
+        )
+        assert "'code'" not in result.output
+        assert "-32000" not in result.output
+        assert RPC_KEY not in result.output
+
+    def test_request_timed_out_is_connection_error(self, mocker):
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        result = self._invoke(mocker, web3_exceptions.RequestTimedOut("timed out"))
+        assert result.exit_code == 1
+        assert "ERROR: Cannot connect to chain: timed out" in result.output
+
+
+SHORT_TOKEN = "abcdefghijklmno"  # 15 letters, no digit: not "credential-like" by shape alone
+
+
+@pytest.fixture
+def token_echo_rpc_server():
+    """A local RPC that answers every call with a JSON-RPC error quoting only the bare token."""
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            body = json.dumps({
+                "jsonrpc": "2.0",
+                "id": request.get("id", 1) if isinstance(request, dict) else 1,
+                "error": {"code": -32001, "message": f"invalid api key: {SHORT_TOKEN}"},
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server.server_port
+    server.shutdown()
+    server.server_close()
+
+
+class TestShortTokenEcho:
+    """A short letters-only key in the last path segment or a credential-named query value."""
+
+    @pytest.mark.parametrize("args", [
+        ["chain", "get", DUMMY_SWARM_REF],
+        ["chain", "balance", "--json"],
+    ], ids=["get", "balance-json"])
+    @pytest.mark.parametrize("form", ["path", "query"])
+    def test_bare_token_echo_is_redacted(self, monkeypatch, token_echo_rpc_server, args, form):
+        pytest.importorskip("web3")
+        base = f"http://127.0.0.1:{token_echo_rpc_server}"
+        rpc_url = f"{base}/rpc/{SHORT_TOKEN}" if form == "path" else f"{base}/?apikey={SHORT_TOKEN}"
+        monkeypatch.setenv("PROVENANCE_WALLET_KEY", "0x" + "a" * 64)
+        monkeypatch.setitem(_chain_config, "chain", "base-sepolia")
+        monkeypatch.setitem(_chain_config, "contract", None)
+        monkeypatch.setitem(_chain_config, "wallet_key_env", "PROVENANCE_WALLET_KEY")
+        monkeypatch.setitem(_chain_config, "rpc_url", _chain_config["rpc_url"])
+
+        result = runner.invoke(app, ["--chain-rpc", rpc_url] + args)
+
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert "invalid api key: …" in result.output
+        assert SHORT_TOKEN not in result.output
