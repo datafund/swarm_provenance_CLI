@@ -951,6 +951,31 @@ class DataProvenanceContract:
             # Contract may not have DataMerged event (v1)
             return []
 
+    # --- Receipt events ---
+
+    def count_receipt_events(self, event_name: str, receipt) -> int:
+        """
+        Count the events of one type that this contract emitted in a receipt.
+
+        Logs from other addresses are not counted, even when they decode as
+        the same event: web3 decodes by event signature only.
+
+        Args:
+            event_name: Event name from the ABI (e.g. 'DataRegistered').
+            receipt: Transaction receipt.
+
+        Returns:
+            Number of matching events emitted by this contract address.
+        """
+        from web3.logs import DISCARD
+
+        event = getattr(self._contract.events, event_name)()
+        logs = event.process_receipt(receipt, errors=DISCARD)
+        return sum(
+            1 for log in logs
+            if str(log["address"]).lower() == self._address.lower()
+        )
+
     # --- Gas estimation ---
 
     def estimate_gas(self, tx: dict) -> int:

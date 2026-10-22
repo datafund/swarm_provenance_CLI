@@ -2173,6 +2173,70 @@ def _handle_insufficient_funds(
         typer.echo(f"\n  Bridge ETH to Base: {bridge}", err=True)
 
 
+def _not_recorded_json(e: "exceptions.TransactionUnconfirmedError") -> dict:
+    """JSON fields for a TransactionNotRecordedError or TransactionNotVerifiedError."""
+    data = {
+        "error": "not_recorded" if isinstance(e, exceptions.TransactionNotRecordedError) else "not_verified",
+        "tx_hash": e.tx_hash,
+        "explorer_url": e.explorer_url,
+        "contract_address": e.contract_address,
+        "event": e.event_name,
+        "expected_count": e.expected_count,
+    }
+    if isinstance(e, exceptions.TransactionNotRecordedError):
+        data["emitted_count"] = e.emitted_count
+    else:
+        data["reason"] = getattr(e, "reason", None)
+    return data
+
+
+def _handle_not_recorded(
+    e: "exceptions.TransactionUnconfirmedError",
+    output_json: bool = False,
+) -> None:
+    """Report a mined transaction that is not confirmed as recorded."""
+    verified = isinstance(e, exceptions.TransactionNotRecordedError)
+    if output_json:
+        typer.echo(json.dumps(_not_recorded_json(e), indent=2))
+        return
+
+    if verified:
+        typer.secho(
+            "ERROR: Not recorded. The transaction succeeded, but the contract did not "
+            "emit the expected events.",
+            fg=typer.colors.RED, err=True,
+        )
+    else:
+        typer.secho(
+            "ERROR: Not verified. The transaction was mined, but its events could not "
+            "be read, so it is not known whether it was recorded. Check it in the "
+            "explorer before you try again.",
+            fg=typer.colors.RED, err=True,
+        )
+        typer.echo(f"  Reason:      {getattr(e, 'reason', None) or e}", err=True)
+    typer.echo(f"  Transaction: {e.tx_hash}", err=True)
+    if e.explorer_url:
+        typer.echo(f"  Explorer:    {e.explorer_url}", err=True)
+    typer.echo(f"  Contract:    {e.contract_address}", err=True)
+    if verified:
+        typer.echo(
+            f"  Events:      {e.emitted_count} of {e.expected_count} {e.event_name}",
+            err=True,
+        )
+        typer.echo("  Check the contract address and chain before you try again.", err=True)
+
+
+def _print_completed_steps(steps: dict) -> None:
+    """List the writes of a composite command that were recorded before a failure."""
+    if not steps:
+        return
+    typer.echo("\nCompleted before the failure:")
+    for name, step in steps.items():
+        typer.echo(f"  {name.capitalize()}: tx {step.tx_hash}")
+        if step.explorer_url:
+            typer.echo(f"    Explorer: {step.explorer_url}")
+
+
 @chain_app.command("balance")
 def chain_balance(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
@@ -2424,6 +2488,9 @@ def chain_anchor(
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
         raise typer.Exit(code=1)
+    except exceptions.TransactionUnconfirmedError as e:
+        _handle_not_recorded(e, output_json=output_json)
+        raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -2478,6 +2545,9 @@ def chain_set_storage_ref(
         raise
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
+        raise typer.Exit(code=1)
+    except exceptions.TransactionUnconfirmedError as e:
+        _handle_not_recorded(e, output_json=output_json)
         raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
@@ -2577,6 +2647,9 @@ def chain_access(
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
         raise typer.Exit(code=1)
+    except exceptions.TransactionUnconfirmedError as e:
+        _handle_not_recorded(e, output_json=output_json)
+        raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -2642,6 +2715,9 @@ def chain_status(
             raise typer.Exit(code=1)
         except exceptions.InsufficientFundsError as e:
             _handle_insufficient_funds(e, output_json=output_json)
+            raise typer.Exit(code=1)
+        except exceptions.TransactionUnconfirmedError as e:
+            _handle_not_recorded(e, output_json=output_json)
             raise typer.Exit(code=1)
         except exceptions.ChainTransactionError as e:
             typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
@@ -2718,6 +2794,9 @@ def chain_transfer(
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
         raise typer.Exit(code=1)
+    except exceptions.TransactionUnconfirmedError as e:
+        _handle_not_recorded(e, output_json=output_json)
+        raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -2779,6 +2858,9 @@ def chain_delegate(
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
         raise typer.Exit(code=1)
+    except exceptions.TransactionUnconfirmedError as e:
+        _handle_not_recorded(e, output_json=output_json)
+        raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -2838,6 +2920,9 @@ def chain_transform(
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
         raise typer.Exit(code=1)
+    except exceptions.TransactionUnconfirmedError as e:
+        _handle_not_recorded(e, output_json=output_json)
+        raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -2857,6 +2942,20 @@ def chain_transform(
     if restrict_original:
         try:
             status_result = client.set_status(original_hash, status=1, verbose=verbose)
+        except exceptions.TransactionUnconfirmedError as e:
+            # The restrict step was not recorded: report it and exit 1
+            if output_json:
+                typer.echo(json.dumps({
+                    "transform": result.model_dump(),
+                    "restrict": None,
+                    "partial_failure": True,
+                    "unconfirmed": _not_recorded_json(e),
+                }, indent=2))
+            else:
+                _handle_not_recorded(e)
+                typer.echo(f"  Restrict manually: swarm-prov-upload chain status {original_hash} --set restricted", err=True)
+                _print_completed_steps({"transform": result})
+            raise typer.Exit(code=1)
         except exceptions.ChainError as e:
             typer.secho(f"\nWARNING: Transform succeeded but failed to restrict original: {e}", fg=typer.colors.YELLOW, err=True)
 
@@ -2918,6 +3017,25 @@ def chain_protect(
 
     results = {}
 
+    def not_recorded_exit(e: "exceptions.TransactionUnconfirmedError", hint: Optional[str] = None):
+        """A step was not recorded: report it and the completed steps, exit 1."""
+        if output_json:
+            output = {}
+            if "anchor" in results:
+                output["anchor"] = results["anchor"].model_dump()
+            output["transform"] = results["transform"].model_dump() if "transform" in results else None
+            output["restrict"] = None
+            # Partial only if an earlier step was recorded
+            output["partial_failure"] = bool(results)
+            output["unconfirmed"] = _not_recorded_json(e)
+            typer.echo(json.dumps(output, indent=2))
+        else:
+            _handle_not_recorded(e)
+            if hint:
+                typer.echo(hint, err=True)
+            _print_completed_steps(results)
+        raise typer.Exit(code=1)
+
     # Step 1: Verify original is registered and ACTIVE
     try:
         record = client.get(original_hash, verbose=verbose)
@@ -2948,6 +3066,8 @@ def chain_protect(
             # Already anchored is fine for protect — continue with transform
             if not output_json:
                 typer.secho(f"New hash already anchored, continuing.", fg=typer.colors.YELLOW)
+        except exceptions.TransactionUnconfirmedError as e:
+            not_recorded_exit(e)
         except exceptions.InsufficientFundsError as e:
             _handle_insufficient_funds(e, output_json=output_json)
             raise typer.Exit(code=1)
@@ -2961,6 +3081,8 @@ def chain_protect(
         results["transform"] = transform_result
         if not output_json:
             typer.secho(f"Transformation recorded.", fg=typer.colors.GREEN)
+    except exceptions.TransactionUnconfirmedError as e:
+        not_recorded_exit(e)
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
         raise typer.Exit(code=1)
@@ -2975,6 +3097,11 @@ def chain_protect(
         results["restrict"] = status_result
         if not output_json:
             typer.secho(f"Original hash restricted.", fg=typer.colors.GREEN)
+    except exceptions.TransactionUnconfirmedError as e:
+        not_recorded_exit(
+            e,
+            hint=f"  Restrict manually: swarm-prov-upload chain status {original_hash} --set restricted",
+        )
     except exceptions.ChainError as e:
         restrict_failed = True
         typer.secho(
@@ -3056,6 +3183,9 @@ def chain_merge(
         raise typer.Exit(code=1)
     except exceptions.InsufficientFundsError as e:
         _handle_insufficient_funds(e, output_json=output_json)
+        raise typer.Exit(code=1)
+    except exceptions.TransactionUnconfirmedError as e:
+        _handle_not_recorded(e, output_json=output_json)
         raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
