@@ -82,9 +82,9 @@ _unused_stamp = {"id": None, "how": None}
 
 # Global state for chain / blockchain configuration
 _chain_config = {
-    "enabled": config.CHAIN_ENABLED,
     "chain": config.CHAIN_NAME,
     "rpc_url": config.CHAIN_RPC_URL,
+    "rpc_fallbacks": config.CHAIN_RPC_URLS,
     "contract": config.CHAIN_CONTRACT,
     "wallet_key_env": config.CHAIN_WALLET_KEY_ENV,
     "explorer_url": config.CHAIN_EXPLORER_URL,
@@ -119,6 +119,7 @@ def _get_chain_client(verbose: bool = False):
         return ChainClient(
             chain=_chain_config["chain"],
             rpc_url=_chain_config["rpc_url"],
+            rpc_fallbacks=_chain_config.get("rpc_fallbacks"),
             contract_address=_chain_config["contract"],
             private_key_env=_chain_config["wallet_key_env"],
             explorer_url=_chain_config["explorer_url"],
@@ -1846,10 +1847,14 @@ def x402_status(
         typer.secho("  WARNING: X402_EXPECTED_PAY_TO is not an address; every payment will be refused.",
                     fg=typer.colors.RED)
 
-    # Check for private key (don't show the actual key)
-    pk_env_name = config.X402_PRIVATE_KEY_ENV
-    has_pk = bool(os.getenv(pk_env_name) or os.getenv("X402_PRIVATE_KEY"))
-    pk_str = typer.style("Configured", fg=typer.colors.GREEN) if has_pk else typer.style("Not set", fg=typer.colors.RED)
+    # Check for private key the way the signer does (#141); show only the
+    # name of the variable it came from, never the key
+    from .core.x402_client import resolve_x402_private_key, x402_private_key_env_name
+    pk_env_name = x402_private_key_env_name()
+    pk_source = resolve_x402_private_key()[1]
+    has_pk = pk_source is not None
+    pk_str = (typer.style("Configured", fg=typer.colors.GREEN) + f" (from {pk_source})" if has_pk
+              else typer.style("Not set", fg=typer.colors.RED))
     typer.echo(f"  Private key:  {pk_str}")
 
     if has_pk and verbose:
@@ -1859,7 +1864,7 @@ def x402_status(
             client = X402Client(network=network)
             typer.echo(f"  Wallet:       {client.wallet_address}")
         except Exception as e:
-            typer.echo(f"  Wallet:       {typer.style(f'Error: {e}', fg=typer.colors.RED)}")
+            typer.echo(f"  Wallet:       {typer.style(f'Error: {redact_urls(str(e))}', fg=typer.colors.RED)}")
 
     typer.echo("")
 
@@ -1878,9 +1883,10 @@ def x402_balance(
     """
     import os
 
-    # Check for private key
-    pk_env_name = config.X402_PRIVATE_KEY_ENV
-    has_pk = bool(os.getenv(pk_env_name) or os.getenv("X402_PRIVATE_KEY"))
+    # Check for private key, the same way the signer does (#141)
+    from .core.x402_client import resolve_x402_private_key, x402_private_key_env_name
+    pk_env_name = x402_private_key_env_name()
+    has_pk = resolve_x402_private_key()[0] is not None
 
     if not has_pk:
         typer.secho(f"ERROR: No private key configured.", fg=typer.colors.RED, err=True)
@@ -1909,7 +1915,7 @@ def x402_balance(
             typer.echo("Get testnet USDC: https://faucet.circle.com/")
 
     except Exception as e:
-        typer.secho(f"ERROR: Failed to get balance: {e}", fg=typer.colors.RED, err=True)
+        typer.secho(f"ERROR: Failed to get balance: {redact_urls(str(e))}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
 

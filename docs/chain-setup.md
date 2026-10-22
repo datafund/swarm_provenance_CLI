@@ -119,9 +119,6 @@ PROVENANCE_WALLET_KEY=0x...your_private_key_here...
 # Chain: base-sepolia (testnet) or base (mainnet)
 CHAIN_NAME=base-sepolia
 
-# Optional: Enable chain features by default
-# CHAIN_ENABLED=true
-
 # Optional: Custom RPC URL (uses preset if not set)
 # CHAIN_RPC_URL=https://your-rpc-provider.com
 

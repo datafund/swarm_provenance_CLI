@@ -333,7 +333,7 @@ The codebase implements comprehensive error handling:
 - Chain pre-flight balance check: `_send_transaction()` estimates gas cost and raises `InsufficientFundsError` with actionable guidance (wallet address, balance, estimated cost, faucet/bridge URL) before broadcasting
 
 ### Configuration management
-Uses python-dotenv for environment configuration:
+Uses python-dotenv for environment configuration. `config.py` loads `find_dotenv(usecwd=True)`: the `.env` of the working directory, else the nearest one in a parent directory; never the install directory (#141).
 
 **Backend Selection**:
 - `PROVENANCE_BACKEND`: `gateway` (default) or `local`
@@ -351,13 +351,14 @@ Uses python-dotenv for environment configuration:
 **x402 Payment Configuration**:
 - `X402_ENABLED`: Enable x402 payment support (default: false)
 - `X402_PRIVATE_KEY`: Wallet private key for signing payments
+- `X402_PRIVATE_KEY_ENV`: Name of the variable holding the key (default `X402_PRIVATE_KEY`). Signer and `x402 status`/`balance` share `resolve_x402_private_key()`: a custom name is read alone, otherwise `X402_PRIVATE_KEY` then legacy `SWARM_X402_PRIVATE_KEY`
+- `X402_RPC_URL`: RPC for the USDC balance and EIP-712 domain checks (optional; `X402Client(rpc_url=...)` wins, else the network preset). Registered for redaction
 - `X402_NETWORK`: `base-sepolia` (testnet) or `base` (mainnet)
 - `X402_AUTO_PAY`: Enable auto-pay without prompts (default: false; `--no-auto-pay` overrides it per command)
 - `X402_MAX_AUTO_PAY_USD`: Maximum auto-pay amount per request (default: 1.00). A hard cap: above it the CLI prompts (default No) and library use without a callback refuses before signing
 - `X402_EXPECTED_PAY_TO`: Only sign payments to this address (optional). Independently of it, `X402Client.refusal_reason()` refuses non-`exact` schemes, a non-USDC `asset` and malformed amounts or recipients before signing
 
 **Chain / Blockchain Configuration**:
-- `CHAIN_ENABLED`: Enable on-chain anchoring (default: false)
 - `CHAIN_NAME`: `base-sepolia` (testnet, default) or `base` (mainnet)
 - `CHAIN_RPC_URL`: Custom RPC URL (optional, overrides preset)
 - `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs (optional, overrides preset fallbacks)

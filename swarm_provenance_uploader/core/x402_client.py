@@ -64,6 +64,57 @@ RPC_ENDPOINTS = {
     "base": "https://mainnet.base.org",
 }
 
+# Where the signing key is read from (#141). See resolve_x402_private_key().
+DEFAULT_PRIVATE_KEY_ENV = "X402_PRIVATE_KEY"  # gitleaks:allow (a variable name, not a key)
+LEGACY_PRIVATE_KEY_ENV = "SWARM_X402_PRIVATE_KEY"  # gitleaks:allow (a variable name, not a key)
+
+
+def x402_private_key_env_name() -> str:
+    """Return the name of the variable the user should put the key in.
+
+    This is the value of X402_PRIVATE_KEY_ENV when it is set, otherwise
+    X402_PRIVATE_KEY. Only the name is returned, never the key.
+    """
+    return (os.getenv("X402_PRIVATE_KEY_ENV") or "").strip() or DEFAULT_PRIVATE_KEY_ENV
+
+
+def resolve_x402_private_key() -> Tuple[Optional[str], Optional[str]]:
+    """Find the x402 signing key in the environment.
+
+    X402Client and the CLI's ``x402 status`` and ``x402 balance`` all use
+    this function, so the status display and the signer always agree.
+
+    Precedence:
+
+    1. If X402_PRIVATE_KEY_ENV names a variable other than X402_PRIVATE_KEY,
+       only that variable is read. There is no fallback, so a key in another
+       variable is never used by surprise.
+    2. Otherwise X402_PRIVATE_KEY.
+    3. Otherwise the legacy SWARM_X402_PRIVATE_KEY.
+
+    (An explicit ``private_key`` argument to X402Client comes before all of
+    these.)
+
+    Returns:
+        ``(key, variable_name)``, or ``(None, None)`` if no key is set.
+    """
+    custom = x402_private_key_env_name()
+    names = ([custom] if custom != DEFAULT_PRIVATE_KEY_ENV
+             else [DEFAULT_PRIVATE_KEY_ENV, LEGACY_PRIVATE_KEY_ENV])
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value, name
+    return None, None
+
+
+def _redact(text: str) -> str:
+    """Remove RPC URL secrets from an error text (stdlib only, no extra needed)."""
+    from ..chain.redact import redact_urls
+
+    return redact_urls(text)
+
+
 # Used with fullmatch(): "$" alone would also accept a trailing newline.
 _ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
 _AMOUNT_RE = re.compile(r"[0-9]+")
@@ -177,7 +228,7 @@ def validate_domain_config(
         actual = fetch_contract_domain_separator(web3_instance, contract_address)
     except Exception as e:
         raise X402ConfigurationError(
-            f"Failed to fetch DOMAIN_SEPARATOR from contract on {network}: {e}"
+            f"Failed to fetch DOMAIN_SEPARATOR from contract on {network}: {_redact(str(e))}"
         ) from e
 
     if computed != actual:
@@ -239,9 +290,10 @@ class X402Client:
 
         Args:
             private_key: Ethereum private key for signing payments.
-                         If None, reads from X402_PRIVATE_KEY env var.
+                         If None, uses resolve_x402_private_key().
             network: Network to use ('base-sepolia' or 'base').
-            rpc_url: Custom RPC URL. If None, uses default for network.
+            rpc_url: Custom RPC URL. If None, reads the X402_RPC_URL env var,
+                     then uses the default for the network.
             skip_domain_validation: Skip runtime domain validation (for testing only).
                                     WARNING: Do not use in production as it disables
                                     protection against signing with wrong EIP-712 domain.
@@ -266,10 +318,11 @@ class X402Client:
         self.network = network
 
         # Get private key
-        self._private_key = private_key or os.getenv("X402_PRIVATE_KEY") or os.getenv("SWARM_X402_PRIVATE_KEY")
+        self._private_key = private_key or resolve_x402_private_key()[0]
         if not self._private_key:
             raise X402ConfigurationError(
-                "x402 private key not configured. Set X402_PRIVATE_KEY environment variable."
+                f"x402 private key not configured. Set the {x402_private_key_env_name()} "
+                "environment variable."
             )
 
         # Validate and derive address
@@ -282,7 +335,13 @@ class X402Client:
             raise X402ConfigurationError(f"Invalid private key: {e}") from e
 
         # Setup Web3 connection
-        self._rpc_url = rpc_url or RPC_ENDPOINTS.get(network)
+        # Custom RPC: the argument, then X402_RPC_URL, then the network preset.
+        # A custom URL can carry an API key: register it so errors drop it.
+        self._rpc_url = rpc_url or (os.getenv("X402_RPC_URL") or "").strip() or RPC_ENDPOINTS.get(network)
+        if self._rpc_url not in RPC_ENDPOINTS.values():
+            from ..chain.redact import register_url_secrets
+
+            register_url_secrets([self._rpc_url], public=[*RPC_ENDPOINTS.values(), *RPC_ENDPOINTS])
         self._web3 = Web3(Web3.HTTPProvider(self._rpc_url))
 
         # USDC contract address for this network
@@ -469,7 +528,7 @@ class X402Client:
             usdc_balance = raw_balance / 1_000_000  # USDC has 6 decimals
             return raw_balance, usdc_balance
         except Exception as e:
-            raise X402ConfigurationError(f"Failed to check USDC balance: {e}") from e
+            raise X402ConfigurationError(f"Failed to check USDC balance: {_redact(str(e))}") from e
 
     def check_balance_sufficient(self, required_amount: str) -> bool:
         """

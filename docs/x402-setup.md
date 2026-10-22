@@ -153,7 +153,18 @@ X402_MAX_AUTO_PAY_USD=1.00
 
 # Optional: Only pay this recipient (the gateway operator's published pay-to address)
 X402_EXPECTED_PAY_TO=0x...
+
+# Optional: Custom RPC for the USDC balance and EIP-712 domain checks
+# X402_RPC_URL=https://your-rpc-provider.com
 ```
+
+The CLI reads the `.env` of the folder you run it in, or the nearest `.env` in a parent folder. Variables already set in your environment take precedence.
+
+The key is looked up in this order, for both signing and `x402 status`:
+
+1. If `X402_PRIVATE_KEY_ENV` names another variable, only that variable.
+2. Otherwise `X402_PRIVATE_KEY`.
+3. Otherwise the legacy `SWARM_X402_PRIVATE_KEY`.
 
 ### Verify configuration
 

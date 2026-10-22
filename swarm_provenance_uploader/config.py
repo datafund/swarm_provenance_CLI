@@ -1,7 +1,11 @@
 import os
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
-load_dotenv()  # Load variables from .env file
+# Load the .env file of the folder the command runs in (#141). find_dotenv
+# searches that folder, then each parent folder, and uses the first .env it
+# finds. Without usecwd=True it would search from this package's install
+# directory instead. Variables already set in the environment take precedence.
+load_dotenv(find_dotenv(usecwd=True))
 
 # --- Defaults ---
 GATEWAY_DEFAULT_URL = "https://provenance-gateway.datafund.io"
@@ -40,7 +44,9 @@ except (ValueError, TypeError):
 X402_ENABLED = os.getenv("X402_ENABLED", "false").lower() == "true"
 
 # Environment variable name that contains the private key
-# The actual private key should be in this env var, not in config
+# The actual private key should be in this env var, not in config.
+# Signing and the status display both resolve the key with
+# core.x402_client.resolve_x402_private_key(), which reads this setting.
 X402_PRIVATE_KEY_ENV = os.getenv("X402_PRIVATE_KEY_ENV", "X402_PRIVATE_KEY")  # gitleaks:allow (a variable name, not a key)
 
 # Network: "base-sepolia" (testnet, default) or "base" (mainnet)
@@ -55,8 +61,9 @@ try:
 except (ValueError, TypeError):
     X402_MAX_AUTO_PAY_USD = 1.00
 
-# Custom RPC URL (optional, uses default if not set)
-X402_RPC_URL = os.getenv("X402_RPC_URL")
+# Custom RPC URL for USDC balance and EIP-712 domain checks (optional, uses
+# the network preset if not set). X402Client reads it when no rpc_url is given.
+X402_RPC_URL = os.getenv("X402_RPC_URL") or None
 
 # Only sign payments to this address (optional). Pin it to the gateway
 # operator's published pay-to address so a misconfigured or hostile gateway
@@ -68,14 +75,22 @@ X402_EXPECTED_PAY_TO = os.getenv("X402_EXPECTED_PAY_TO") or None
 FREE_TIER = os.getenv("FREE_TIER", "false").lower() == "true"
 
 # --- Chain / Blockchain Configuration ---
-# Enable on-chain anchoring (disabled by default)
-CHAIN_ENABLED = os.getenv("CHAIN_ENABLED", "false").lower() == "true"
-
 # Chain name: "base-sepolia" (testnet, default) or "base" (mainnet)
 CHAIN_NAME = os.getenv("CHAIN_NAME", "base-sepolia")
 
 # Custom RPC URL (optional, overrides preset for selected chain)
 CHAIN_RPC_URL = os.getenv("CHAIN_RPC_URL")
+
+
+def _split_urls(value):
+    """Split a comma-separated URL list; None when it names no URL."""
+    urls = [url.strip() for url in (value or "").split(",") if url.strip()]
+    return urls or None
+
+
+# Fallback RPC URLs, comma-separated (optional). They replace the preset
+# fallbacks and are tried in order after CHAIN_RPC_URL (or the preset RPC).
+CHAIN_RPC_URLS = _split_urls(os.getenv("CHAIN_RPC_URLS"))
 
 # Custom contract address (optional, overrides preset for selected chain)
 CHAIN_CONTRACT = os.getenv("CHAIN_CONTRACT")
