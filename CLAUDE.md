@@ -202,7 +202,7 @@ swarm-prov-upload upload-collection /path/to/directory --usePool             # U
 swarm-prov-upload upload-collection /path/to/directory --stamp-id <id>       # Reuse existing stamp
 swarm-prov-upload upload-collection /path/to/directory --json                # JSON output
 swarm-prov-upload upload-collection /path/to/directory --deferred            # Deferred upload
-swarm-prov-upload upload-collection /path/to/directory --redundancy          # With redundancy
+swarm-prov-upload upload-collection /path/to/directory --redundancy 3        # Erasure coding level 0-4 (gateway default 2)
 ```
 
 ## Architecture
