@@ -44,7 +44,7 @@ Once a Swarm hash is anchored on-chain, anyone can independently verify its regi
 
 **Key points:**
 - Each anchor operation is a blockchain transaction (requires ETH for gas)
-- Read operations (get, verify) are free — no gas required
+- Read operations (`get`, `verify`, `lookup`, and `status` without `--set`) are free and need no wallet key
 - Data is NOT stored on-chain; only the hash is registered
 - The actual data remains on Swarm; the chain provides proof of registration
 
@@ -322,6 +322,8 @@ pip install -e .[blockchain]
 ```
 
 ### "No wallet private key configured"
+
+Commands that write to the chain, and `chain balance`, need a wallet key. Read-only commands (`chain get`, `verify`, `lookup`, and `status` without `--set`) do not.
 
 Set the `PROVENANCE_WALLET_KEY` environment variable:
 ```bash

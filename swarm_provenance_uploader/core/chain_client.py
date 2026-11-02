@@ -236,6 +236,7 @@ class ChainClient:
         explorer_url: Optional[str] = None,
         gas_limit: Optional[int] = None,
         rpc_fallbacks: Optional[List[str]] = None,
+        require_wallet: bool = True,
     ):
         """
         Initialize the chain client.
@@ -250,12 +251,16 @@ class ChainClient:
             explorer_url: Custom block explorer URL. If None, uses preset.
             gas_limit: Explicit gas limit. If set, skips estimation and multiplier.
             rpc_fallbacks: Fallback RPC URLs tried in order on failure.
+            require_wallet: If True (default), load the wallet key now. If
+                False, load it on first use, so read-only operations work
+                without a key. Writes, balance() and address then raise
+                ChainConfigurationError when no key is configured.
 
         Raises:
-            ChainConfigurationError: If dependencies missing or config invalid.
+            ChainConfigurationError: If dependencies missing or config invalid,
+                or if require_wallet is True and no valid key is configured.
         """
         from ..chain.provider import ChainProvider
-        from ..chain.wallet import ChainWallet
         from ..chain.contract import DataProvenanceContract
 
         self._provider = ChainProvider(
@@ -265,10 +270,11 @@ class ChainClient:
             explorer_url=explorer_url,
             rpc_fallbacks=rpc_fallbacks,
         )
-        self._wallet = ChainWallet(
-            private_key=private_key,
-            private_key_env=private_key_env,
-        )
+        self._private_key = private_key
+        self._private_key_env = private_key_env
+        self._wallet_instance = None
+        if require_wallet:
+            self._wallet  # load the key now: fail here if it is missing
         self._contract = DataProvenanceContract(
             web3=self._provider.web3,
             contract_address=self._provider.contract_address,
@@ -276,6 +282,23 @@ class ChainClient:
         self._gas_limit_multiplier = gas_limit_multiplier
         self._gas_limit = gas_limit
         self._contract_code_checked = False
+
+    @property
+    def _wallet(self):
+        """The signing wallet, created on first use.
+
+        Raises:
+            ChainConfigurationError: If no valid private key is configured.
+        """
+        if self._wallet_instance is None:
+            from ..chain.wallet import ChainWallet
+
+            self._wallet_instance = ChainWallet(
+                private_key=self._private_key,
+                private_key_env=self._private_key_env,
+            )
+            self._private_key = None  # the wallet holds it from now on
+        return self._wallet_instance
 
     @property
     def address(self) -> str:

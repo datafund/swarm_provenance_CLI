@@ -3713,6 +3713,90 @@ class TestRpcUrlRedaction:
         assert RPC_KEY not in caplog.text
 
 
+class TestChainClientWithoutWallet:
+    """Read-only operations work with no wallet key; writes still need it (#140, #201)."""
+
+    UNSET_KEY_ENV = "PROVENANCE_WALLET_KEY_UNSET_FOR_TEST"
+
+    def _client(self, **kwargs):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        os.environ.pop(self.UNSET_KEY_ENV, None)
+        return ChainClient(
+            chain="base-sepolia", private_key_env=self.UNSET_KEY_ENV,
+            require_wallet=False, **kwargs,
+        )
+
+    def test_reads_work_without_key(self, mock_chain_deps):
+        """get, verify, get_by_storage_ref and get_provenance_chain need no key."""
+        contract = mock_chain_deps["contract"]
+        contract.functions.getDataHashByStorageRef.return_value.call.return_value = DUMMY_HASH_BYTES
+        client = self._client()
+
+        assert client.get(DUMMY_HASH).data_hash == DUMMY_HASH
+        assert client.verify(DUMMY_HASH) is True
+        assert client.get_by_storage_ref("ee" * 32).data_hash == DUMMY_HASH
+        assert [r.data_hash for r in client.get_provenance_chain(DUMMY_HASH)] == [DUMMY_HASH]
+        mock_chain_deps["account_class"].from_key.assert_not_called()
+
+    def test_reads_ignore_an_invalid_key(self, mock_chain_deps):
+        """The key is not read for reads, so a malformed key does not block them."""
+        mock_chain_deps["account_class"].from_key.side_effect = ValueError("bad key")
+        with patch.dict(os.environ, {"PROVENANCE_WALLET_KEY": "not-a-key"}):
+            from swarm_provenance_uploader.core.chain_client import ChainClient
+
+            client = ChainClient(chain="base-sepolia", require_wallet=False)
+            assert client.verify(DUMMY_HASH) is True
+
+    @pytest.mark.parametrize("write", [
+        lambda c: c.anchor(swarm_hash=DUMMY_HASH),
+        lambda c: c.transform(original_hash=DUMMY_HASH, new_hash="c" * 64, description="d"),
+        lambda c: c.access(swarm_hash=DUMMY_HASH),
+        lambda c: c.set_status(swarm_hash=DUMMY_HASH, status=1),
+    ], ids=["anchor", "transform", "access", "set_status"])
+    def test_writes_fail_before_sending(self, mock_chain_deps, write, request):
+        """A write without a key raises the missing-key error and sends nothing."""
+        web3 = mock_chain_deps["web3_instance"]
+        if request.node.callspec.id == "anchor":
+            # anchor first checks that the hash is not registered yet
+            mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+                DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
+            )
+        client = self._client()
+
+        with pytest.raises(ChainConfigurationError, match="No wallet private key"):
+            write(client)
+        web3.eth.send_raw_transaction.assert_not_called()
+        web3.eth.get_transaction_count.assert_not_called()
+
+    def test_balance_and_address_need_key(self, mock_chain_deps):
+        """balance() reports the key's own address, so it needs the key."""
+        client = self._client()
+
+        with pytest.raises(ChainConfigurationError, match="No wallet private key"):
+            client.balance()
+        with pytest.raises(ChainConfigurationError, match="No wallet private key"):
+            client.address
+
+    def test_wallet_built_once(self, mock_chain_deps):
+        """The wallet is built on first use and then reused."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        client = ChainClient(chain="base-sepolia", require_wallet=False)
+        mock_chain_deps["account_class"].from_key.assert_not_called()
+        assert client.address == DUMMY_ADDRESS
+        assert client.address == DUMMY_ADDRESS
+        mock_chain_deps["account_class"].from_key.assert_called_once()
+
+    def test_default_still_requires_key_at_construction(self, mock_chain_deps):
+        """Without require_wallet=False, a missing key fails in the constructor as before."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        os.environ.pop(self.UNSET_KEY_ENV, None)
+        with pytest.raises(ChainConfigurationError, match="No wallet private key"):
+            ChainClient(chain="base-sepolia", private_key_env=self.UNSET_KEY_ENV)
+
+
 # Transport failures in the send step (#181)
 
 

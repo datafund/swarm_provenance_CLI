@@ -338,7 +338,7 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 
 1. **Get testnet ETH** (for gas): https://www.alchemy.com/faucets/base-sepolia
 2. **Get testnet USDC** (if using x402): https://faucet.circle.com/
-3. **Configure wallet**: Set `PROVENANCE_WALLET_KEY` with your wallet's private key
+3. **Configure wallet**: Set `PROVENANCE_WALLET_KEY` with your wallet's private key. Only commands that write to the chain, and `chain balance`, need it. `chain get`, `verify`, `lookup` and `status` (without `--set`) work without a key
 
 See [docs/chain-setup.md](docs/chain-setup.md) for detailed setup instructions and [docs/chain-workflows.md](docs/chain-workflows.md) for workflow diagrams.
 
@@ -365,12 +365,14 @@ print(f"TX: {result.explorer_url}")
 - `set_delegate(delegate, authorized)` - Authorize/revoke a delegate
 - `set_storage_ref(swarm_hash, storage_ref)` - Set/update storage reference for anchored hash
 
+To read without a wallet key, create the client with `ChainClient(require_wallet=False)`. The key is then read on first use, so write operations, `balance()` and `address` raise `ChainConfigurationError` if no key is configured.
+
 **Read operations** (no gas required):
 - `get(swarm_hash)` - Get full provenance record
 - `verify(swarm_hash)` - Check if hash is registered
 - `get_provenance_chain(swarm_hash)` - Follow transformation lineage
 - `get_by_storage_ref(storage_ref)` - Look up data hash by storage reference
-- `balance()` - Get wallet balance and chain info
+- `balance()` - Get wallet balance and chain info (needs the wallet key)
 - `health_check()` - Check RPC connectivity
 
 ## Run tests

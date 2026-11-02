@@ -93,12 +93,16 @@ _chain_config = {
 }
 
 
-def _get_chain_client(verbose: bool = False):
+def _get_chain_client(verbose: bool = False, require_wallet: bool = False):
     """
     Create a ChainClient with current chain configuration.
 
     Args:
         verbose: Enable verbose output.
+        require_wallet: Load the wallet key now and exit with the
+            configuration hint if it is missing. Commands that write, and
+            chain balance, pass True. Read-only commands leave it False, so
+            they work without a key (#140).
 
     Returns:
         Configured ChainClient instance.
@@ -125,6 +129,7 @@ def _get_chain_client(verbose: bool = False):
             private_key_env=_chain_config["wallet_key_env"],
             explorer_url=_chain_config["explorer_url"],
             gas_limit=_chain_config.get("gas_limit"),
+            require_wallet=require_wallet,
         )
     except exceptions.ChainConfigurationError as e:
         typer.secho(f"ERROR: Chain configuration invalid: {e}", fg=typer.colors.RED, err=True)
@@ -2625,7 +2630,7 @@ def chain_balance(
     Show wallet balance and chain configuration.
     """
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
         result = client.balance(verbose=verbose)
     except typer.Exit:
         raise
@@ -2890,7 +2895,7 @@ def chain_anchor(
     if gas is not None:
         _chain_config["gas_limit"] = gas
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
         if owner:
             result = client.anchor_for(swarm_hash, owner=owner, data_type=data_type, storage_ref=storage_ref, verbose=verbose)
         else:
@@ -2971,7 +2976,7 @@ def chain_set_storage_ref(
     if gas is not None:
         _chain_config["gas_limit"] = gas
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
         result = client.set_storage_ref(data_hash, storage_ref, verbose=verbose)
     except typer.Exit:
         raise
@@ -3074,7 +3079,7 @@ def chain_access(
     if gas is not None:
         _chain_config["gas_limit"] = gas
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
         result = client.access(swarm_hash, verbose=verbose)
     except typer.Exit:
         raise
@@ -3140,7 +3145,7 @@ def chain_status(
             raise typer.Exit(code=1)
 
         try:
-            client = _get_chain_client(verbose=verbose)
+            client = _get_chain_client(verbose=verbose, require_wallet=True)
             result = client.set_status(swarm_hash, status=status_map[status_name], verbose=verbose)
         except typer.Exit:
             raise
@@ -3223,7 +3228,7 @@ def chain_transfer(
     if gas is not None:
         _chain_config["gas_limit"] = gas
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
         result = client.transfer_ownership(swarm_hash, new_owner=to, verbose=verbose)
     except typer.Exit:
         raise
@@ -3287,7 +3292,7 @@ def chain_delegate(
         raise typer.Exit(code=1)
 
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
         result = client.set_delegate(delegate=address, authorized=authorize, verbose=verbose)
     except typer.Exit:
         raise
@@ -3345,7 +3350,7 @@ def chain_transform(
     if gas is not None:
         _chain_config["gas_limit"] = gas
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
         try:
             result = client.transform(original_hash, new_hash, description=description, verbose=verbose)
         except exceptions.ChainError as e:
@@ -3442,7 +3447,7 @@ def chain_protect(
     if gas is not None:
         _chain_config["gas_limit"] = gas
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
     except typer.Exit:
         raise
 
@@ -3557,7 +3562,7 @@ def chain_merge(
     if gas is not None:
         _chain_config["gas_limit"] = gas
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
         result = client.merge_transform(
             source_hashes=source_hashes,
             new_hash=new_hash,
