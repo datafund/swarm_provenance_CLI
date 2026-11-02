@@ -652,11 +652,11 @@ class TestBlockchainLocalHardhat:
             pytest.skip("CHAIN_CONTRACT not set for local Hardhat")
 
         provider = ChainProvider(
-            chain="base-sepolia",
+            chain="localhost",
             rpc_url="http://localhost:8545",
             contract_address=contract,
         )
-        # Hardhat may report a different chain ID, so just check connection
+        # The localhost preset takes the chain ID the node reports
         assert provider.web3.is_connected()
 
     @skip_if_no_hardhat
@@ -670,7 +670,7 @@ class TestBlockchainLocalHardhat:
             pytest.skip("CHAIN_CONTRACT not set for local Hardhat")
 
         client = ChainClient(
-            chain="base-sepolia",
+            chain="localhost",
             rpc_url="http://localhost:8545",
             contract_address=contract,
         )
@@ -698,7 +698,7 @@ class TestBlockchainLocalHardhat:
             pytest.skip("CHAIN_CONTRACT not set for local Hardhat")
 
         client = ChainClient(
-            chain="base-sepolia",
+            chain="localhost",
             rpc_url="http://localhost:8545",
             contract_address=contract,
         )
@@ -725,7 +725,7 @@ class TestBlockchainLocalHardhat:
             pytest.skip("CHAIN_CONTRACT not set for local Hardhat")
 
         client = ChainClient(
-            chain="base-sepolia",
+            chain="localhost",
             rpc_url="http://localhost:8545",
             contract_address=contract,
         )
@@ -750,7 +750,7 @@ class TestBlockchainLocalHardhat:
             pytest.skip("CHAIN_CONTRACT not set for local Hardhat")
 
         client = ChainClient(
-            chain="base-sepolia",
+            chain="localhost",
             rpc_url="http://localhost:8545",
             contract_address=contract,
         )
@@ -780,7 +780,7 @@ class TestBlockchainLocalHardhat:
             pytest.skip("CHAIN_CONTRACT not set for local Hardhat")
 
         client = ChainClient(
-            chain="base-sepolia",
+            chain="localhost",
             rpc_url="http://localhost:8545",
             contract_address=contract,
         )
@@ -802,7 +802,7 @@ class TestBlockchainLocalHardhat:
             pytest.skip("CHAIN_CONTRACT not set for local Hardhat")
 
         client = ChainClient(
-            chain="base-sepolia",
+            chain="localhost",
             rpc_url="http://localhost:8545",
             contract_address=contract,
         )
@@ -830,7 +830,7 @@ class TestBlockchainLocalHardhat:
             pytest.skip("CHAIN_CONTRACT not set for local Hardhat")
 
         client = ChainClient(
-            chain="base-sepolia",
+            chain="localhost",
             rpc_url="http://localhost:8545",
             contract_address=contract,
         )
@@ -861,7 +861,7 @@ class TestBlockchainLocalHardhat:
             pytest.skip("CHAIN_CONTRACT not set for local Hardhat")
 
         client = ChainClient(
-            chain="base-sepolia",
+            chain="localhost",
             rpc_url="http://localhost:8545",
             contract_address=contract,
         )
@@ -883,7 +883,7 @@ class TestBlockchainLocalHardhat:
             pytest.skip("CHAIN_CONTRACT not set for local Hardhat")
 
         client = ChainClient(
-            chain="base-sepolia",
+            chain="localhost",
             rpc_url="http://localhost:8545",
             contract_address=contract,
         )
@@ -922,7 +922,7 @@ class TestBlockchainLocalHardhat:
             pytest.skip("CHAIN_CONTRACT not set for local Hardhat")
 
         client = ChainClient(
-            chain="base-sepolia",
+            chain="localhost",
             rpc_url="http://localhost:8545",
             contract_address=contract,
         )
@@ -961,7 +961,7 @@ class TestBlockchainLocalHardhat:
         # 21,000 is enough for a plain ETH transfer but way too low for
         # a registerData contract call — the node should reject or revert.
         client = ChainClient(
-            chain="base-sepolia",
+            chain="localhost",
             rpc_url="http://localhost:8545",
             contract_address=contract,
             gas_limit=21_000,

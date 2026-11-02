@@ -8,6 +8,7 @@ try:
     from .exceptions import (
         ChainError,
         ChainConfigurationError,
+        ChainIdMismatchError,
         ChainConnectionError,
         ChainTransactionError,
         ChainValidationError,
@@ -30,6 +31,7 @@ try:
         "clear_registry",
         "ChainError",
         "ChainConfigurationError",
+        "ChainIdMismatchError",
         "ChainConnectionError",
         "ChainTransactionError",
         "ChainValidationError",

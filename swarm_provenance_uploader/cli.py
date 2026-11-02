@@ -15,6 +15,7 @@ from . import config, __version__
 from ._requirements import INSTALL_ETH_ACCOUNT, INSTALL_SIGNING_DEPS
 from .core import file_utils, swarm_client, metadata_builder
 from .core.gateway_client import GatewayClient, is_insecure_gateway_url, is_valid_idempotency_key
+from .core.x402_client import normalize_network
 from .models import ProvenanceMetadata, ValidationError
 from . import exceptions
 from .chain.redact import redact_url, redact_urls
@@ -65,7 +66,7 @@ _x402_config = {
     "enabled": config.X402_ENABLED,
     "auto_pay": config.X402_AUTO_PAY,
     "max_auto_pay_usd": config.X402_MAX_AUTO_PAY_USD,
-    "network": config.X402_NETWORK,
+    "network": normalize_network(config.X402_NETWORK),
     "expected_pay_to": config.X402_EXPECTED_PAY_TO,
 }
 
@@ -127,7 +128,9 @@ def _get_chain_client(verbose: bool = False):
         )
     except exceptions.ChainConfigurationError as e:
         typer.secho(f"ERROR: Chain configuration invalid: {e}", fg=typer.colors.RED, err=True)
-        typer.echo("Check PROVENANCE_WALLET_KEY environment variable and chain settings.", err=True)
+        if not isinstance(e, exceptions.ChainIdMismatchError):
+            # The mismatch message carries its own advice (CHAIN_NAME=localhost)
+            typer.echo("Check PROVENANCE_WALLET_KEY environment variable and chain settings.", err=True)
         raise typer.Exit(code=1)
 
 
@@ -187,6 +190,76 @@ def _record_x402_payment(payment: dict):
     except (TypeError, ValueError):
         pass
     _x402_session["payments"] += 1
+
+
+def _gateway_stamp_info(gw_client, stamp_id: str, verbose: bool) -> Optional[dict]:
+    """The gateway's stamp details as the dict the usability check reads."""
+    stamp_details = gw_client.get_stamp(stamp_id, verbose=verbose)
+    if not stamp_details:
+        return None
+    return {
+        "usable": stamp_details.usable,
+        "batchTTL": stamp_details.batchTTL,
+    }
+
+
+def _wait_for_stamp_usable(stamp_id: str, get_stamp_info, stamp_source: str,
+                           stamp_check_retries: int, stamp_check_interval: int, verbose: bool):
+    """Poll until the stamp is usable; exit 1 if it is not usable after all retries.
+
+    stamp_source is "existing", "pool" or "bought" and picks the first message.
+    get_stamp_info() returns a dict with "usable" and "batchTTL", or None.
+    """
+    if stamp_source == "existing":
+        typer.echo(f"Verifying stamp is usable...")
+    elif stamp_source == "pool":
+        typer.echo(f"Verifying pooled stamp is usable...")
+    else:
+        typer.echo(f"Waiting for stamp to become usable (up to {stamp_check_retries * stamp_check_interval // 60} minutes)...")
+    stamp_is_ready_for_upload = False
+    for i in range(stamp_check_retries):
+        if not verbose:
+            # Simple progress indicator for non-verbose mode
+            typer.echo(f"Checking stamp usability (attempt {i+1}/{stamp_check_retries})... ", nl=False)
+
+        try:
+            stamp_info = get_stamp_info()
+
+            if stamp_info:
+                usable = stamp_info.get("usable", False)
+                batch_ttl_seconds = stamp_info.get("batchTTL")  # TTL in seconds
+
+                if verbose:
+                    ttl_str = f"{batch_ttl_seconds // 60}m {batch_ttl_seconds % 60}s" if batch_ttl_seconds is not None else "N/A"
+                    typer.echo(f"    Attempt {i+1}: Stamp found - Usable={usable}, TTL={ttl_str}")
+
+                # Only the usable flag decides; the gateway may send it as null
+                if usable:
+                    stamp_is_ready_for_upload = True
+                    if not verbose: typer.echo(typer.style("OK", fg=typer.colors.GREEN))
+                    else: typer.secho(f"    Stamp {stamp_id.lower()} is now USABLE!", fg=typer.colors.GREEN)
+                    break
+                else:
+                    if not verbose: typer.echo("retrying...")
+            else:
+                if not verbose: typer.echo("not found, retrying...")
+
+        except Exception as e:
+            if not verbose: typer.echo(typer.style("error checking, retrying...", fg=typer.colors.YELLOW))
+            else: typer.echo(f"    Warning: Error during stamp info check on attempt {i+1}: {e}")
+
+
+        if i < stamp_check_retries - 1:
+            if verbose:
+                typer.echo(f"    Waiting {stamp_check_interval}s before next check...")
+            time.sleep(stamp_check_interval)
+        elif not stamp_is_ready_for_upload and not verbose:  # Last attempt failed, print newline
+            typer.echo(typer.style("failed.", fg=typer.colors.RED))
+
+
+    if not stamp_is_ready_for_upload:
+        typer.secho(f"ERROR: Stamp {stamp_id.lower()} did not become USABLE after {stamp_check_retries} retries.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
 
 
 def _hold_unused_stamp(stamp_id: str, how: str):
@@ -483,8 +556,8 @@ def upload(
     size: Annotated[Optional[str], typer.Option("--size", help="Stamp size preset: 'small', 'medium', 'large' (gateway only).")] = None,
     stamp_depth: Annotated[Optional[int], typer.Option("--depth", help="Postage stamp depth (16-32).")] = None,
     stamp_amount: Annotated[Optional[int], typer.Option("--amount", help="Legacy: PLUR amount (local backend or deprecated).")] = None,
-    stamp_check_retries: Annotated[int, typer.Option("--stamp-retries", help="Number of times to check for stamp usability.")] = 12,
-    stamp_check_interval: Annotated[int, typer.Option("--stamp-interval", help="Seconds to wait between stamp usability checks.")] = 20,
+    stamp_check_retries: Annotated[int, typer.Option("--stamp-retries", min=1, help="Number of times to check for stamp usability.")] = 12,
+    stamp_check_interval: Annotated[int, typer.Option("--stamp-interval", min=0, help="Seconds to wait between stamp usability checks.")] = 20,
     use_pool: Annotated[bool, typer.Option("--usePool", help="Acquire stamp from pool instead of purchasing (gateway only, faster ~5s vs >1min).")] = False,
     sign: Annotated[Optional[str], typer.Option("--sign", help="Sign document with notary service. Value: 'notary' (gateway only).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False
@@ -695,69 +768,20 @@ def upload(
 
     # Poll for stamp existence and usability
     if used_existing_stamp:
-        typer.echo(f"Verifying stamp is usable...")
+        stamp_source = "existing"
     elif acquired_from_pool:
-        typer.echo(f"Verifying pooled stamp is usable...")
+        stamp_source = "pool"
     else:
-        typer.echo(f"Waiting for stamp to become usable (up to {stamp_check_retries * stamp_check_interval // 60} minutes)...")
-    stamp_is_ready_for_upload = False
-    for i in range(stamp_check_retries):
-        if not verbose:
-            # Simple progress indicator for non-verbose mode
-            typer.echo(f"Checking stamp usability (attempt {i+1}/{stamp_check_retries})... ", nl=False)
+        stamp_source = "bought"
 
-        try:
-            # Get stamp info using appropriate backend
-            if use_gateway:
-                gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
-                stamp_details = gw_client.get_stamp(stamp_id, verbose=verbose)
-                if stamp_details:
-                    stamp_info = {
-                        "exists": stamp_details.exists,
-                        "usable": stamp_details.usable,
-                        "batchTTL": stamp_details.batchTTL,
-                    }
-                else:
-                    stamp_info = None
-            else:
-                stamp_info = swarm_client.get_stamp_info(local_bee_url, stamp_id, verbose=verbose)
+    def _get_stamp_info():
+        if use_gateway:
+            gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
+            return _gateway_stamp_info(gw_client, stamp_id, verbose)
+        return swarm_client.get_stamp_info(local_bee_url, stamp_id, verbose=verbose)
 
-            if stamp_info:
-                exists = stamp_info.get("exists")
-                usable = stamp_info.get("usable", False)
-                batch_ttl_seconds = stamp_info.get("batchTTL")  # TTL in seconds
-
-                if verbose:
-                    ttl_str = f"{batch_ttl_seconds // 60}m {batch_ttl_seconds % 60}s" if batch_ttl_seconds is not None else "N/A"
-                    typer.echo(f"    Attempt {i+1}: Stamp found - Exists={exists}, Usable={usable}, TTL={ttl_str}")
-
-                # Check usable flag - exists may be None from gateway API
-                if usable:
-                    stamp_is_ready_for_upload = True
-                    if not verbose: typer.echo(typer.style("OK", fg=typer.colors.GREEN))
-                    else: typer.secho(f"    Stamp {stamp_id.lower()} is now USABLE!", fg=typer.colors.GREEN)
-                    break
-                else:
-                    if not verbose: typer.echo("retrying...")
-            else:
-                if not verbose: typer.echo("not found, retrying...")
-
-        except Exception as e:
-            if not verbose: typer.echo(typer.style("error checking, retrying...", fg=typer.colors.YELLOW))
-            else: typer.echo(f"    Warning: Error during stamp info check on attempt {i+1}: {e}")
-
-
-        if i < stamp_check_retries - 1:
-            if verbose:
-                typer.echo(f"    Waiting {stamp_check_interval}s before next check...")
-            time.sleep(stamp_check_interval)
-        elif not stamp_is_ready_for_upload and not verbose:  # Last attempt failed, print newline
-            typer.echo(typer.style("failed.", fg=typer.colors.RED))
-
-
-    if not stamp_is_ready_for_upload:
-        typer.secho(f"ERROR: Stamp {stamp_id.lower()} did not become USABLE after {stamp_check_retries} retries.", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+    _wait_for_stamp_usable(stamp_id, _get_stamp_info, stamp_source,
+                           stamp_check_retries, stamp_check_interval, verbose)
 
     # 7. (Final) Construct "Provenance Metadata" JSON object
     final_metadata_obj = metadata_builder.create_provenance_metadata_object(
@@ -1229,7 +1253,9 @@ def upload_collection(
     stamp_id: Annotated[Optional[str], typer.Option("--stamp-id", "-s", help="Existing stamp ID to reuse (skips stamp purchase).")] = None,
     use_pool: Annotated[bool, typer.Option("--usePool", help="Acquire stamp from pool instead of purchasing (faster ~5s vs >1min).")] = False,
     deferred: Annotated[bool, typer.Option("--deferred", help="Use deferred upload mode.")] = False,
-    redundancy: Annotated[bool, typer.Option("--redundancy", help="Enable redundancy for the upload.")] = False,
+    redundancy: Annotated[Optional[int], typer.Option("--redundancy", min=0, max=4, help="Erasure coding level 0-4 (0 none, 1 medium, 2 strong, 3 insane, 4 paranoid). Default: the gateway's default, level 2.")] = None,
+    stamp_check_retries: Annotated[int, typer.Option("--stamp-retries", min=1, help="Number of times to check for stamp usability.")] = 12,
+    stamp_check_interval: Annotated[int, typer.Option("--stamp-interval", min=0, help="Seconds to wait between stamp usability checks.")] = 20,
     output_json: Annotated[bool, typer.Option("--json", help="Output result as JSON.")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False,
 ):
@@ -1279,8 +1305,8 @@ def upload_collection(
             typer.echo(f"    Size: {size}")
         if deferred:
             typer.echo(f"    Deferred: Yes")
-        if redundancy:
-            typer.echo(f"    Redundancy: Yes")
+        if redundancy is not None:
+            typer.echo(f"    Redundancy level: {redundancy}")
     else:
         typer.echo(f"Processing directory: {dir_path.name}/ ({len(all_files)} files)...")
 
@@ -1300,98 +1326,116 @@ def upload_collection(
             typer.echo(f"    File: {fi['path']} ({fi['size']} bytes) hash={fi['content_hash'][:16]}...")
 
     # Create TAR in temp directory
+    tmp_dir = None
     try:
-        tmp_dir = tempfile.mkdtemp()
-        tar_path = Path(tmp_dir) / "collection.tar"
-        file_utils.create_tar_from_directory(dir_path, tar_path)
-        tar_size = tar_path.stat().st_size
-        if verbose:
-            typer.echo(f"    TAR archive created: {tar_size} bytes")
-    except (ValueError, OSError) as e:
-        typer.secho(f"ERROR: Failed creating TAR archive: {e}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+        try:
+            tmp_dir = tempfile.mkdtemp()
+            tar_path = Path(tmp_dir) / "collection.tar"
+            file_utils.create_tar_from_directory(dir_path, tar_path)
+            tar_size = tar_path.stat().st_size
+            if verbose:
+                typer.echo(f"    TAR archive created: {tar_size} bytes")
+        except (ValueError, OSError) as e:
+            typer.secho(f"ERROR: Failed creating TAR archive: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
 
-    # Acquire stamp
-    try:
-        gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
+        # Acquire stamp
+        stamp_source = "existing" if stamp_id else ("pool" if use_pool else "bought")
+        try:
+            gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
 
-        if stamp_id:
-            ignored = [flag for flag, value in (("--usePool", use_pool), ("--size", size),
-                                                ("--duration", duration)) if value]
-            if ignored:
-                typer.secho(f"Note: {', '.join(ignored)} ignored with --stamp-id (no stamp is bought).",
-                            fg=typer.colors.YELLOW, err=True)
-            typer.echo(f"Using existing stamp: {stamp_id}")
-        elif use_pool:
-            typer.echo("Acquiring stamp from pool...")
-            acquire_result = gw_client.acquire_stamp_from_pool(size=size, verbose=verbose)
-            stamp_id = acquire_result.batch_id
-            _hold_unused_stamp(stamp_id, "acquired from the pool")
-            msg = f"Stamp acquired from pool (ID: {stamp_id})"
-            if acquire_result.fallback_used:
-                msg += " [fallback size]"
-            typer.echo(msg)
-        else:
-            typer.echo("Purchasing postage stamp...")
-            stamp_id = gw_client.purchase_stamp(
-                duration_hours=duration,
-                size=size,
+            if stamp_id:
+                ignored = [flag for flag, value in (("--usePool", use_pool), ("--size", size),
+                                                    ("--duration", duration)) if value]
+                if ignored:
+                    typer.secho(f"Note: {', '.join(ignored)} ignored with --stamp-id (no stamp is bought).",
+                                fg=typer.colors.YELLOW, err=True)
+                typer.echo(f"Using existing stamp: {stamp_id}")
+            elif use_pool:
+                typer.echo("Acquiring stamp from pool...")
+                acquire_result = gw_client.acquire_stamp_from_pool(size=size, verbose=verbose)
+                stamp_id = acquire_result.batch_id
+                _hold_unused_stamp(stamp_id, "acquired from the pool")
+                msg = f"Stamp acquired from pool (ID: {stamp_id})"
+                if acquire_result.fallback_used:
+                    msg += " [fallback size]"
+                typer.echo(msg)
+            else:
+                typer.echo("Purchasing postage stamp...")
+                stamp_id = gw_client.purchase_stamp(
+                    duration_hours=duration,
+                    size=size,
+                    verbose=verbose,
+                )
+                _hold_unused_stamp(stamp_id, "bought")
+                typer.echo(f"Postage stamp purchased (ID: {stamp_id})")
+
+        except exceptions.PoolNotEnabledError:
+            typer.secho("ERROR: Stamp pool is not enabled on this gateway.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        except exceptions.PaymentRequiredError as e:
+            _report_payment_required(e)
+        except exceptions.PaymentOutcomeUnknownError as e:
+            _report_payment_outcome(e, "getting the stamp")
+        except Exception as e:
+            typer.secho(f"ERROR: Failed acquiring stamp: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+
+        # Wait until the stamp is usable: the gateway cannot upload to it before that
+        _wait_for_stamp_usable(stamp_id, lambda: _gateway_stamp_info(gw_client, stamp_id, verbose),
+                               stamp_source, stamp_check_retries, stamp_check_interval, verbose)
+
+        # Upload manifest
+        typer.echo("Uploading collection to Swarm...")
+        not_returned = None  # with --json: the upload worked but its result cannot be returned
+        try:
+            result = gw_client.upload_manifest(
+                tar_path=str(tar_path),
+                stamp_id=stamp_id,
+                deferred=deferred,
+                include_timing=verbose,
+                redundancy=redundancy,
                 verbose=verbose,
             )
-            _hold_unused_stamp(stamp_id, "bought")
-            typer.echo(f"Postage stamp purchased (ID: {stamp_id})")
-
-    except exceptions.PoolNotEnabledError:
-        typer.secho("ERROR: Stamp pool is not enabled on this gateway.", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-    except exceptions.PaymentRequiredError as e:
-        _report_payment_required(e)
-    except exceptions.PaymentOutcomeUnknownError as e:
-        _report_payment_outcome(e, "getting the stamp")
-    except Exception as e:
-        typer.secho(f"ERROR: Failed acquiring stamp: {e}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-
-    # Upload manifest
-    typer.echo("Uploading collection to Swarm...")
-    try:
-        result = gw_client.upload_manifest(
-            tar_path=str(tar_path),
-            stamp_id=stamp_id,
-            deferred=deferred,
-            include_timing=verbose,
-            redundancy=redundancy,
-            verbose=verbose,
-        )
-    except exceptions.PaymentRequiredError as e:
-        _report_payment_required(e)
-    except exceptions.PaymentOutcomeUnknownError as e:
-        _report_payment_outcome(e, "the collection upload", final_step=True)
-    except Exception as e:
-        typer.secho(f"ERROR: Failed uploading collection: {e}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+        except exceptions.PaymentRequiredError as e:
+            _report_payment_required(e)
+        except exceptions.PaymentOutcomeUnknownError as e:
+            if output_json and isinstance(e, exceptions.PaymentDeliveredNotStoredError):
+                not_returned = e
+            else:
+                _report_payment_outcome(e, "the collection upload", final_step=True)
+        except Exception as e:
+            typer.secho(f"ERROR: Failed uploading collection: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
     finally:
-        # Cleanup temp TAR
-        try:
+        # Remove the temp folder with the TAR on every exit
+        if tmp_dir:
             import shutil
             shutil.rmtree(tmp_dir, ignore_errors=True)
-        except Exception:
-            pass
 
     _unused_stamp.update(id=None, how=None)  # used: nothing to reuse
 
     # Output
     if output_json:
         from .models import CollectionFileInfo, CollectionProvenanceMetadata
-        metadata = CollectionProvenanceMetadata(
+        metadata_fields = dict(
             collection_hash=collection_hash,
             files=[CollectionFileInfo(**fi) for fi in file_infos],
             total_size=total_size,
             file_count=len(file_infos),
             stamp_id=stamp_id,
-            swarm_reference=result.reference,
             provenance_standard=provenance_standard,
         )
+        if not_returned is not None:
+            # Still a JSON document for scripts (#153): the same fields with no reference
+            # (model_construct, because the model requires one), plus what identifies the payment
+            document = CollectionProvenanceMetadata.model_construct(
+                **metadata_fields, swarm_reference=None).model_dump(mode="json")
+            document.update(status="delivered_not_stored", transaction=not_returned.transaction,
+                            payer=not_returned.payer, idempotency_key=not_returned.idempotency_key)
+            typer.echo(json.dumps(document, indent=2))
+            _report_delivered_not_stored(not_returned, "the collection upload", final_step=True)
+        metadata = CollectionProvenanceMetadata(**metadata_fields, swarm_reference=result.reference)
         typer.echo(metadata.model_dump_json(indent=2))
     else:
         typer.secho(f"\nSUCCESS! Collection uploaded.", fg=typer.colors.GREEN, bold=True)
@@ -1412,6 +1456,29 @@ def upload_collection(
 
 
 # --- Stamps Subcommands ---
+
+def _format_utilization(percent: Optional[float]) -> str:
+    """The gateway's `utilizationPercent` for display (#143).
+
+    Not `utilization`: that is the raw bucket fill level, so a depth-17
+    batch at 50 % has utilization 1.
+    """
+    return "unknown" if percent is None else f"{round(percent, 1):g}%"
+
+
+def _or_unknown(value) -> str:
+    """A gateway value for display; the gateway sends null when it cannot tell (#143)."""
+    return "unknown" if value is None else str(value)
+
+
+def _format_usable(usable: Optional[bool], width: int = 0) -> str:
+    """Yes, No or Unknown, padded before styling so colour codes do not count."""
+    if usable is None:
+        return typer.style(f"{'Unknown':<{width}}", fg=typer.colors.YELLOW)
+    if usable:
+        return typer.style(f"{'Yes':<{width}}", fg=typer.colors.GREEN)
+    return typer.style(f"{'No':<{width}}", fg=typer.colors.RED)
+
 
 def _sanitize_label(label: Optional[str]) -> str:
     """A stamp label as printable text (labels come from the gateway)."""
@@ -1470,10 +1537,9 @@ def stamps_list(
         for stamp in result.stamps:
             stamp_id_str = stamp.batchID if full else f"{stamp.batchID[:8]}...{stamp.batchID[-8:]}"
             # Pad before styling: colour codes would count towards the width
-            usable_str = (typer.style(f"{'Yes':<8}", fg=typer.colors.GREEN) if stamp.usable
-                          else typer.style(f"{'No':<8}", fg=typer.colors.RED))
+            usable_str = _format_usable(stamp.usable, 8)
             ttl_str = _format_ttl(stamp.batchTTL)
-            util_str = f"{stamp.utilization}%"
+            util_str = _format_utilization(stamp.utilizationPercent)
             line = f"{stamp_id_str:<{id_width}} {usable_str} {ttl_str:<12} {stamp.depth:<6} {util_str:<12}"
             if full:
                 line += f" {_sanitize_label(stamp.label)}"
@@ -1519,12 +1585,13 @@ def stamps_info(
 
             typer.echo(f"\nStamp Details:")
             typer.echo(f"  Batch ID:    {stamp.batchID}")
-            typer.echo(f"  Usable:      {typer.style('Yes', fg=typer.colors.GREEN) if stamp.usable else typer.style('No', fg=typer.colors.RED)}")
-            typer.echo(f"  Exists:      {'Yes' if stamp.exists else 'No'}")
+            typer.echo(f"  Usable:      {_format_usable(stamp.usable)}")
+            # `local`: the batch is on this gateway's node. The gateway sends no `exists`.
+            typer.echo(f"  Local:       {'Unknown' if stamp.local is None else 'Yes' if stamp.local else 'No'}")
             typer.echo(f"  TTL:         {_format_ttl(stamp.batchTTL)}")
             typer.echo(f"  Depth:       {stamp.depth}")
             typer.echo(f"  Amount:      {stamp.amount}")
-            typer.echo(f"  Utilization: {stamp.utilization}%")
+            typer.echo(f"  Utilization: {_format_utilization(stamp.utilizationPercent)}")
             if stamp.label:
                 typer.echo(f"  Label:       {_sanitize_label(stamp.label)}")
         else:
@@ -1731,7 +1798,7 @@ def wallet(
         wallet_info = gw_client.get_wallet(verbose=verbose)
         typer.echo(f"\nWallet Information:")
         typer.echo(f"  Address: {wallet_info.walletAddress}")
-        typer.echo(f"  BZZ Balance: {wallet_info.bzzBalance}")
+        typer.echo(f"  BZZ Balance: {_or_unknown(wallet_info.bzzBalance)}")
     except Exception as e:
         typer.secho(f"ERROR: Failed to get wallet info: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -1757,8 +1824,8 @@ def chequebook(
         cheque_info = gw_client.get_chequebook(verbose=verbose)
         typer.echo(f"\nChequebook Information:")
         typer.echo(f"  Address:           {cheque_info.chequebookAddress}")
-        typer.echo(f"  Available Balance: {cheque_info.availableBalance}")
-        typer.echo(f"  Total Balance:     {cheque_info.totalBalance}")
+        typer.echo(f"  Available Balance: {_or_unknown(cheque_info.availableBalance)}")
+        typer.echo(f"  Total Balance:     {_or_unknown(cheque_info.totalBalance)}")
     except Exception as e:
         typer.secho(f"ERROR: Failed to get chequebook info: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -2507,21 +2574,45 @@ def chain_balance(
         typer.echo(f"Bridge ETH: {bridge}")
 
 
+def _validate_owner_address(value: Optional[str]) -> Optional[str]:
+    """Typer callback for --owner: a 0x-prefixed 20-byte hex address, any case."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", value):
+        raise typer.BadParameter("must be a 0x-prefixed 40-hex-digit address.")
+    return value
+
+
 @_chain_command("verify")
 def chain_verify(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to verify on-chain.")],
+    require_active: Annotated[bool, typer.Option(
+        "--require-active",
+        help="Also require the record status to be ACTIVE (exit 1 for RESTRICTED or DELETED).",
+    )] = False,
+    owner: Annotated[Optional[str], typer.Option(
+        "--owner",
+        help="Also require this owner address (case-insensitive; exit 1 if it differs).",
+        callback=_validate_owner_address,
+    )] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
 ):
     """
     Verify that a Swarm hash is anchored on-chain.
 
-    Exit code 0 if anchored, 1 if not found (useful for scripting).
+    Prints the record's status and owner. Exit code 0 if anchored, 1 if not
+    found (useful for scripting). Without --require-active and --owner, a
+    RESTRICTED or DELETED record, or one with any owner, still exits 0.
     """
     try:
         client = _get_chain_client(verbose=verbose)
-        is_registered = client.verify(swarm_hash, verbose=verbose)
+        record = client.get(swarm_hash, verbose=verbose)
     except typer.Exit:
         raise
+    except exceptions.DataNotRegisteredError:
+        typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
         _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
@@ -2533,10 +2624,29 @@ def chain_verify(
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
-    if is_registered:
-        typer.secho(f"Verified: {swarm_hash} is anchored on-chain.", fg=typer.colors.GREEN)
+    status = record.status.name
+    failures = []
+    if require_active and status != "ACTIVE":
+        failures.append(f"status is {status}, not ACTIVE (--require-active)")
+    if owner is not None and record.owner.lower() != owner.lower():
+        failures.append(f"owner is {record.owner}, not {owner} (--owner)")
+
+    if failures:
+        typer.secho(f"Not verified: {swarm_hash} is anchored on-chain, but:", fg=typer.colors.YELLOW)
+        for failure in failures:
+            typer.secho(f"  - {failure}", fg=typer.colors.YELLOW)
+    elif status != "ACTIVE":
+        # Exit 0 as before, but not called "Verified"
+        typer.secho(
+            f"Anchored on-chain (status: {status}): {swarm_hash}. "
+            "The record is not ACTIVE; use --require-active to exit 1 in this case.",
+            fg=typer.colors.YELLOW,
+        )
     else:
-        typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
+        typer.secho(f"Verified: {swarm_hash} is anchored on-chain.", fg=typer.colors.GREEN)
+    typer.echo(f"  Status: {status}")
+    typer.echo(f"  Owner:  {record.owner}")
+    if failures:
         raise typer.Exit(code=1)
 
 
@@ -3449,7 +3559,7 @@ def main(
     )] = None,
     x402_network: Annotated[Optional[str], typer.Option(
         "--x402-network",
-        help="x402 network: 'base-sepolia' (testnet) or 'base' (mainnet). [default: base-sepolia]"
+        help="x402 network: 'base-sepolia' (testnet) or 'base' (mainnet); the CAIP-2 ids 'eip155:84532' and 'eip155:8453' also work. [default: base-sepolia]"
     )] = None,
     chain: Annotated[Optional[str], typer.Option(
         "--chain",
@@ -3516,10 +3626,12 @@ def main(
     if max_pay is not None:
         _x402_config["max_auto_pay_usd"] = max_pay
     if x402_network:
-        if x402_network not in ("base-sepolia", "base"):
-            typer.secho(f"ERROR: Invalid x402 network '{x402_network}'. Use 'base-sepolia' or 'base'.", fg=typer.colors.RED, err=True)
+        network = normalize_network(x402_network)
+        if network not in ("base-sepolia", "base"):
+            typer.secho(f"ERROR: Invalid x402 network '{x402_network}'. Use 'base-sepolia' or 'base' "
+                        "(or 'eip155:84532' or 'eip155:8453').", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
-        _x402_config["network"] = x402_network
+        _x402_config["network"] = network
 
     # Free tier configuration
     if free is not None:
