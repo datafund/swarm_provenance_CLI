@@ -98,6 +98,11 @@ class ChainProvider:
 
     Handles RPC connection management, health checks, and block explorer
     URL generation for Base Sepolia and Base mainnet.
+
+    The fallback state (``_fallback_active``, ``_fallback_tried``, the
+    active endpoint) is per instance, so a ChainProvider, and the
+    ChainClient that uses it, is not safe to call from several threads at
+    once. Use one client per thread.
     """
 
     SUPPORTED_CHAINS = list(CHAIN_PRESETS.keys())

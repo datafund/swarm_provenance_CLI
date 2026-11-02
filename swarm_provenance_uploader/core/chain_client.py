@@ -145,6 +145,9 @@ def _with_fallback(provider, operation):
     public call tries each endpoint at most once.
     """
     if getattr(provider, "_fallback_active", False) is True:
+        # The outer loop handles a transport failure and runs its whole
+        # operation again; running a loop here as well would also reset
+        # _fallback_active in its finally while the outer loop still runs
         return operation()
     provider._fallback_active = True
     try:
@@ -1146,12 +1149,13 @@ class ChainClient:
                     cache = get_cache(
                         self._provider.chain, self._provider.contract_address
                     )
-                    current_block = _with_fallback(
-                        self._provider, lambda: self._provider.web3.eth.block_number
-                    )
-                    forward, _ = cache.get_maps(
-                        self._contract, deploy_block, current_block
-                    )
+                    # The block number and the event scan (chunked
+                    # eth_getLogs) run again on a fallback together
+                    def scan():
+                        current_block = self._provider.web3.eth.block_number
+                        return cache.get_maps(self._contract, deploy_block, current_block)
+
+                    forward, _ = _with_fallback(self._provider, scan)
                     for existing_new, existing_desc in forward.get(original_hash, []):
                         if existing_new == new_hash:
                             raise TransformationAlreadyExistsError(
