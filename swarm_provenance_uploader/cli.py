@@ -2728,11 +2728,13 @@ def chain_anchor(
             typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
@@ -3290,6 +3292,7 @@ def chain_protect(
             if not output_json:
                 typer.secho(f"New hash already anchored, continuing.", fg=typer.colors.YELLOW)
         except exceptions.ChainError as e:
+            _print_chain_traceback(e, verbose)
             _composite_step_failed(e, "anchor", results, output_json=output_json)
 
     # Step 3: Record transformation
