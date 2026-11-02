@@ -3735,3 +3735,99 @@ class TestSendTransactionTransportFailures:
         assert issubclass(TransactionOutcomeUnknownError, TransactionUnconfirmedError)
         assert issubclass(TransactionOutcomeUnknownError, ChainTransactionError)
         assert "TransactionOutcomeUnknownError" in chain.__all__ or not chain.BLOCKCHAIN_AVAILABLE
+
+
+# The send step with the real web3 exception classes (#181). No sys.modules
+# patch: _is_rpc_failure, _is_rpc_rejection and _is_receipt_timeout see the
+# installed web3, so the classification itself is tested.
+
+SEND_RAW = b"\x02" * 40
+SEND_RETURNED_HASH = bytes.fromhex("cd" * 32)
+
+
+def _send_client(failing_call, error):
+    """A stand-in client whose web3 call `failing_call` raises `error`."""
+    web3 = MagicMock()
+    web3.eth.get_transaction_count.return_value = 0
+    web3.eth.estimate_gas.return_value = 100_000
+    web3.eth.gas_price = 1_000_000_000
+    web3.eth.send_raw_transaction.return_value = SEND_RETURNED_HASH
+    getattr(web3.eth, failing_call).side_effect = error
+    client = MagicMock(_gas_limit=None, _gas_limit_multiplier=1.2)
+    client._provider.web3 = web3
+    client._provider.chain_id = 84532
+    client._provider.rpc_url = "https://rpc.example.org"
+    client._provider.get_explorer_tx_url = lambda h: "https://explorer.example.org/tx/" + h
+    client._wallet.sign_transaction.return_value = SEND_RAW
+    client._contract.address = DUMMY_CONTRACT
+    return client, web3
+
+
+def _send(client):
+    from swarm_provenance_uploader.core.chain_client import ChainClient
+
+    return ChainClient._send_transaction(client, {"to": DUMMY_CONTRACT, "data": "0x"}, "DataStatusChanged")
+
+
+def _web3_error(name):
+    web3_exceptions = pytest.importorskip("web3.exceptions")
+    if name == "Web3RPCError":
+        return web3_exceptions.Web3RPCError(
+            "nonce too low", rpc_response={"error": {"code": -32000, "message": "nonce too low"}}
+        )
+    return getattr(web3_exceptions, name)("timed out" if "Time" in name else "refused")
+
+
+def _expected_hash(failing_call):
+    from swarm_provenance_uploader.core.chain_client import _signed_tx_hash
+
+    if failing_call == "send_raw_transaction":
+        return _signed_tx_hash(SEND_RAW)
+    return _format_hash(SEND_RETURNED_HASH)
+
+
+AFTER_SEND_CALLS = ["send_raw_transaction", "wait_for_transaction_receipt"]
+TRANSPORT_ERRORS = ["ProviderConnectionError", "BadResponseFormat", "RequestTimedOut"]
+
+
+@pytest.mark.parametrize("failing_call", AFTER_SEND_CALLS)
+@pytest.mark.parametrize("name", ["Web3RPCError", "TimeExhausted"])
+def test_send_rejection_and_receipt_timeout_with_web3_classes(failing_call, name):
+    """A JSON-RPC rejection and a receipt-wait timeout stay ChainTransactionError, with the hash."""
+    error = _web3_error(name)
+    client, web3 = _send_client(failing_call, error)
+
+    with pytest.raises(ChainTransactionError) as exc_info:
+        _send(client)
+
+    assert type(exc_info.value) is ChainTransactionError
+    assert exc_info.value.tx_hash == _expected_hash(failing_call)
+    web3.eth.send_raw_transaction.assert_called_once()
+
+
+@pytest.mark.parametrize("name", TRANSPORT_ERRORS)
+def test_send_transport_failure_before_send_with_web3_classes(name):
+    error = _web3_error(name)
+    client, web3 = _send_client("get_transaction_count", error)
+
+    with pytest.raises(ChainConnectionError) as exc_info:
+        _send(client)
+
+    assert "before the transaction was sent" in str(exc_info.value)
+    web3.eth.send_raw_transaction.assert_not_called()
+
+
+@pytest.mark.parametrize("failing_call", AFTER_SEND_CALLS)
+@pytest.mark.parametrize("name", TRANSPORT_ERRORS)
+def test_send_transport_failure_after_send_with_web3_classes(failing_call, name):
+    from swarm_provenance_uploader.exceptions import TransactionOutcomeUnknownError
+
+    error = _web3_error(name)
+    client, web3 = _send_client(failing_call, error)
+
+    with pytest.raises(TransactionOutcomeUnknownError) as exc_info:
+        _send(client)
+
+    assert exc_info.value.tx_hash == _expected_hash(failing_call)
+    assert exc_info.value.explorer_url.endswith(_expected_hash(failing_call))
+    web3.eth.send_raw_transaction.assert_called_once()
