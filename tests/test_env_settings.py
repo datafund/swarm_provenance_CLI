@@ -503,7 +503,7 @@ def test_max_auto_pay_kept_as_written(tmp_path, raw, kept):
     """The limit is kept as the string written, not rounded or replaced by 1.00 (#152)."""
     tmp_path = tmp_path / "work"
     tmp_path.mkdir()
-    env = _clean_env()
+    env = _clean_env(PYTHONPATH=str(ROOT))  # this checkout, not another installed copy
     env.pop("X402_MAX_AUTO_PAY_USD", None)
     if raw is not None:
         env["X402_MAX_AUTO_PAY_USD"] = raw

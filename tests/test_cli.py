@@ -5130,6 +5130,7 @@ class TestAutoPayLimitValidation:
         data_file = tmp_path / "d.txt"
         data_file.write_text("x")
         gateway = mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        mocker.patch("swarm_provenance_uploader.cli.time.sleep")
         result = runner.invoke(app, ["upload", "--file", str(data_file), "--stamp-id", DUMMY_STAMP])
         return result, gateway
 
@@ -5141,6 +5142,32 @@ class TestAutoPayLimitValidation:
         assert "ERROR: Invalid auto-pay limit" in result.output
         assert "X402_MAX_AUTO_PAY_USD" in result.output
         gateway.assert_not_called()
+
+    @pytest.mark.parametrize("args", [
+        ["upload", "--file", "d.txt"],                              # stamp purchase
+        ["upload", "--file", "d.txt", "--stamp-id", DUMMY_STAMP],  # usability poll
+        ["upload", "--file", "d.txt", "--usePool"],                 # pool acquire
+        ["upload", "--file", "d.txt", "--stamp-id", DUMMY_STAMP, "--sign", "notary"],
+        ["upload-collection", "mydir"],
+    ])
+    def test_invalid_env_limit_stops_each_paying_path_at_once(self, mocker, args):
+        """The error is not retried, sleeps nothing, and is not wrapped in a second ERROR line."""
+        _x402_config.update(enabled=True, max_auto_pay_usd="nan")
+        gateway = mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        sleep = mocker.patch("swarm_provenance_uploader.cli.time.sleep")
+        with runner.isolated_filesystem():
+            import os
+            os.makedirs("mydir")
+            for name in ("d.txt", "mydir/a.txt"):
+                with open(name, "w") as f:
+                    f.write("x")
+            result = runner.invoke(app, args)
+        assert result.exit_code == 1
+        assert result.output.count("ERROR") == 1, result.output
+        assert "ERROR: Invalid auto-pay limit 'nan' from X402_MAX_AUTO_PAY_USD" in result.output
+        assert "retrying" not in result.output
+        gateway.assert_not_called()
+        sleep.assert_not_called()
 
     def test_invalid_env_limit_does_not_block_help(self):
         _x402_config.update(enabled=True, max_auto_pay_usd="nan")
