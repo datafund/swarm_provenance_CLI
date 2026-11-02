@@ -650,7 +650,10 @@ class GatewayClient:
                 )
 
             if self._charged_by_this_operation(response, body_code or None, outstanding):
-                self._notify_payment_sent(outstanding or payment)
+                # A fresh success (not a replay) was charged to this attempt,
+                # not to an earlier one that may have been collected (#156).
+                fresh_success = 200 <= response.status_code < 300 and not replayed
+                self._notify_payment_sent(payment if fresh_success else (outstanding or payment))
             self._raise_for_paid_failure(response, payment, outstanding)
             return response
 
