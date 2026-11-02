@@ -1386,6 +1386,7 @@ def upload_collection(
 
         # Upload manifest
         typer.echo("Uploading collection to Swarm...")
+        not_returned = None  # with --json: the upload worked but its result cannot be returned
         try:
             result = gw_client.upload_manifest(
                 tar_path=str(tar_path),
@@ -1398,7 +1399,10 @@ def upload_collection(
         except exceptions.PaymentRequiredError as e:
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
-            _report_payment_outcome(e, "the collection upload", final_step=True)
+            if output_json and isinstance(e, exceptions.PaymentDeliveredNotStoredError):
+                not_returned = e
+            else:
+                _report_payment_outcome(e, "the collection upload", final_step=True)
         except Exception as e:
             typer.secho(f"ERROR: Failed uploading collection: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -1407,6 +1411,24 @@ def upload_collection(
         if tmp_dir:
             import shutil
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    if not_returned is not None:
+        # Still a JSON document for scripts (#153): no reference, plus what identifies the payment
+        from .models import CollectionFileInfo
+        typer.echo(json.dumps({
+            "collection_hash": collection_hash,
+            "files": [CollectionFileInfo(**fi).model_dump() for fi in file_infos],
+            "total_size": total_size,
+            "file_count": len(file_infos),
+            "stamp_id": stamp_id,
+            "swarm_reference": None,
+            "provenance_standard": provenance_standard,
+            "status": "delivered_not_stored",
+            "transaction": not_returned.transaction,
+            "payer": not_returned.payer,
+            "idempotency_key": not_returned.idempotency_key,
+        }, indent=2))
+        _report_delivered_not_stored(not_returned, "the collection upload", final_step=True)
 
     _unused_stamp.update(id=None, how=None)  # used: nothing to reuse
 
