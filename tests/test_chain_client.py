@@ -5377,3 +5377,103 @@ class TestTransformPreCheckUsesFallbacks:
         client._provider._try_fallback.assert_called_once()
         cache.get_maps.assert_called_once()
         web3.eth.send_raw_transaction.assert_called_once()
+
+
+class TestTransformV1PreCheckScanUsesFallbacks:
+    """transform()'s v1 duplicate check runs its event scan through the fallbacks (#168 review 3)."""
+
+    def _client(self, mock_chain_deps, monkeypatch, get_maps_side_effect):
+        from swarm_provenance_uploader.chain import event_cache
+
+        client = _fallback_client(mock_chain_deps, [_log("DataTransformed")])
+        client._contract.supports_transformation_links = MagicMock(return_value=False)
+        cache = MagicMock()
+        cache.get_maps.side_effect = get_maps_side_effect
+        monkeypatch.setattr(event_cache, "get_cache", lambda *a, **k: cache)
+        return client, cache
+
+    def test_scan_failure_falls_back_and_finds_the_duplicate(self, mock_chain_deps, monkeypatch):
+        import requests
+
+        new_hash = "b" * 64
+        client, cache = self._client(mock_chain_deps, monkeypatch, [
+            requests.exceptions.ConnectionError("down"),
+            ({DUMMY_HASH: [(new_hash, "existing")]}, {}),
+        ])
+
+        with pytest.raises(TransformationAlreadyExistsError):
+            client.transform(original_hash=DUMMY_HASH, new_hash=new_hash, description="d")
+
+        assert cache.get_maps.call_count == 2
+        client._provider._try_fallback.assert_called_once()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    def test_scan_failure_on_every_endpoint_fails_closed(self, mock_chain_deps, monkeypatch):
+        import requests
+
+        client, cache = self._client(
+            mock_chain_deps, monkeypatch, requests.exceptions.ConnectionError("down")
+        )
+
+        with pytest.raises(ChainConnectionError, match="duplicate transformation check"):
+            client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
+
+        assert client._provider._try_fallback.call_count == 2  # one switch, then none left
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+
+    def test_other_scan_errors_still_log_and_continue(self, mock_chain_deps, monkeypatch):
+        client, cache = self._client(mock_chain_deps, monkeypatch, ValueError("bad log"))
+
+        client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
+
+        client._provider._try_fallback.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_called_once()
+
+
+class TestNestedFallbackGuard:
+    """A _with_fallback call inside an active loop runs once and leaves the fallback to the outer loop (#168 review 3)."""
+
+    def _provider(self, switches):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            rpc_url="https://primary.rpc.io",
+            _fallback_active=False,
+            _fallback_tried=None,
+            _try_fallback=MagicMock(side_effect=switches),
+        )
+
+    def test_inner_failure_reruns_the_outer_operation(self):
+        import requests
+        from swarm_provenance_uploader.core.chain_client import _with_fallback
+
+        provider = self._provider([True, False])
+        inner = MagicMock(side_effect=[requests.exceptions.ConnectionError("down"), "record"])
+        outer_runs = []
+
+        def outer():
+            outer_runs.append(provider._fallback_active)
+            return _with_fallback(provider, inner)
+
+        assert _with_fallback(provider, outer) == "record"
+
+        # The outer loop handled the failure and ran the whole operation again
+        assert len(outer_runs) == 2
+        assert inner.call_count == 2
+        provider._try_fallback.assert_called_once()
+
+    def test_inner_call_keeps_the_outer_loop_active(self):
+        from swarm_provenance_uploader.core.chain_client import _with_fallback
+
+        provider = self._provider([])
+        seen = []
+
+        def outer():
+            _with_fallback(provider, lambda: None)
+            seen.append(provider._fallback_active)
+
+        _with_fallback(provider, outer)
+
+        assert seen == [True]
+        assert provider._fallback_active is False
