@@ -5196,6 +5196,21 @@ class TestAutoPayLimitValidation:
         assert result.exit_code == 0
         assert "Max auto-pay: $0.00" in result.output
 
+    @pytest.mark.parametrize("value, shown", [("1e30", "$1E+30"), ("1e400", "$1E+400"),
+                                              ("1000000000000000.5", "$1.0000000000000005E+15"),
+                                              ("999999999999999.25", "$999999999999999.25"), ("0.004", "$0.004000")])
+    @pytest.mark.parametrize("via", ["env", "flag"])
+    def test_x402_status_shows_huge_limit(self, value, shown, via):
+        args = ["x402", "status"]
+        if via == "env":
+            _x402_config.update(enabled=True, max_auto_pay_usd=value)
+        else:
+            args = ["--max-pay", value] + args
+        result = runner.invoke(app, args)
+        assert result.exit_code == 0, result.output
+        assert f"Max auto-pay: {shown}\n" in result.output
+        assert "WARNING: X402_MAX_AUTO_PAY_USD" not in result.output
+
     def test_env_limit_string_shown_parsed(self):
         _x402_config["max_auto_pay_usd"] = "-0"
         assert "Max auto-pay: $0.00" in runner.invoke(app, ["x402", "status"]).output

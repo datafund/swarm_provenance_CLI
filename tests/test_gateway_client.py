@@ -1648,6 +1648,46 @@ class TestAutoPayHardCap:
         mock_x402.sign_payment.assert_not_called()
 
 
+class TestAutoPayHugeLimit:
+    """A very large limit (people who used inf) neither crashes nor prints hundreds of digits (#152)."""
+
+    @pytest.mark.parametrize("limit", ["1e30", "1e400"])
+    def test_huge_limit_auto_pays(self, mock_x402, requests_mock, limit):
+        mock_x402.select_payment_option.return_value = _option(amount="1" + "0" * 35)  # 1e29 USD
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_max_auto_pay_usd=limit)
+        try:
+            assert client.purchase_stamp() == DUMMY_STAMP
+        finally:
+            patcher.stop()
+        mock_x402.sign_payment.assert_called_once()
+
+    def test_refusal_message_with_huge_limit(self, mock_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        mock_x402.select_payment_option.return_value = _option(amount="1" + "0" * 40)  # 1e34 USD
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_max_auto_pay_usd="1e30")
+        try:
+            with pytest.raises(PaymentRequiredError, match=r"limit of \$1E\+30;"):
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+        mock_x402.sign_payment.assert_not_called()
+
+    def test_refusal_message_keeps_six_decimals(self, mock_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        mock_x402.select_payment_option.return_value = _option(amount="5000000")
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_max_auto_pay_usd="0.30")
+        try:
+            with pytest.raises(PaymentRequiredError, match=r"limit of \$0\.300000;"):
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+
+
 class TestAutoPayLimitValidation:
     """The auto-pay limit must be a finite, non-negative number (#152)."""
 
@@ -1667,6 +1707,14 @@ class TestAutoPayLimitValidation:
         client = GatewayClient(base_url=GW, x402_enabled=True, x402_max_auto_pay_usd=-0.0)
         assert str(client._x402_max_auto_pay_usd) == "0.0"
 
+    def test_limit_beyond_28_digits_is_exact(self):
+        """No rounding to the default 28-digit Decimal precision."""
+        from swarm_provenance_uploader.core.gateway_client import parse_auto_pay_limit
+
+        raw = "0.2999999999999999999999999999999"
+        assert str(parse_auto_pay_limit(raw)) == raw
+        with pytest.raises(ValueError):
+            parse_auto_pay_limit("-" + raw)
     def test_zero_limit_auto_pays_nothing(self):
         client = GatewayClient(base_url=GW, x402_enabled=True, x402_auto_pay=True,
                                x402_max_auto_pay_usd=0)
