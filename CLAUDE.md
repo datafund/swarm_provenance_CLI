@@ -257,7 +257,7 @@ The application follows a modular architecture with clear separation of concerns
 - Wraps ChainProvider + ChainWallet + DataProvenanceContract
 - Write methods: `anchor()`, `anchor_for()`, `batch_anchor()`, `transform()`, `merge_transform()`, `access()`, `batch_access()`, `set_status()`, `transfer_ownership()`, `set_delegate()`, `set_storage_ref()`
 - Read methods: `get()`, `verify()`, `get_provenance_chain()`, `get_by_storage_ref()`, `balance()`, `health_check()`
-- `get_provenance_chain()` fails closed: any read error during the walk raises `ChainConnectionError` or `ChainError` naming the node and depth, never a partial list. `max_depth` is 0 to 50 (default 10); each expanded record has `parents`, and records at the limit have `parents=None` (#170)
+- `get_provenance_chain()` fails closed: any read error during the walk raises `ChainConnectionError` (transport), `ChainConfigurationError` (a JSON-RPC error answer; no fallback, #168) or `ChainError` naming the node and depth, never a partial list. `max_depth` is 0 to 50 (default 10); each expanded record has `parents`, and records at the limit have `parents=None` (#170)
 - Lazy-loads web3 and eth-account via `blockchain` optional dependency group
 - Targets DataProvenance v4 contract on Base Sepolia (`0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322`)
 - V2 auto-detection: state-based traversal on v2 contracts, event cache fallback on v1
