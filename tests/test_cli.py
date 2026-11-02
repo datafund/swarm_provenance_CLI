@@ -6724,3 +6724,95 @@ class TestShortTokenEcho:
         assert isinstance(result.exception, SystemExit), result.exception
         assert "invalid api key: …" in result.output
         assert SHORT_TOKEN not in result.output
+
+
+class TestSendOutcomeUnknown:
+    """A transport failure after the send is not reported as "Transaction failed" (#181)."""
+
+    STEP_TX = "0x" + "e5" * 32
+    STEP_EXPLORER = "https://base-sepolia.blockscout.com/tx/" + STEP_TX
+
+    def _error(self, event="DataAccessed", reason="connection reset"):
+        from swarm_provenance_uploader.exceptions import TransactionOutcomeUnknownError
+
+        return TransactionOutcomeUnknownError(
+            f"Outcome unknown: transaction {self.STEP_TX} was sent, but the connection "
+            f"to the RPC failed, so its outcome is unknown: {reason}",
+            tx_hash=self.STEP_TX,
+            event_name=event,
+            expected_count=1,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=self.STEP_EXPLORER,
+            reason=reason,
+        )
+
+    def test_single_command_text(self, mocker):
+        mock_client = mocker.MagicMock()
+        mock_client.access.side_effect = self._error()
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1, result.output
+        assert "Outcome unknown" in result.output
+        assert "Transaction failed" not in result.output
+        assert "Not verified" not in result.output
+        assert "Check it in the explorer before you try again" in result.output
+        assert self.STEP_TX in result.output
+        assert self.STEP_EXPLORER in result.output
+        assert "connection reset" in result.output
+
+    def test_single_command_json(self, mocker):
+        mock_client = mocker.MagicMock()
+        mock_client.access.side_effect = self._error()
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF, "--json"])
+
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.output)
+        assert output["error"] == "outcome_unknown"
+        assert output["tx_hash"] == self.STEP_TX
+        assert output["explorer_url"] == self.STEP_EXPLORER
+        assert output["reason"] == "connection reset"
+        assert "emitted_count" not in output
+
+    def test_reason_redacted(self, mocker):
+        mock_client = mocker.MagicMock()
+        mock_client.access.side_effect = self._error(
+            reason=f"Max retries exceeded for {RPC_URLS_WITH_KEY[0]}"
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        for args in ([], ["--json"]):
+            result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF] + args)
+            assert result.exit_code == 1, result.output
+            assert RPC_KEY not in result.output
+
+    def test_composite_step(self, mocker):
+        from swarm_provenance_uploader.models import TransformResult
+
+        transform_tx = "0x" + "b2" * 32
+        mock_client = mocker.MagicMock()
+        mock_client.transform.return_value = TransformResult(
+            tx_hash=transform_tx, block_number=2, gas_used=1, explorer_url=None,
+            original_hash=DUMMY_SWARM_REF, new_hash="c" * 64, description="d",
+        )
+        mock_client.set_status.side_effect = self._error("DataStatusChanged")
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+        args = ["chain", "transform", DUMMY_SWARM_REF, "c" * 64, "--description", "d", "--restrict-original"]
+
+        result = runner.invoke(app, args)
+        assert result.exit_code == 1, result.output
+        assert "Failed to restrict original. Outcome unknown" in result.output
+        assert self.STEP_TX in result.output
+        assert transform_tx in result.output
+
+        result = runner.invoke(app, args + ["--json"])
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.output)
+        assert output["failed_step"] == "restrict"
+        assert output["partial_failure"] is True
+        assert output["unconfirmed"]["error"] == "outcome_unknown"
+        assert output["unconfirmed"]["tx_hash"] == self.STEP_TX
+        assert "error" not in output

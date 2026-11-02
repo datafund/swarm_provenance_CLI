@@ -3491,3 +3491,170 @@ class TestRpcUrlRedaction:
             assert provider.health_check() is True
         assert "RPC fallback" in caplog.text
         assert RPC_KEY not in caplog.text
+
+
+# Transport failures in the send step (#181)
+
+
+class TimeExhausted(Exception):
+    """Stand-in for web3.exceptions.TimeExhausted: the receipt wait timed out."""
+
+
+class TestSendTransactionTransportFailures:
+    """A transport failure before the send is a connection error; after it, the outcome is unknown."""
+
+    SIGNED = b"\x00" * 32  # what the mocked wallet signs
+
+    def _signed_hash(self):
+        from swarm_provenance_uploader.core.swarm_verify import keccak256
+
+        return keccak256(self.SIGNED).hex()
+
+    @pytest.mark.parametrize(
+        "step",
+        ["get_transaction_count", "estimate_gas", "gas_price"],
+    )
+    @pytest.mark.parametrize(
+        "error_name",
+        ["connection_refused", "read_timeout", "not_json_rpc"],
+    )
+    def test_failure_before_send_is_connection_error(self, mock_chain_deps, step, error_name):
+        import json as json_module
+        import requests
+
+        error = {
+            "connection_refused": requests.exceptions.ConnectionError("connection refused"),
+            "read_timeout": requests.exceptions.ReadTimeout("read timed out"),
+            "not_json_rpc": json_module.JSONDecodeError("Expecting value", "<html>Bad gateway</html>", 0),
+        }[error_name]
+        web3 = mock_chain_deps["web3_instance"]
+        client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
+        if step == "gas_price":
+            type(web3.eth).gas_price = PropertyMock(side_effect=error)
+        else:
+            getattr(web3.eth, step).side_effect = error
+        try:
+            with pytest.raises(ChainConnectionError) as exc_info:
+                client.set_status(swarm_hash=DUMMY_HASH, status=1)
+        finally:
+            if step == "gas_price":
+                del type(web3.eth).gas_price
+
+        assert not isinstance(exc_info.value, ChainTransactionError)
+        assert "before the transaction was sent" in str(exc_info.value)
+        assert exc_info.value.rpc_url == client._provider.rpc_url
+        web3.eth.send_raw_transaction.assert_not_called()
+
+    def test_failure_in_send_raw_transaction_outcome_unknown(self, mock_chain_deps):
+        import requests
+        from swarm_provenance_uploader.exceptions import (
+            TransactionOutcomeUnknownError,
+            TransactionUnconfirmedError,
+        )
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
+        web3.eth.send_raw_transaction.side_effect = requests.exceptions.ConnectionError(
+            "connection reset"
+        )
+
+        with pytest.raises(TransactionOutcomeUnknownError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        err = exc_info.value
+        assert isinstance(err, TransactionUnconfirmedError)
+        assert not isinstance(err, ChainConnectionError)
+        # The hash of the signed bytes: known although the send did not return it
+        assert err.tx_hash == self._signed_hash()
+        assert self._signed_hash() in err.explorer_url
+        assert err.contract_address == DUMMY_CONTRACT
+        assert err.event_name == "DataStatusChanged"
+        assert err.reason == "connection reset"
+        assert "Transaction failed" not in str(err)
+        assert "outcome is unknown" in str(err)
+        assert self._signed_hash() in str(err)
+        # Never sent twice
+        web3.eth.send_raw_transaction.assert_called_once()
+
+    def test_failure_in_receipt_wait_outcome_unknown(self, mock_chain_deps):
+        import requests
+        from swarm_provenance_uploader.exceptions import TransactionOutcomeUnknownError
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
+        web3.eth.wait_for_transaction_receipt.side_effect = requests.exceptions.ConnectionError(
+            "connection refused"
+        )
+
+        with pytest.raises(TransactionOutcomeUnknownError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        err = exc_info.value
+        assert err.tx_hash == DUMMY_TX_HASH_BYTES.hex()
+        assert DUMMY_TX_HASH_BYTES.hex() in err.explorer_url
+        assert err.reason == "connection refused"
+        web3.eth.send_raw_transaction.assert_called_once()
+
+    def test_rejection_by_send_is_not_outcome_unknown(self, mock_chain_deps):
+        """The node answered and refused the transaction: it is not a transport failure."""
+        from swarm_provenance_uploader.exceptions import TransactionUnconfirmedError
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
+        web3.eth.send_raw_transaction.side_effect = Web3RPCError("nonce too low")
+
+        with pytest.raises(ChainTransactionError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert not isinstance(exc_info.value, TransactionUnconfirmedError)
+        assert str(exc_info.value) == "nonce too low"
+
+    def test_receipt_timeout_unchanged(self, mock_chain_deps):
+        """A receipt-wait timeout is left to #167: still a ChainTransactionError with the hash."""
+        from swarm_provenance_uploader.exceptions import TransactionUnconfirmedError
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
+        web3.eth.wait_for_transaction_receipt.side_effect = TimeExhausted("not in chain after 120 s")
+
+        with pytest.raises(ChainTransactionError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert not isinstance(exc_info.value, TransactionUnconfirmedError)
+        assert not isinstance(exc_info.value, ChainConnectionError)
+        assert exc_info.value.tx_hash == DUMMY_TX_HASH_BYTES.hex()
+
+    @pytest.mark.parametrize("rpc_url", RPC_URLS_WITH_KEY, ids=RPC_URL_IDS)
+    def test_rpc_key_redacted(self, mock_chain_deps, rpc_url):
+        import requests
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.exceptions import TransactionOutcomeUnknownError
+
+        web3 = mock_chain_deps["web3_instance"]
+        _write_client(mock_chain_deps, [_log("DataStatusChanged")])
+        client = ChainClient(chain="base-sepolia", rpc_url=rpc_url)
+        failure = requests.exceptions.ConnectionError(f"Max retries exceeded for {rpc_url}")
+
+        web3.eth.get_transaction_count.side_effect = failure
+        with pytest.raises(ChainConnectionError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+        assert RPC_KEY not in str(exc_info.value)
+        assert RPC_KEY not in exc_info.value.rpc_url
+
+        web3.eth.get_transaction_count.side_effect = None
+        web3.eth.send_raw_transaction.side_effect = failure
+        with pytest.raises(TransactionOutcomeUnknownError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+        assert RPC_KEY not in str(exc_info.value)
+        assert RPC_KEY not in exc_info.value.reason
+
+    def test_outcome_unknown_exported(self):
+        from swarm_provenance_uploader import chain
+        from swarm_provenance_uploader.exceptions import (
+            TransactionOutcomeUnknownError,
+            TransactionUnconfirmedError,
+        )
+
+        assert issubclass(TransactionOutcomeUnknownError, TransactionUnconfirmedError)
+        assert issubclass(TransactionOutcomeUnknownError, ChainTransactionError)
+        assert "TransactionOutcomeUnknownError" in chain.__all__ or not chain.BLOCKCHAIN_AVAILABLE
