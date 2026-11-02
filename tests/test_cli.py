@@ -35,7 +35,7 @@ def reset_backend_config():
     _x402_config["network"] = "base-sepolia"
     _x402_config["expected_pay_to"] = None
     _backend_config.pop("_http_warning_shown", None)
-    _chain_config["enabled"] = False
+    _chain_config["rpc_fallbacks"] = None
     _chain_config["chain"] = "base-sepolia"
     _chain_config["rpc_url"] = None
     _chain_config["contract"] = None
@@ -54,7 +54,7 @@ def reset_backend_config():
     _x402_config["network"] = "base-sepolia"
     _x402_config["expected_pay_to"] = None
     _backend_config.pop("_http_warning_shown", None)
-    _chain_config["enabled"] = False
+    _chain_config["rpc_fallbacks"] = None
     _chain_config["chain"] = "base-sepolia"
     _chain_config["rpc_url"] = None
     _chain_config["contract"] = None
