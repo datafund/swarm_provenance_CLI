@@ -419,14 +419,20 @@ def _report_delivered_not_stored(e: exceptions.PaymentDeliveredNotStoredError, a
     raise typer.Exit(code=1)
 
 
-def _check_auto_pay_limit(source: str) -> None:
-    """Exit 1 if the auto-pay limit is not a finite number of 0 or more (#152)."""
+def _auto_pay_limit():
+    """The auto-pay limit as an exact Decimal, or None if it is not a finite number of 0 or more (#152)."""
     from .core.gateway_client import parse_auto_pay_limit
 
-    limit = _x402_config["max_auto_pay_usd"]
     try:
-        parse_auto_pay_limit(limit)
+        return parse_auto_pay_limit(_x402_config["max_auto_pay_usd"])
     except ValueError:
+        return None
+
+
+def _check_auto_pay_limit(source: str) -> None:
+    """Exit 1 if the auto-pay limit is not a finite number of 0 or more (#152)."""
+    if _auto_pay_limit() is None:
+        limit = _x402_config["max_auto_pay_usd"]
         typer.secho(f"ERROR: Invalid auto-pay limit {limit!r} from {source}. "
                     "Use a finite number of 0 or more, such as 1.00.",
                     fg=typer.colors.RED, err=True)
@@ -445,6 +451,8 @@ def _get_gateway_client_with_x402(gateway_url: str, verbose: bool = False) -> Ga
         Configured GatewayClient
     """
     if _x402_config["enabled"]:
+        # An invalid --max-pay already stopped the command in main().
+        _check_auto_pay_limit("X402_MAX_AUTO_PAY_USD")
         if verbose:
             typer.echo(f"    x402 payments enabled ({_x402_config['network']})")
 
@@ -703,6 +711,8 @@ def upload(
         except exceptions.StampPurchaseError as e:
             typer.secho(f"ERROR: Failed purchasing stamp: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
+        except typer.Exit:
+            raise  # already reported, e.g. an invalid auto-pay limit (#152)
         except Exception as e:
             typer.secho(f"ERROR: Failed purchasing stamp: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -756,6 +766,8 @@ def upload(
             else:
                 if not verbose: typer.echo("not found, retrying...")
 
+        except typer.Exit:
+            raise  # already reported, e.g. an invalid auto-pay limit (#152)
         except Exception as e:
             if not verbose: typer.echo(typer.style("error checking, retrying...", fg=typer.colors.YELLOW))
             else: typer.echo(f"    Warning: Error during stamp info check on attempt {i+1}: {e}")
@@ -820,6 +832,8 @@ def upload(
         _report_payment_required(e)
     except exceptions.PaymentOutcomeUnknownError as e:
         _report_payment_outcome(e, "the upload", final_step=True)
+    except typer.Exit:
+        raise  # already reported, e.g. an invalid auto-pay limit (#152)
     except Exception as e:
         typer.secho(f"ERROR: Failed uploading data: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -1362,6 +1376,8 @@ def upload_collection(
         _report_payment_required(e)
     except exceptions.PaymentOutcomeUnknownError as e:
         _report_payment_outcome(e, "getting the stamp")
+    except typer.Exit:
+        raise  # already reported, e.g. an invalid auto-pay limit (#152)
     except Exception as e:
         typer.secho(f"ERROR: Failed acquiring stamp: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -1855,11 +1871,16 @@ def x402_status(
 
     # Auto-pay settings
     auto_pay = _x402_config["auto_pay"]
-    max_pay = _x402_config["max_auto_pay_usd"]
+    max_pay = _auto_pay_limit()
     auto_str = typer.style("Yes", fg=typer.colors.GREEN) if auto_pay else typer.style("No", fg=typer.colors.YELLOW)
     typer.echo(f"  Auto-pay:     {auto_str}")
-    max_pay_str = f"{max_pay:.2f}" if round(max_pay, 2) == max_pay else f"{max_pay:.6f}"
-    typer.echo(f"  Max auto-pay: ${max_pay_str}")
+    if max_pay is None:
+        typer.echo(f"  Max auto-pay: {_x402_config['max_auto_pay_usd']!r}")
+        typer.secho("  WARNING: X402_MAX_AUTO_PAY_USD is not a finite number of 0 or more; "
+                    "commands that pay will exit with an error.", fg=typer.colors.YELLOW)
+    else:
+        max_pay_str = f"{max_pay:.2f}" if round(max_pay, 2) == max_pay else f"{max_pay:.6f}"
+        typer.echo(f"  Max auto-pay: ${max_pay_str}")
     expected_pay_to = _x402_config.get("expected_pay_to")
     typer.echo(f"  Pay-to pin:   {expected_pay_to or 'none (any recipient the gateway names)'}")
     if expected_pay_to and not re.fullmatch(r"0x[0-9a-fA-F]{40}", expected_pay_to.strip()):
@@ -3428,8 +3449,9 @@ def main(
         show_default=False,
         help="Auto-pay without prompting (up to --max-pay limit). --no-auto-pay overrides X402_AUTO_PAY."
     )] = None,
-    max_pay: Annotated[Optional[float], typer.Option(
+    max_pay: Annotated[Optional[str], typer.Option(
         "--max-pay",
+        metavar="FLOAT",  # kept as written, then parsed exactly (#152)
         help="Maximum auto-pay amount in USD per request. [default: 1.00]"
     )] = None,
     x402_network: Annotated[Optional[str], typer.Option(
@@ -3510,12 +3532,11 @@ def main(
     if free is not None:
         _backend_config["free_tier"] = free
 
-    # A NaN, infinite or negative auto-pay limit is a configuration error.
-    # The environment value is checked only when x402 is on.
+    # A --max-pay that is not a finite number of 0 or more is an error here.
+    # X402_MAX_AUTO_PAY_USD is checked when a paying client is built, so
+    # x402 status and --help still work with a bad value.
     if max_pay is not None:
         _check_auto_pay_limit("--max-pay")
-    elif _x402_config["enabled"]:
-        _check_auto_pay_limit("X402_MAX_AUTO_PAY_USD")
 
     # Chain configuration
     if chain:

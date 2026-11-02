@@ -198,7 +198,7 @@ swarm-prov-upload x402 info
 | `X402_PRIVATE_KEY_ENV` | Name of the variable that holds the key. When set to another name, only that variable is read. A value that is not a valid variable name, or that looks like a key, is rejected and not printed | `X402_PRIVATE_KEY` |
 | `X402_NETWORK` | `base-sepolia` (testnet) or `base` (mainnet) | `base-sepolia` |
 | `X402_AUTO_PAY` | Auto-pay without prompts | `false` |
-| `X402_MAX_AUTO_PAY_USD` | Maximum auto-pay amount per request | `1.00` |
+| `X402_MAX_AUTO_PAY_USD` | Maximum auto-pay amount per request. A finite number of 0 or more; `inf`, `nan`, negative and non-numeric values are rejected | `1.00` |
 | `X402_EXPECTED_PAY_TO` | Only pay this recipient address (optional) | not set |
 | `X402_RPC_URL` | Custom RPC URL for the USDC balance and EIP-712 domain checks (optional). Like `CHAIN_RPC_URLS`, applies whichever `X402_NETWORK` is selected | Uses the network preset |
 
@@ -211,7 +211,7 @@ The signing key and `x402 status` use the same lookup: the variable named by `X4
 | `--free` / `--no-free` | Enable/disable free tier mode |
 | `--x402` / `--no-x402` | Enable/disable x402 for this command |
 | `--auto-pay` / `--no-auto-pay` | Enable/disable auto-pay |
-| `--max-pay FLOAT` | Maximum auto-pay amount in USD |
+| `--max-pay FLOAT` | Maximum auto-pay amount in USD. A finite number of 0 or more; `inf` is rejected |
 | `--x402-network TEXT` | Network: `base-sepolia` or `base` |
 | `--idempotency-key TEXT` | Idempotency-Key for this command's paid requests; pass the key printed by a failed run to repeat it without paying twice (on a gateway that supports it) |
 
