@@ -23,6 +23,7 @@ from ..chain.exceptions import (
     InsufficientFundsError,
     TransactionNotRecordedError,
     TransactionNotVerifiedError,
+    TransactionOutcomeUnknownError,
     DataAlreadyRegisteredError,
     DataNotRegisteredError,
     TransformationAlreadyExistsError,
@@ -88,6 +89,29 @@ def _is_rpc_rejection(error: Exception) -> bool:
     """
     names = {cls.__name__ for cls in type(error).__mro__}
     return "Web3RPCError" in names and "RequestTimedOut" not in names
+
+
+def _is_receipt_timeout(error: Exception) -> bool:
+    """True if web3's receipt wait timed out (TimeExhausted).
+
+    Matched by class name, like _is_contract_revert. _is_rpc_failure counts
+    it as an RPC failure; _send_transaction leaves it to its own handling.
+    """
+    return any(cls.__name__ == "TimeExhausted" for cls in type(error).__mro__)
+
+
+def _signed_tx_hash(raw_tx) -> Optional[str]:
+    """The hash of a signed transaction (keccak-256 of its bytes), or None.
+
+    The same value send_raw_transaction returns, so it is known even when
+    the send raised before it returned.
+    """
+    try:
+        from .swarm_verify import keccak256
+
+        return keccak256(bytes(raw_tx)).hex()
+    except Exception:
+        return None
 
 
 def _error_reason(error: Exception) -> str:
@@ -374,9 +398,18 @@ class ChainClient:
                 contract did not emit expected_count expected_event events.
             TransactionNotVerifiedError: If the transaction was mined but its
                 events could not be decoded.
+            ChainConnectionError: If the RPC cannot be reached before the
+                transaction is sent. Nothing was sent.
+            TransactionOutcomeUnknownError: If the connection to the RPC
+                fails after send_raw_transaction was called. The
+                transaction may have been sent; it is never sent again.
             ChainTransactionError: If transaction fails.
         """
         web3 = self._provider.web3
+        # Set just before send_raw_transaction: after that, a transport
+        # failure does not mean that nothing was sent
+        send_called = False
+        raw_tx = None
 
         self._check_contract_code()
 
@@ -404,6 +437,7 @@ class ChainClient:
 
             # Sign and send
             raw_tx = self._wallet.sign_transaction(tx)
+            send_called = True
             tx_hash = web3.eth.send_raw_transaction(raw_tx)
 
             logger.debug("Transaction sent: %s", tx_hash.hex())
@@ -482,6 +516,32 @@ class ChainClient:
             tx_hash_str = None
             if "tx_hash" in dir():
                 tx_hash_str = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
+            # Transport only: connection, timeout, or an answer that is not
+            # JSON-RPC. A JSON-RPC error answer means the node answered. A
+            # receipt-wait timeout keeps its own handling.
+            if _is_rpc_failure(e) and not _is_rpc_rejection(e) and not _is_receipt_timeout(e):
+                if not send_called:
+                    raise ChainConnectionError(
+                        f"The RPC endpoint failed before the transaction was sent: {reason}",
+                        rpc_url=self._provider.rpc_url,
+                    ) from e
+                # The transaction may have been broadcast: never send it
+                # again, and never report it as failed
+                if tx_hash_str is None:
+                    tx_hash_str = _signed_tx_hash(raw_tx)
+                raise TransactionOutcomeUnknownError(
+                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} was "
+                    f"sent, but the connection to the RPC failed, so its outcome is "
+                    f"unknown: {reason}",
+                    tx_hash=tx_hash_str,
+                    event_name=expected_event,
+                    expected_count=expected_count,
+                    contract_address=self._contract.address,
+                    explorer_url=(
+                        self._provider.get_explorer_tx_url(tx_hash_str) if tx_hash_str else None
+                    ),
+                    reason=reason,
+                ) from e
             # No "Transaction failed:" prefix: the CLI adds its own
             raise ChainTransactionError(reason, tx_hash=tx_hash_str) from e
 

@@ -2299,9 +2299,16 @@ def _handle_insufficient_funds(
 
 
 def _not_recorded_json(e: "exceptions.TransactionUnconfirmedError") -> dict:
-    """JSON fields for a TransactionNotRecordedError or TransactionNotVerifiedError."""
+    """JSON fields for a TransactionNotRecordedError, TransactionNotVerifiedError
+    or TransactionOutcomeUnknownError."""
+    if isinstance(e, exceptions.TransactionNotRecordedError):
+        error = "not_recorded"
+    elif isinstance(e, exceptions.TransactionOutcomeUnknownError):
+        error = "outcome_unknown"
+    else:
+        error = "not_verified"
     data = {
-        "error": "not_recorded" if isinstance(e, exceptions.TransactionNotRecordedError) else "not_verified",
+        "error": error,
         "tx_hash": e.tx_hash,
         "explorer_url": e.explorer_url,
         "contract_address": e.contract_address,
@@ -2320,7 +2327,7 @@ def _handle_not_recorded(
     output_json: bool = False,
     label: Optional[str] = None,
 ) -> None:
-    """Report a mined transaction that is not confirmed as recorded.
+    """Report a sent transaction that is not confirmed as recorded.
 
     `label` names the failed step of a composite command in the error line.
     """
@@ -2336,6 +2343,14 @@ def _handle_not_recorded(
             "emit the expected events.",
             fg=typer.colors.RED, err=True,
         )
+    elif isinstance(e, exceptions.TransactionOutcomeUnknownError):
+        typer.secho(
+            prefix + "Outcome unknown. The connection to the RPC failed after the "
+            "transaction was sent, so it is not known whether it was mined. Check it "
+            "in the explorer before you try again.",
+            fg=typer.colors.RED, err=True,
+        )
+        typer.echo(f"  Reason:      {redact_urls(getattr(e, 'reason', None) or str(e))}", err=True)
     else:
         typer.secho(
             prefix + "Not verified. The transaction was mined, but its events could not "
@@ -2344,7 +2359,7 @@ def _handle_not_recorded(
             fg=typer.colors.RED, err=True,
         )
         typer.echo(f"  Reason:      {redact_urls(getattr(e, 'reason', None) or str(e))}", err=True)
-    typer.echo(f"  Transaction: {e.tx_hash}", err=True)
+    typer.echo(f"  Transaction: {e.tx_hash or 'unknown'}", err=True)
     if e.explorer_url:
         typer.echo(f"  Explorer:    {e.explorer_url}", err=True)
     typer.echo(f"  Contract:    {e.contract_address}", err=True)
@@ -2423,7 +2438,7 @@ def _composite_step_failed(
 
     JSON output: the step results (see `_composite_json`), "partial_failure"
     (true only if an earlier step was recorded), "failed_step", and either
-    "unconfirmed" (the write was mined but is not confirmed as recorded) or
+    "unconfirmed" (the write was sent but is not confirmed as recorded) or
     "error" (any other failure; `error_json` replaces the default object).
     """
     unconfirmed = isinstance(e, exceptions.TransactionUnconfirmedError)

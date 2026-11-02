@@ -339,6 +339,12 @@ export CHAIN_RPC_URLS=https://fallback1.io,https://fallback2.io
 
 Like `CHAIN_RPC_URL`, `CHAIN_RPC_URLS` applies whatever chain is selected (`CHAIN_NAME` or `--chain`). If you switch chains, change the URLs too.
 
+### "Outcome unknown"
+
+The connection to the RPC failed after the transaction was sent, so the CLI does not know whether it was mined. The transaction may still be mined. The CLI prints the transaction hash and the explorer link (with `--json`, `{"error": "outcome_unknown", "tx_hash": ...}`) and exits 1. Look up the transaction in the explorer, or read the record back with `chain get <hash>`, before you run the command again: running it again can send the write twice and pay gas twice.
+
+If the connection fails before the transaction is sent, the CLI prints "Cannot connect to chain" instead. Nothing was sent in that case.
+
 ### "Transaction reverted"
 
 Common causes:
