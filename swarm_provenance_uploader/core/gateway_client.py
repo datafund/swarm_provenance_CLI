@@ -699,6 +699,11 @@ class GatewayClient:
             if replayed and outstanding is None:
                 # The answer is an earlier run's; this run's authorization was unused.
                 payment.update(nonce=None, valid_before=None)
+            elif replayed:
+                # The answer is the earlier attempt's, which may have been
+                # collected; this attempt's authorization was unused (#156).
+                payment = {**outstanding, "transaction": payment["transaction"]}
+                response.x402_payment = payment
             if (outstanding is not None and not 200 <= response.status_code < 300
                     and not body_code.startswith("IDEMPOTENCY")):
                 # Says nothing about the earlier attempt that may have been collected.
@@ -708,7 +713,10 @@ class GatewayClient:
                 )
 
             if self._charged_by_this_operation(response, body_code or None, outstanding):
-                self._notify_payment_sent(outstanding or payment)
+                # A fresh success (not a replay) was charged to this attempt,
+                # not to an earlier one that may have been collected (#156).
+                fresh_success = 200 <= response.status_code < 300 and not replayed
+                self._notify_payment_sent(payment if fresh_success else (outstanding or payment))
             self._raise_for_paid_failure(response, payment, outstanding)
             return response
 

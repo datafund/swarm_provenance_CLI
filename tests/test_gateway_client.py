@@ -2492,6 +2492,95 @@ class TestIdempotencyPaymentTotal:
             patcher.stop()
         assert len(sent) == 1
 
+    def _sent_after(self, idem_x402, requests_mock, responses):
+        sent = []
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED] + responses)
+        client, patcher = _client_with(idem_x402, x402_auto_pay=True, x402_on_payment_sent=sent.append)
+        try:
+            assert client.purchase_stamp() == DUMMY_STAMP
+        finally:
+            patcher.stop()
+        return sent
+
+    def test_fresh_success_after_timeout_reports_retry_nonce(self, idem_x402, requests_mock, no_sleep):
+        """A fresh 2xx (not a replay) was charged to the retry, not to the attempt that timed out (#156)."""
+        sent = self._sent_after(idem_x402, requests_mock, [
+            _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), {"exc": requests.exceptions.ReadTimeout}, CREATED,
+        ])
+        assert [p["nonce"] for p in sent] == [NONCES[1]]
+        assert sent[0]["amount"] == "50000"
+
+    def test_fresh_success_after_already_used_reports_new_nonce(self, idem_x402, requests_mock, no_sleep):
+        """After 'already been used', a fresh 2xx was charged to the newly signed attempt (#156)."""
+        used = {"status_code": 402, "json": {"detail": {"error": "This payment authorization has already been used."}}}
+        sent = self._sent_after(idem_x402, requests_mock, [_idem("IDEMPOTENCY_KEY_IN_PROGRESS"), used, CREATED])
+        assert [p["nonce"] for p in sent] == [NONCES[1]]
+
+    def test_replayed_success_after_timeout_reports_timed_out_nonce(self, idem_x402, requests_mock, no_sleep):
+        """A replay answers the attempt that timed out: that attempt is the one reported (#156)."""
+        replay = {"status_code": 201, "json": {"batchID": DUMMY_STAMP}, "headers": {"Idempotent-Replayed": "true"}}
+        sent = self._sent_after(idem_x402, requests_mock, [
+            _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), {"exc": requests.exceptions.ReadTimeout}, replay,
+        ])
+        assert [p["nonce"] for p in sent] == [NONCES[0]]
+
+    @pytest.mark.parametrize("code,error_name", [
+        ("IDEMPOTENCY_KEY_SETTLED_PENDING", "PaymentSettledNotDeliveredError"),
+        ("IDEMPOTENCY_KEY_DELIVERED_NOT_STORED", "PaymentDeliveredNotStoredError"),
+    ])
+    def test_settled_answer_after_timeout_reports_timed_out_nonce(self, idem_x402, requests_mock, no_sleep,
+                                                                  code, error_name):
+        from swarm_provenance_uploader import exceptions
+
+        sent = []
+        requests_mock.post(f"{GW}/api/v1/stamps/", [
+            PAYMENT_REQUIRED, _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), {"exc": requests.exceptions.ReadTimeout},
+            _idem(code, transaction=TX_HASH),
+        ])
+        client, patcher = _client_with(idem_x402, x402_auto_pay=True, x402_on_payment_sent=sent.append)
+        try:
+            with pytest.raises(getattr(exceptions, error_name)) as exc_info:
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert [p["nonce"] for p in sent] == [NONCES[0]]
+        assert exc_info.value.nonce == NONCES[0]
+        assert exc_info.value.transaction == TX_HASH
+
+
+class TestReplayAfterOutstandingAttempt:
+    """A replay after an attempt that may have been collected names that attempt, not the retry (#156)."""
+
+    def _purchase_error(self, idem_x402, requests_mock, last, error):
+        requests_mock.post(f"{GW}/api/v1/stamps/", [
+            PAYMENT_REQUIRED, _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), {"exc": requests.exceptions.ReadTimeout}, last,
+        ])
+        client, patcher = _client_with(idem_x402, x402_auto_pay=True)
+        try:
+            with pytest.raises(error) as exc_info:
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+        return exc_info.value
+
+    def test_replayed_purchase_pending_names_timed_out_nonce(self, idem_x402, requests_mock, no_sleep):
+        from swarm_provenance_uploader.exceptions import StampPurchasePendingError
+
+        pending = {"status_code": 202, "headers": {"Idempotent-Replayed": "true"},
+                   "json": dict(TestPurchasePending.PENDING)}
+        err = self._purchase_error(idem_x402, requests_mock, pending, StampPurchasePendingError)
+        assert err.nonce == NONCES[0]
+        assert err.transaction == TX_HASH
+
+    def test_replayed_unreadable_success_names_timed_out_nonce(self, idem_x402, requests_mock, no_sleep):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        unreadable = {"status_code": 201, "text": "<html>proxy page</html>",
+                      "headers": {"Idempotent-Replayed": "true", "X-Payment-Transaction": TX_HASH}}
+        err = self._purchase_error(idem_x402, requests_mock, unreadable, PaymentSettledNotDeliveredError)
+        assert err.nonce == NONCES[0]
+        assert err.transaction == TX_HASH
+
 
 class TestIdempotencyVerificationCases:
     """Cases from the verification review of the retry loop."""
