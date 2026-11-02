@@ -2440,6 +2440,10 @@ def _composite_step_failed(
     (true only if an earlier step was recorded), "failed_step", and either
     "unconfirmed" (the write was sent but is not confirmed as recorded) or
     "error" (any other failure; `error_json` replaces the default object).
+
+    `hint` is printed after the error in text output. When the step's write
+    may have happened (not verified, or outcome unknown), it is prefixed
+    with "After you have checked the transaction, ".
     """
     unconfirmed = isinstance(e, exceptions.TransactionUnconfirmedError)
     if output_json:
@@ -2467,6 +2471,10 @@ def _composite_step_failed(
         if tx_hash:
             typer.echo(f"  Transaction: {tx_hash}", err=True)
     if hint:
+        if unconfirmed and not isinstance(e, exceptions.TransactionNotRecordedError):
+            # The write may have happened: check it before doing it again
+            hint = hint.strip()
+            hint = f"  After you have checked the transaction, {hint[:1].lower()}{hint[1:]}"
         typer.echo(hint, err=True)
     raise typer.Exit(code=1)
 

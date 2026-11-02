@@ -104,14 +104,21 @@ def _signed_tx_hash(raw_tx) -> Optional[str]:
     """The hash of a signed transaction (keccak-256 of its bytes), or None.
 
     The same value send_raw_transaction returns, so it is known even when
-    the send raised before it returned.
+    the send raised before it returned. Formatted like the returned hash,
+    with HexBytes.hex(), so the format (with or without "0x") follows the
+    installed hexbytes version.
     """
     try:
         from .swarm_verify import keccak256
 
-        return keccak256(bytes(raw_tx)).hex()
+        digest = keccak256(bytes(raw_tx))
     except Exception:
         return None
+    try:
+        from hexbytes import HexBytes
+    except ImportError:
+        return digest.hex()
+    return HexBytes(digest).hex()
 
 
 def _error_reason(error: Exception) -> str:
