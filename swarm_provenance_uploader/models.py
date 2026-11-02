@@ -270,6 +270,13 @@ class ChainProvenanceRecord(BaseModel):
     transformations: List[ChainTransformation] = Field(
         default_factory=list, description="Transformations derived from this data"
     )
+    parents: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Hashes this data was derived from, filled by a provenance chain walk. "
+            "None when the node was not expanded (at the depth limit, or a single record read)"
+        ),
+    )
 
 
 class AnchorResult(BaseModel):

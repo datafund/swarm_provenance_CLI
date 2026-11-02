@@ -2530,7 +2530,7 @@ def chain_verify(
 def chain_get(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to look up.")],
     follow: Annotated[bool, typer.Option("--follow", help="Walk the transformation chain.")] = False,
-    depth: Annotated[Optional[int], typer.Option("--depth", help="Max chain depth when using --follow.")] = None,
+    depth: Annotated[Optional[int], typer.Option("--depth", min=1, max=50, help="Max chain depth when using --follow (1-50, default 10).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):

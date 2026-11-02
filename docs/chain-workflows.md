@@ -200,8 +200,9 @@ swarm-prov-upload chain get aaa... --follow --depth 1
 from swarm_provenance_uploader.core.chain_client import ChainClient
 
 client = ChainClient()
-chain = client.get_provenance_chain("aaa...")
+chain = client.get_provenance_chain("aaa...")  # max_depth: 0 to 50, default 10
 # Returns [record_aaa, record_bbb, record_ccc]
+# Raises ChainConnectionError or ChainError if a read fails during the walk
 
 for record in chain:
     print(f"{record.data_hash[:12]}... ({record.data_type})")
@@ -591,17 +592,19 @@ The `--follow` flag on `chain get` walks the full transformation chain using bre
 
   Chain: A ──> B ──> C ──> D
 
-  --follow              Returns: [A, B, C, D]     (all records)
+  --follow              Returns: [A, B, C, D]     (up to 10 levels)
   --follow --depth 2    Returns: [A, B, C]         (stops at depth 2)
   --follow --depth 1    Returns: [A, B]            (stops at depth 1)
-  --follow --depth 0    Returns: [A]               (root only)
   (no --follow)         Returns: A                 (single record, no chain)
 ```
 
 **Default behavior:**
-- Without `--depth`: traverses up to 50 levels (safety cap)
+- `--depth` accepts 1 to 50. Other values are rejected with a usage error (exit code 2).
+- Without `--depth`: traverses up to 10 levels
 - `--depth` without `--follow`: warns and is ignored
 - Cycles are detected and skipped (visited set prevents infinite loops)
+- The walk fails closed: if any read fails during the walk (an RPC error, or a linked hash that reads as not registered), the command prints an error and exits with code 1. It never prints a partial chain.
+- Each record in `--json` output has a `parents` list with the hashes it was derived from. Records at the depth limit are not expanded, so their `parents` is `null`.
 
 **CLI commands:**
 ```bash
@@ -614,6 +617,7 @@ swarm-prov-upload chain get aaa... --follow --depth 2
 # JSON output includes chain array, depth count, and root hash
 swarm-prov-upload chain get aaa... --follow --json
 # Output: {"chain": [...], "depth": 4, "root": "aaa..."}
+# Each record in "chain" has "parents": [...], or null at the depth limit
 ```
 
 ## Error recovery

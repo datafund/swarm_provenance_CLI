@@ -232,7 +232,7 @@ swarm-prov-upload chain get <hash>
 # Walk the full transformation chain (follows links to root)
 swarm-prov-upload chain get <hash> --follow
 
-# Limit traversal depth
+# Limit traversal depth (1-50, default 10)
 swarm-prov-upload chain get <hash> --follow --depth 2
 
 # JSON output for scripting
