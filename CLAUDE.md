@@ -262,7 +262,8 @@ The application follows a modular architecture with clear separation of concerns
 - Targets DataProvenance v4 contract on Base Sepolia (`0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322`)
 - V2 auto-detection: state-based traversal on v2 contracts, event cache fallback on v1
 - Duplicate transformation pre-checks to avoid wasting gas
-- RPC failover support via `rpc_fallbacks` parameter
+- RPC failover via `rpc_fallbacks` (#168): `_with_fallback()` runs an operation again on the next fallback after a transport failure (`_is_transport_failure`: connection error, timeout, an answer that is not JSON-RPC; not a JSON-RPC error answer, a revert, a receipt timeout or a chain ID mismatch). Read methods (`@_read_method`) run whole through it; writes only for the steps before `send_raw_transaction` (chain ID and code checks, `build_*_tx`/gas estimate, nonce, gas price, balance) and for the receipt wait of the same hash. `send_raw_transaction` is never repeated: a transport failure there stays `TransactionOutcomeUnknownError`
+- `ChainProvider._try_fallback()` checks each fallback's chain ID, then replaces the provider of the existing Web3 object (`web3.provider = ...`) instead of creating a new Web3, so `DataProvenanceContract`, which holds that object, follows the switch (#200). In tests, `_web3_per_url` models this by routing each mock Web3 to the node of its current `provider`
 
 ### Key components
 
