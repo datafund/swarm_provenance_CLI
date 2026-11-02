@@ -1205,25 +1205,55 @@ class TestGatewayClientManifest:
         assert mock.called
         assert "deferred=true" in mock.last_request.url.lower()
 
-    def test_upload_manifest_redundancy_param(self, requests_mock, tmp_path):
-        """Tests that redundancy=True is sent as query parameter."""
-        mock = requests_mock.post(
-            "https://test.gateway.io/api/v1/data/manifest",
-            json={"reference": DUMMY_SWARM_REF},
-        )
-
+    @staticmethod
+    def _tar(tmp_path):
         import tarfile
         tar_path = tmp_path / "test.tar"
         file1 = tmp_path / "f.txt"
         file1.write_text("data")
         with tarfile.open(tar_path, "w") as tar:
             tar.add(str(file1), arcname="f.txt")
+        return tar_path
+
+    @pytest.mark.parametrize("level", [0, 3, 4])
+    def test_upload_manifest_redundancy_param(self, requests_mock, tmp_path, level):
+        """Tests that the redundancy level is sent as an integer 0-4 (#138), including 0."""
+        mock = requests_mock.post(
+            "https://test.gateway.io/api/v1/data/manifest",
+            json={"reference": DUMMY_SWARM_REF},
+        )
 
         client = GatewayClient(base_url="https://test.gateway.io")
-        client.upload_manifest(str(tar_path), DUMMY_STAMP, redundancy=True)
+        client.upload_manifest(str(self._tar(tmp_path)), DUMMY_STAMP, redundancy=level)
 
         assert mock.called
-        assert "redundancy=true" in mock.last_request.url.lower()
+        assert mock.last_request.qs["redundancy"] == [str(level)]
+
+    def test_upload_manifest_no_redundancy_param_by_default(self, requests_mock, tmp_path):
+        """Tests that no redundancy is sent when none is given, so the gateway default applies."""
+        mock = requests_mock.post(
+            "https://test.gateway.io/api/v1/data/manifest",
+            json={"reference": DUMMY_SWARM_REF},
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        client.upload_manifest(str(self._tar(tmp_path)), DUMMY_STAMP)
+
+        assert "redundancy" not in mock.last_request.qs
+
+    @pytest.mark.parametrize("level", [True, False, 5, -1, "2"])
+    def test_upload_manifest_rejects_invalid_redundancy(self, requests_mock, tmp_path, level):
+        """Tests that a bool, a string or a level outside 0-4 is refused before any request (#138)."""
+        mock = requests_mock.post(
+            "https://test.gateway.io/api/v1/data/manifest",
+            json={"reference": DUMMY_SWARM_REF},
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        with pytest.raises(ValueError, match="redundancy"):
+            client.upload_manifest(str(self._tar(tmp_path)), DUMMY_STAMP, redundancy=level)
+
+        assert not mock.called
 
     def test_upload_manifest_deferred_and_redundancy(self, requests_mock, tmp_path):
         """Tests both deferred and redundancy params sent together."""
@@ -1232,22 +1262,14 @@ class TestGatewayClientManifest:
             json={"reference": DUMMY_SWARM_REF},
         )
 
-        import tarfile
-        tar_path = tmp_path / "test.tar"
-        file1 = tmp_path / "f.txt"
-        file1.write_text("data")
-        with tarfile.open(tar_path, "w") as tar:
-            tar.add(str(file1), arcname="f.txt")
-
         client = GatewayClient(base_url="https://test.gateway.io")
         client.upload_manifest(
-            str(tar_path), DUMMY_STAMP, deferred=True, redundancy=True
+            str(self._tar(tmp_path)), DUMMY_STAMP, deferred=True, redundancy=2
         )
 
         assert mock.called
-        url = mock.last_request.url.lower()
-        assert "deferred=true" in url
-        assert "redundancy=true" in url
+        assert mock.last_request.qs["deferred"] == ["true"]
+        assert mock.last_request.qs["redundancy"] == ["2"]
 
 
 class TestGatewayClientFreeTier:
