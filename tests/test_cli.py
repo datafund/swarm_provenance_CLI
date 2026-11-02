@@ -7218,6 +7218,286 @@ class TestShortTokenEcho:
         assert SHORT_TOKEN not in result.output
 
 
+# --- #187: chain commands with a real ChainClient against failing local RPCs ---
+
+_READ_COMMANDS = {
+    "balance": ["chain", "balance"],
+    "balance-json": ["chain", "balance", "--json"],
+    "get": ["chain", "get", DUMMY_SWARM_REF],
+    "get-json": ["chain", "get", DUMMY_SWARM_REF, "--json"],
+    "get-follow": ["chain", "get", DUMMY_SWARM_REF, "--follow"],
+    "verify": ["chain", "verify", DUMMY_SWARM_REF],
+    "lookup": ["chain", "lookup", DUMMY_SWARM_REF],
+    "status": ["chain", "status", DUMMY_SWARM_REF],
+}
+
+_PROTECT = ["chain", "protect", DUMMY_SWARM_REF, "c" * 64]
+
+
+class TestChainReadErrorsRealClient:
+    """The real ChainClient and web3 against a local RPC that fails (#187).
+
+    Only reads are made, only to 127.0.0.1, with a dummy key.
+    """
+
+    @pytest.fixture
+    def rpc(self, monkeypatch, failing_rpc_server, closed_port, no_web3_retry_sleep):
+        """Point the chain commands at the stub; returns a function that sets the mode."""
+        monkeypatch.setenv("PROVENANCE_WALLET_KEY", "0x" + "a" * 64)
+        monkeypatch.setitem(_chain_config, "chain", "base-sepolia")
+        monkeypatch.setitem(_chain_config, "contract", None)
+        monkeypatch.setitem(_chain_config, "wallet_key_env", "PROVENANCE_WALLET_KEY")
+        monkeypatch.setitem(_chain_config, "rpc_fallbacks", None)
+
+        def use(mode):
+            failing_rpc_server.mode = mode
+            port = closed_port if mode == "refused" else failing_rpc_server.server_port
+            monkeypatch.setitem(_chain_config, "rpc_url", f"http://127.0.0.1:{port}/v2/{RPC_KEY}")
+            return port
+
+        return use
+
+    @pytest.mark.parametrize("command", list(_READ_COMMANDS), ids=list(_READ_COMMANDS))
+    def test_connection_failure_prints_rpc_url_line(self, rpc, command):
+        port = rpc("refused")
+
+        result = runner.invoke(app, _READ_COMMANDS[command])
+
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert RPC_KEY not in result.output
+        assert "ERROR: Cannot connect to chain: " in result.output
+        assert "Connection refused" in result.output
+        assert f"  RPC URL: http://127.0.0.1:{port}/…" in result.output
+        assert "Traceback" not in result.output
+
+    @pytest.mark.parametrize("command", list(_READ_COMMANDS), ids=list(_READ_COMMANDS))
+    def test_rejection_message(self, rpc, command):
+        rpc("jsonrpc")
+
+        result = runner.invoke(app, _READ_COMMANDS[command])
+
+        assert result.exit_code == 1, result.output
+        assert RPC_KEY not in result.output
+        assert "ERROR: The RPC rejected the request: invalid api key in /…" in result.output
+        assert "RPC URL:" not in result.output
+        assert "Traceback" not in result.output
+
+    @pytest.mark.parametrize("mode,original", [
+        ("refused", "requests.exceptions.ConnectionError"),
+        ("jsonrpc", "web3.exceptions.Web3RPCError"),
+    ])
+    @pytest.mark.parametrize("command", list(_READ_COMMANDS), ids=list(_READ_COMMANDS))
+    def test_verbose_prints_redacted_traceback(self, rpc, command, mode, original):
+        rpc(mode)
+
+        result = runner.invoke(app, _READ_COMMANDS[command] + ["-v"])
+
+        assert result.exit_code == 1, result.output
+        assert RPC_KEY not in result.output
+        assert "Traceback (most recent call last)" in result.output
+        assert f"RedactedException: {original}: " in result.output
+        # The traceback comes first, then the error line
+        assert result.output.index("Traceback") < result.output.index("ERROR: ")
+
+    @pytest.mark.parametrize("mode,expected", [
+        ("refused", "ERROR: Cannot connect to chain: "),
+        ("jsonrpc", "ERROR: The RPC rejected the request: invalid api key in /…"),
+    ])
+    def test_protect_text(self, rpc, mode, expected):
+        rpc(mode)
+
+        result = runner.invoke(app, _PROTECT)
+
+        assert result.exit_code == 1, result.output
+        assert RPC_KEY not in result.output
+        assert expected in result.output
+        assert "Traceback" not in result.output
+
+        verbose = runner.invoke(app, _PROTECT + ["-v"])
+        assert verbose.exit_code == 1, verbose.output
+        assert RPC_KEY not in verbose.output
+        assert "Traceback (most recent call last)" in verbose.output
+        assert expected in verbose.output
+
+    @pytest.mark.parametrize("mode,error", [("refused", "connection_failed"), ("jsonrpc", "chain_error")])
+    def test_protect_json(self, rpc, mode, error):
+        from typer.testing import CliRunner as _Runner
+
+        rpc(mode)
+
+        result = _Runner(mix_stderr=False).invoke(app, _PROTECT + ["--json"])
+
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.stdout)
+        assert output["failed_step"] == "verify"
+        assert output["partial_failure"] is False
+        assert output["error"]["error"] == error
+        assert RPC_KEY not in result.stdout
+        assert RPC_KEY not in result.stderr
+
+        verbose = _Runner(mix_stderr=False).invoke(app, _PROTECT + ["--json", "-v"])
+        assert json.loads(verbose.stdout)["failed_step"] == "verify"
+        assert "Traceback (most recent call last)" in verbose.stderr
+        assert RPC_KEY not in verbose.stdout + verbose.stderr
+
+
+_OWNER = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
+_ANCHOR_COMMANDS = {
+    "anchor": ["chain", "anchor", DUMMY_SWARM_REF],
+    "anchor-json": ["chain", "anchor", DUMMY_SWARM_REF, "--json"],
+    "anchor-owner": ["chain", "anchor", DUMMY_SWARM_REF, "--owner", _OWNER],
+}
+_PARTIAL_FAILURES = ["http401", "jsonrpc", "html", "drop"]
+
+
+class TestAnchorDuplicateCheckErrorsRealClient:
+    """The duplicate-record check of anchor fails at the RPC; the contract code check works (#187).
+
+    The stub answers eth_chainId and eth_getCode and fails every other
+    request, so nothing is ever signed or sent.
+    """
+
+    @pytest.fixture
+    def rpc(self, monkeypatch, failing_rpc_server, no_web3_retry_sleep):
+        monkeypatch.setenv("PROVENANCE_WALLET_KEY", "0x" + "a" * 64)
+        monkeypatch.setitem(_chain_config, "chain", "base-sepolia")
+        monkeypatch.setitem(_chain_config, "contract", None)
+        monkeypatch.setitem(_chain_config, "wallet_key_env", "PROVENANCE_WALLET_KEY")
+        monkeypatch.setitem(_chain_config, "rpc_fallbacks", None)
+        failing_rpc_server.answers.update({"eth_chainId": "0x14a34", "eth_getCode": "0x6080604052"})
+        port = failing_rpc_server.server_port
+        monkeypatch.setitem(_chain_config, "rpc_url", f"http://127.0.0.1:{port}/v2/{RPC_KEY}")
+
+        def use(mode):
+            failing_rpc_server.mode = mode
+            return port
+
+        yield use
+        assert "eth_sendRawTransaction" not in failing_rpc_server.methods
+        assert "eth_getCode" in failing_rpc_server.methods
+        assert "eth_call" in failing_rpc_server.methods
+
+    @staticmethod
+    def _expected(mode, port):
+        if mode == "jsonrpc":
+            return "ERROR: The RPC rejected the request: invalid api key in /…", None
+        return "ERROR: Cannot connect to chain: ", f"  RPC URL: http://127.0.0.1:{port}/…"
+
+    @pytest.mark.parametrize("mode", _PARTIAL_FAILURES)
+    @pytest.mark.parametrize("command", list(_ANCHOR_COMMANDS), ids=list(_ANCHOR_COMMANDS))
+    def test_error_text(self, rpc, command, mode):
+        port = rpc(mode)
+
+        result = runner.invoke(app, _ANCHOR_COMMANDS[command])
+
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert RPC_KEY not in result.output
+        error_line, url_line = self._expected(mode, port)
+        assert error_line in result.output
+        if url_line:
+            assert url_line in result.output
+        else:
+            assert "RPC URL:" not in result.output
+        assert "Traceback" not in result.output
+
+    @pytest.mark.parametrize("mode", _PARTIAL_FAILURES)
+    @pytest.mark.parametrize("command", list(_ANCHOR_COMMANDS), ids=list(_ANCHOR_COMMANDS))
+    def test_verbose_prints_redacted_traceback(self, rpc, command, mode):
+        port = rpc(mode)
+
+        result = runner.invoke(app, _ANCHOR_COMMANDS[command] + ["-v"])
+
+        assert result.exit_code == 1, result.output
+        assert RPC_KEY not in result.output
+        assert "Traceback (most recent call last)" in result.output
+        assert "RedactedException: " in result.output
+        error_line, _ = self._expected(mode, port)
+        assert result.output.index("Traceback") < result.output.index(error_line)
+
+
+class TestProtectAnchorStepErrorsRealClient:
+    """chain protect --anchor-new: step 2's duplicate check fails at the RPC (#187).
+
+    Step 1 is answered by a patched ChainClient.get; every later get() is
+    the real one against the partial stub.
+    """
+
+    @pytest.fixture
+    def rpc(self, monkeypatch, failing_rpc_server, no_web3_retry_sleep):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.models import ChainProvenanceRecord, DataStatusEnum
+
+        monkeypatch.setenv("PROVENANCE_WALLET_KEY", "0x" + "a" * 64)
+        monkeypatch.setitem(_chain_config, "chain", "base-sepolia")
+        monkeypatch.setitem(_chain_config, "contract", None)
+        monkeypatch.setitem(_chain_config, "wallet_key_env", "PROVENANCE_WALLET_KEY")
+        monkeypatch.setitem(_chain_config, "rpc_fallbacks", None)
+        failing_rpc_server.answers.update({"eth_chainId": "0x14a34", "eth_getCode": "0x6080604052"})
+        port = failing_rpc_server.server_port
+        monkeypatch.setitem(_chain_config, "rpc_url", f"http://127.0.0.1:{port}/v2/{RPC_KEY}")
+
+        record = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF, owner=_OWNER, timestamp=1_700_000_000,
+            data_type="swarm-provenance", status=DataStatusEnum.ACTIVE,
+        )
+        real_get = ChainClient.get
+
+        def get(self, swarm_hash, verbose=False):
+            if swarm_hash == DUMMY_SWARM_REF:
+                return record
+            return real_get(self, swarm_hash, verbose=verbose)
+
+        monkeypatch.setattr(ChainClient, "get", get)
+
+        def use(mode):
+            failing_rpc_server.mode = mode
+            return port
+
+        yield use
+        assert "eth_sendRawTransaction" not in failing_rpc_server.methods
+        assert "eth_call" in failing_rpc_server.methods
+
+    _COMMAND = ["chain", "protect", DUMMY_SWARM_REF, "c" * 64, "--anchor-new"]
+
+    @pytest.mark.parametrize("mode", _PARTIAL_FAILURES)
+    def test_text_and_verbose(self, rpc, mode):
+        rpc(mode)
+        if mode == "jsonrpc":
+            expected = "ERROR: Failed to anchor new hash: The RPC rejected the request: invalid api key in /…"
+        else:
+            expected = "ERROR: Failed to anchor new hash. Cannot connect to chain: "
+
+        result = runner.invoke(app, self._COMMAND)
+        assert result.exit_code == 1, result.output
+        assert RPC_KEY not in result.output
+        assert expected in result.output
+        assert "Traceback" not in result.output
+
+        verbose = runner.invoke(app, self._COMMAND + ["-v"])
+        assert verbose.exit_code == 1, verbose.output
+        assert RPC_KEY not in verbose.output
+        assert "Traceback (most recent call last)" in verbose.output
+        assert "RedactedException: " in verbose.output
+        assert verbose.output.index("Traceback") < verbose.output.index(expected)
+
+    @pytest.mark.parametrize("mode,error", [("jsonrpc", "chain_error"), ("drop", "connection_failed")])
+    def test_json(self, rpc, mode, error):
+        from typer.testing import CliRunner as _Runner
+
+        rpc(mode)
+
+        for extra in ([], ["-v"]):
+            result = _Runner(mix_stderr=False).invoke(app, self._COMMAND + ["--json"] + extra)
+            assert result.exit_code == 1, result.output
+            output = json.loads(result.stdout)
+            assert output["failed_step"] == "anchor"
+            assert output["error"]["error"] == error
+            assert RPC_KEY not in result.stdout + result.stderr
+            assert ("Traceback (most recent call last)" in result.stderr) == bool(extra)
+
+
 # =============================================================================
 # GATEWAY NULL FIELDS AND CAIP-2 NETWORK NAMES (#143)
 # =============================================================================
