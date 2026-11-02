@@ -1807,6 +1807,8 @@ def health(
             typer.secho(f"✗ Status: Unhealthy", fg=typer.colors.RED)
             raise typer.Exit(code=1)
 
+    except typer.Exit:
+        raise
     except Exception as e:
         typer.secho(f"✗ Backend: {backend_url}", fg=typer.colors.RED)
         typer.secho(f"✗ Status: Unreachable", fg=typer.colors.RED)
@@ -2136,6 +2138,8 @@ def notary_verify(
         except exceptions.NotaryNotEnabledError:
             typer.secho("ERROR: Notary not enabled on gateway. Provide --address manually.", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
+        except typer.Exit:
+            raise
         except Exception as e:
             typer.secho(f"ERROR: Failed to get notary address: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
