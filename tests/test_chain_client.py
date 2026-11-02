@@ -3394,58 +3394,6 @@ def _assert_no_key(error, key=RPC_KEY):
         assert key not in text, text
 
 
-@pytest.fixture
-def failing_rpc_server():
-    """A local "RPC" that fails every request and repeats the request path.
-
-    Set ``server.mode``: "http401" answers HTTP 401 with the path in the
-    body; "jsonrpc" answers a JSON-RPC error whose message holds the path.
-    """
-    import http.server
-    import threading
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_POST(self):
-            raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            if self.server.mode == "http401":
-                body = f"Unauthorized: {self.path}".encode()
-                status, content_type = 401, "text/plain"
-            else:
-                request = json.loads(raw)
-                body = json.dumps({
-                    "jsonrpc": "2.0",
-                    "id": request.get("id"),
-                    "error": {"code": -32005, "message": f"invalid api key in {self.path}"},
-                }).encode()
-                status, content_type = 200, "application/json"
-            self.send_response(status)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *args):
-            pass
-
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-    server.mode = "http401"
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server
-    server.shutdown()
-    server.server_close()
-
-
-def _closed_port():
-    import socket
-
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    return port
-
-
 _READ_CALLS = {
     "get": lambda client: client.get(DUMMY_HASH),
     "verify": lambda client: client.verify(DUMMY_HASH),
@@ -3454,13 +3402,9 @@ _READ_CALLS = {
     "get_provenance_chain": lambda client: client.get_provenance_chain(DUMMY_HASH),
 }
 
-# web3 retries HTTP errors with a backoff, so the 401 cases use the
-# methods that make one request; "get" also covers the context chain of
-# its nested version check in the other modes.
 _READ_CASES = (
-    [("http401", m) for m in ("get_by_storage_ref", "balance")]
-    + [("jsonrpc", m) for m in _READ_CALLS]
-    + [("refused", m) for m in _READ_CALLS]
+    [(mode, m) for mode in ("http401", "jsonrpc", "refused") for m in _READ_CALLS]
+    + [("html", m) for m in ("get", "balance")]
 )
 
 
@@ -3473,13 +3417,15 @@ class TestReadErrorsRealWeb3:
 
     @pytest.mark.parametrize("path", [f"/v2/{RPC_KEY}", f"/?apikey={RPC_KEY}"], ids=["path", "query"])
     @pytest.mark.parametrize("mode,method", _READ_CASES, ids=[f"{m}-{n}" for m, n in _READ_CASES])
-    def test_read_raises_redacted_chain_error(self, monkeypatch, failing_rpc_server, mode, method, path):
+    def test_read_raises_redacted_chain_error(
+        self, monkeypatch, failing_rpc_server, closed_port, no_web3_retry_sleep, mode, method, path
+    ):
         pytest.importorskip("web3")
         from swarm_provenance_uploader.core.chain_client import ChainClient
 
         monkeypatch.setenv("PROVENANCE_WALLET_KEY", DUMMY_PRIVATE_KEY)
         failing_rpc_server.mode = mode
-        port = _closed_port() if mode == "refused" else failing_rpc_server.server_port
+        port = closed_port if mode == "refused" else failing_rpc_server.server_port
         client = ChainClient(
             chain="base-sepolia", rpc_url=f"http://127.0.0.1:{port}{path}", rpc_fallbacks=[]
         )
@@ -3492,19 +3438,27 @@ class TestReadErrorsRealWeb3:
         _assert_no_key(error)
         if mode == "jsonrpc":
             assert str(error).startswith("The RPC rejected the request: invalid api key in /")
+            assert error.__cause__.original_type == "web3.exceptions.Web3RPCError"
         else:
             assert error.rpc_url == f"http://127.0.0.1:{port}/…"
-            assert ("401 Client Error" if mode == "http401" else "Connection refused") in str(error)
+            expected_text = {
+                "http401": "401 Client Error",
+                "refused": "Connection refused",
+                "html": "",
+            }[mode]
+            assert expected_text in str(error)
+            # The redacted original stays as the cause, so tracebacks show where it failed
+            assert error.__cause__.original_type.startswith(("requests.", "json.", "web3."))
 
     @pytest.mark.parametrize("mode", ["jsonrpc", "refused"])
-    def test_health_check_chain_is_redacted(self, monkeypatch, failing_rpc_server, mode):
+    def test_health_check_chain_is_redacted(self, monkeypatch, failing_rpc_server, closed_port, no_web3_retry_sleep, mode):
         """health_check already raises ChainConnectionError; its cause must be redacted too."""
         pytest.importorskip("web3")
         from swarm_provenance_uploader.core.chain_client import ChainClient
 
         monkeypatch.setenv("PROVENANCE_WALLET_KEY", DUMMY_PRIVATE_KEY)
         failing_rpc_server.mode = mode
-        port = _closed_port() if mode == "refused" else failing_rpc_server.server_port
+        port = closed_port if mode == "refused" else failing_rpc_server.server_port
         client = ChainClient(
             chain="base-sepolia", rpc_url=f"http://127.0.0.1:{port}/v2/{RPC_KEY}", rpc_fallbacks=[]
         )

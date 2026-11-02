@@ -6712,3 +6712,127 @@ class TestShortTokenEcho:
         assert isinstance(result.exception, SystemExit), result.exception
         assert "invalid api key: …" in result.output
         assert SHORT_TOKEN not in result.output
+
+
+# --- #187: chain commands with a real ChainClient against failing local RPCs ---
+
+_READ_COMMANDS = {
+    "balance": ["chain", "balance"],
+    "balance-json": ["chain", "balance", "--json"],
+    "get": ["chain", "get", DUMMY_SWARM_REF],
+    "get-json": ["chain", "get", DUMMY_SWARM_REF, "--json"],
+    "get-follow": ["chain", "get", DUMMY_SWARM_REF, "--follow"],
+    "verify": ["chain", "verify", DUMMY_SWARM_REF],
+    "lookup": ["chain", "lookup", DUMMY_SWARM_REF],
+    "status": ["chain", "status", DUMMY_SWARM_REF],
+}
+
+_PROTECT = ["chain", "protect", DUMMY_SWARM_REF, "c" * 64]
+
+
+class TestChainReadErrorsRealClient:
+    """The real ChainClient and web3 against a local RPC that fails (#187).
+
+    Only reads are made, only to 127.0.0.1, with a dummy key.
+    """
+
+    @pytest.fixture
+    def rpc(self, monkeypatch, failing_rpc_server, closed_port, no_web3_retry_sleep):
+        """Point the chain commands at the stub; returns a function that sets the mode."""
+        monkeypatch.setenv("PROVENANCE_WALLET_KEY", "0x" + "a" * 64)
+        monkeypatch.setitem(_chain_config, "chain", "base-sepolia")
+        monkeypatch.setitem(_chain_config, "contract", None)
+        monkeypatch.setitem(_chain_config, "wallet_key_env", "PROVENANCE_WALLET_KEY")
+        monkeypatch.setitem(_chain_config, "rpc_fallbacks", None)
+
+        def use(mode):
+            failing_rpc_server.mode = mode
+            port = closed_port if mode == "refused" else failing_rpc_server.server_port
+            monkeypatch.setitem(_chain_config, "rpc_url", f"http://127.0.0.1:{port}/v2/{RPC_KEY}")
+            return port
+
+        return use
+
+    @pytest.mark.parametrize("command", list(_READ_COMMANDS), ids=list(_READ_COMMANDS))
+    def test_connection_failure_prints_rpc_url_line(self, rpc, command):
+        port = rpc("refused")
+
+        result = runner.invoke(app, _READ_COMMANDS[command])
+
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert RPC_KEY not in result.output
+        assert "ERROR: Cannot connect to chain: " in result.output
+        assert "Connection refused" in result.output
+        assert f"  RPC URL: http://127.0.0.1:{port}/…" in result.output
+        assert "Traceback" not in result.output
+
+    @pytest.mark.parametrize("command", list(_READ_COMMANDS), ids=list(_READ_COMMANDS))
+    def test_rejection_message(self, rpc, command):
+        rpc("jsonrpc")
+
+        result = runner.invoke(app, _READ_COMMANDS[command])
+
+        assert result.exit_code == 1, result.output
+        assert RPC_KEY not in result.output
+        assert "ERROR: The RPC rejected the request: invalid api key in /…" in result.output
+        assert "RPC URL:" not in result.output
+        assert "Traceback" not in result.output
+
+    @pytest.mark.parametrize("mode,original", [
+        ("refused", "requests.exceptions.ConnectionError"),
+        ("jsonrpc", "web3.exceptions.Web3RPCError"),
+    ])
+    @pytest.mark.parametrize("command", list(_READ_COMMANDS), ids=list(_READ_COMMANDS))
+    def test_verbose_prints_redacted_traceback(self, rpc, command, mode, original):
+        rpc(mode)
+
+        result = runner.invoke(app, _READ_COMMANDS[command] + ["-v"])
+
+        assert result.exit_code == 1, result.output
+        assert RPC_KEY not in result.output
+        assert "Traceback (most recent call last)" in result.output
+        assert f"RedactedException: {original}: " in result.output
+        # The traceback comes first, then the error line
+        assert result.output.index("Traceback") < result.output.index("ERROR: ")
+
+    @pytest.mark.parametrize("mode,expected", [
+        ("refused", "ERROR: Cannot connect to chain: "),
+        ("jsonrpc", "ERROR: The RPC rejected the request: invalid api key in /…"),
+    ])
+    def test_protect_text(self, rpc, mode, expected):
+        rpc(mode)
+
+        result = runner.invoke(app, _PROTECT)
+
+        assert result.exit_code == 1, result.output
+        assert RPC_KEY not in result.output
+        assert expected in result.output
+        assert "Traceback" not in result.output
+
+        verbose = runner.invoke(app, _PROTECT + ["-v"])
+        assert verbose.exit_code == 1, verbose.output
+        assert RPC_KEY not in verbose.output
+        assert "Traceback (most recent call last)" in verbose.output
+        assert expected in verbose.output
+
+    @pytest.mark.parametrize("mode,error", [("refused", "connection_failed"), ("jsonrpc", "chain_error")])
+    def test_protect_json(self, rpc, mode, error):
+        from typer.testing import CliRunner as _Runner
+
+        rpc(mode)
+
+        result = _Runner(mix_stderr=False).invoke(app, _PROTECT + ["--json"])
+
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.stdout)
+        assert output["failed_step"] == "verify"
+        assert output["partial_failure"] is False
+        assert output["error"]["error"] == error
+        assert RPC_KEY not in result.stdout
+        assert RPC_KEY not in result.stderr
+
+        verbose = _Runner(mix_stderr=False).invoke(app, _PROTECT + ["--json", "-v"])
+        assert json.loads(verbose.stdout)["failed_step"] == "verify"
+        assert "Traceback (most recent call last)" in verbose.stderr
+        assert RPC_KEY not in verbose.stdout + verbose.stderr
