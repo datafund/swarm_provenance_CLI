@@ -142,13 +142,14 @@ X402_ENABLED=true
 # Your wallet private key (KEEP SECRET!)
 X402_PRIVATE_KEY=0x...your_private_key_here...
 
-# Network: base-sepolia (testnet) or base (mainnet)
+# Network: base-sepolia (testnet) or base (mainnet).
+# The CAIP-2 ids eip155:84532 and eip155:8453 also work.
 X402_NETWORK=base-sepolia
 
 # Optional: Auto-pay without prompts
 X402_AUTO_PAY=false
 
-# Optional: Maximum auto-pay amount per request in USD
+# Optional: Maximum auto-pay amount per request in USD (a finite number of 0 or more)
 X402_MAX_AUTO_PAY_USD=1.00
 
 # Optional: Only pay this recipient (the gateway operator's published pay-to address)
@@ -318,7 +319,7 @@ The gateway's payment request names a different USDC signing domain than the tok
 
 ### "No matching network option"
 
-The gateway doesn't support your configured network. Check that `X402_NETWORK` matches what the gateway accepts.
+The gateway doesn't support your configured network. Check that `X402_NETWORK` matches what the gateway accepts. The client treats the x402 v1 names and their CAIP-2 chain ids as the same network: `base-sepolia` is `eip155:84532` and `base` is `eip155:8453`.
 
 ## Security best practices
 

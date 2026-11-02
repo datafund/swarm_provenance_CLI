@@ -9,6 +9,7 @@ Requires optional dependencies (the `blockchain` extra): web3 and eth-account.
 """
 
 import ast
+import functools
 import json
 import logging
 from typing import List, Optional
@@ -20,9 +21,11 @@ from ..chain.exceptions import (
     ChainConfigurationError,
     ChainConnectionError,
     ChainTransactionError,
+    ChainValidationError,
     InsufficientFundsError,
     TransactionNotRecordedError,
     TransactionNotVerifiedError,
+    TransactionOutcomeUnknownError,
     DataAlreadyRegisteredError,
     DataNotRegisteredError,
     TransformationAlreadyExistsError,
@@ -37,6 +40,7 @@ from ..models import (
     MergeTransformResult,
     TransformResult,
 )
+from ..chain.exceptions import redact_exception_chain
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +94,36 @@ def _is_rpc_rejection(error: Exception) -> bool:
     return "Web3RPCError" in names and "RequestTimedOut" not in names
 
 
+def _is_receipt_timeout(error: Exception) -> bool:
+    """True if web3's receipt wait timed out (TimeExhausted).
+
+    Matched by class name, like _is_contract_revert. _is_rpc_failure counts
+    it as an RPC failure; _send_transaction leaves it to its own handling.
+    """
+    return any(cls.__name__ == "TimeExhausted" for cls in type(error).__mro__)
+
+
+def _signed_tx_hash(raw_tx) -> Optional[str]:
+    """The hash of a signed transaction (keccak-256 of its bytes), or None.
+
+    The same value send_raw_transaction returns, so it is known even when
+    the send raised before it returned. Formatted like the returned hash,
+    with HexBytes.hex(), so the format (with or without "0x") follows the
+    installed hexbytes version.
+    """
+    try:
+        from .swarm_verify import keccak256
+
+        digest = keccak256(bytes(raw_tx))
+    except Exception:
+        return None
+    try:
+        from hexbytes import HexBytes
+    except ImportError:
+        return digest.hex()
+    return HexBytes(digest).hex()
+
+
 def _error_reason(error: Exception) -> str:
     """The readable reason of a web3 error.
 
@@ -116,6 +150,54 @@ def _error_reason(error: Exception) -> str:
     return str(error) or type(error).__name__
 
 
+# Provenance chain walk depth (#170): the default, and the largest accepted
+DEFAULT_CHAIN_DEPTH = 10
+MAX_CHAIN_DEPTH = 50
+
+
+def _traversal_error(data_hash: str, depth: int, error: Exception) -> ChainError:
+    """The error that stops a provenance chain walk at one node (#170).
+
+    The walk fails closed: a partial lineage is never returned. RPC failures
+    become ChainConnectionError and everything else ChainError; both name
+    the node and its depth. Chain errors other than connection and
+    not-registered errors (for example ChainValidationError) keep their
+    class. A linked hash that reads as not registered means an inconsistent
+    read (the contract registers every derived hash), so it is a ChainError
+    and not DataNotRegisteredError, which callers read as "start hash not
+    found". Messages are URL-redacted by ChainError.
+    """
+    if isinstance(error, ChainError) and not isinstance(
+        error, (ChainConnectionError, DataNotRegisteredError)
+    ):
+        return error
+    if isinstance(error, DataNotRegisteredError):
+        reason = "the linked record reads as not registered (inconsistent read)"
+    else:
+        reason = _error_reason(error)
+    message = f"Provenance chain read failed at {data_hash} (depth {depth}): {reason}"
+    if isinstance(error, ChainConnectionError):
+        return ChainConnectionError(message, rpc_url=error.rpc_url)
+    if _is_rpc_failure(error):
+        return ChainConnectionError(message)
+    return ChainError(message)
+
+
+def _traversal_cause(error: Exception) -> Optional[BaseException]:
+    """The cause to chain to the error _traversal_error makes from error.
+
+    A raw failure is the cause itself. A ChainError keeps its own cause,
+    for example the RPC failure that a read method mapped (#187), so the
+    traceback shows where the read failed, and a ChainError that
+    _traversal_error returns unchanged is not made its own cause.
+    ChainClient's public methods redact the chain (redact_exception_chain),
+    so the RPC URL is not repeated through it.
+    """
+    if isinstance(error, ChainError):
+        return error.__cause__
+    return error
+
+
 def _rpc_rejection_message(error: Exception) -> Optional[str]:
     """The node's message if error is a JSON-RPC error answer, else None.
 
@@ -129,6 +211,59 @@ def _rpc_rejection_message(error: Exception) -> Optional[str]:
     if not _is_rpc_rejection(error):
         return None
     return _error_reason(error)
+
+
+def _read_error(error: Exception, rpc_url: Optional[str]) -> Optional[ChainError]:
+    """The chain error for an RPC failure in a read, or None if it is not one (#187).
+
+    A JSON-RPC error answer becomes ChainConfigurationError, like the
+    contract code check; a transport failure, a timeout or an answer that
+    is not JSON-RPC becomes ChainConnectionError. ChainError redacts the
+    message, and ChainConnectionError the URL.
+    """
+    rejection = _rpc_rejection_message(error)
+    if rejection is not None:
+        return ChainConfigurationError(f"The RPC rejected the request: {rejection}")
+    if _is_rpc_failure(error):
+        return ChainConnectionError(_error_reason(error), rpc_url=rpc_url)
+    return None
+
+
+def _redacted_errors(map_rpc_failures: bool):
+    """Decorate a public ChainClient method so its errors do not repeat the RPC URL (#187).
+
+    A ChainError the method raises gets a redacted exception chain
+    (redact_exception_chain), because library callers can print
+    ``__cause__`` and ``__context__``. With map_rpc_failures (read
+    methods), a raw RPC failure becomes a chain error (_read_error), raised
+    from it, so the redacted original stays in ``__cause__`` and a
+    traceback still shows where it failed. Other exceptions pass through
+    unchanged.
+    """
+    def decorator(method):
+        @functools.wraps(method)
+        def wrapper(self, *args, **kwargs):
+            try:
+                try:
+                    return method(self, *args, **kwargs)
+                except ChainError:
+                    raise
+                except Exception as e:
+                    if not map_rpc_failures:
+                        raise
+                    error = _read_error(e, self._provider.rpc_url)
+                    if error is None:
+                        raise
+                    raise error from e
+            except ChainError as e:
+                redact_exception_chain(e)
+                raise
+        return wrapper
+    return decorator
+
+
+_read_method = _redacted_errors(map_rpc_failures=True)
+_write_method = _redacted_errors(map_rpc_failures=False)
 
 
 class ChainClient:
@@ -150,6 +285,7 @@ class ChainClient:
         explorer_url: Optional[str] = None,
         gas_limit: Optional[int] = None,
         rpc_fallbacks: Optional[List[str]] = None,
+        require_wallet: bool = True,
     ):
         """
         Initialize the chain client.
@@ -164,12 +300,16 @@ class ChainClient:
             explorer_url: Custom block explorer URL. If None, uses preset.
             gas_limit: Explicit gas limit. If set, skips estimation and multiplier.
             rpc_fallbacks: Fallback RPC URLs tried in order on failure.
+            require_wallet: If True (default), load the wallet key now. If
+                False, load it on first use, so read-only operations work
+                without a key. Writes, balance() and address then raise
+                ChainConfigurationError when no key is configured.
 
         Raises:
-            ChainConfigurationError: If dependencies missing or config invalid.
+            ChainConfigurationError: If dependencies missing or config invalid,
+                or if require_wallet is True and no valid key is configured.
         """
         from ..chain.provider import ChainProvider
-        from ..chain.wallet import ChainWallet
         from ..chain.contract import DataProvenanceContract
 
         self._provider = ChainProvider(
@@ -179,10 +319,11 @@ class ChainClient:
             explorer_url=explorer_url,
             rpc_fallbacks=rpc_fallbacks,
         )
-        self._wallet = ChainWallet(
-            private_key=private_key,
-            private_key_env=private_key_env,
-        )
+        self._private_key = private_key
+        self._private_key_env = private_key_env
+        self._wallet_instance = None
+        if require_wallet:
+            self._wallet  # load the key now: fail here if it is missing
         self._contract = DataProvenanceContract(
             web3=self._provider.web3,
             contract_address=self._provider.contract_address,
@@ -190,6 +331,23 @@ class ChainClient:
         self._gas_limit_multiplier = gas_limit_multiplier
         self._gas_limit = gas_limit
         self._contract_code_checked = False
+
+    @property
+    def _wallet(self):
+        """The signing wallet, created on first use.
+
+        Raises:
+            ChainConfigurationError: If no valid private key is configured.
+        """
+        if self._wallet_instance is None:
+            from ..chain.wallet import ChainWallet
+
+            self._wallet_instance = ChainWallet(
+                private_key=self._private_key,
+                private_key_env=self._private_key_env,
+            )
+            self._private_key = None  # the wallet holds it from now on
+        return self._wallet_instance
 
     @property
     def address(self) -> str:
@@ -248,17 +406,22 @@ class ChainClient:
 
     def _check_contract_code(self) -> None:
         """
-        Refuse to write if the configured contract address has no code.
+        Refuse to write to the wrong chain or to an address without code.
 
-        A transaction to an address without code succeeds and records
-        nothing. Checked once per client, before the first signature.
+        First the RPC's chain ID is confirmed (ChainProvider.confirm_chain_id),
+        then the code at the contract address is read: a transaction to an
+        address without code succeeds and records nothing. Both are checked
+        once per client, before the first signature.
 
         Raises:
+            ChainIdMismatchError: If the RPC is on another chain than a named
+                network preset.
             ChainConfigurationError: If the address has no contract code, the
                 RPC rejected the check (a JSON-RPC error answer), or the check
                 fails for a reason other than the RPC.
             ChainConnectionError: If the RPC cannot be reached.
         """
+        self._provider.confirm_chain_id()
         if self._contract_code_checked:
             return
         # The checksummed address: web3 rejects a lowercase one, and the
@@ -297,6 +460,10 @@ class ChainClient:
         or an RPC failure can happen here, before _send_transaction. Nothing
         has been sent at this point, so no error carries a tx_hash.
 
+        With an explicit gas limit, it is passed to the build method as
+        ``gas``, so web3 does not run eth_estimateGas. A transaction that
+        would revert is then not caught here: it is sent and costs gas.
+
         Raises:
             InsufficientFundsError: If the RPC reports insufficient funds.
             ChainTransactionError: If the contract reverts, the RPC answers
@@ -304,6 +471,8 @@ class ChainClient:
             ChainConnectionError: If the RPC cannot be reached or its answer
                 is not JSON-RPC.
         """
+        if self._gas_limit is not None:
+            kwargs["gas"] = self._gas_limit
         try:
             return build(*args, **kwargs)
         except ChainError:
@@ -368,15 +537,28 @@ class ChainClient:
                 contract did not emit expected_count expected_event events.
             TransactionNotVerifiedError: If the transaction was mined but its
                 events could not be decoded.
+            ChainConnectionError: If the RPC cannot be reached before the
+                transaction is sent. Nothing was sent.
+            TransactionOutcomeUnknownError: If the connection to the RPC
+                fails after send_raw_transaction was called. The
+                transaction may have been sent. The client does not sign
+                or send a new transaction (web3's HTTP provider may repeat
+                the eth_sendRawTransaction request with the same signed
+                bytes, which has the same hash and nonce).
             ChainTransactionError: If transaction fails.
         """
         web3 = self._provider.web3
+        # Set just before send_raw_transaction: after that, a transport
+        # failure does not mean that nothing was sent
+        send_called = False
+        raw_tx = None
 
         self._check_contract_code()
 
         try:
-            # Fill in nonce
-            tx["nonce"] = web3.eth.get_transaction_count(self._wallet.address)
+            # Fill in nonce. "pending" counts this wallet's transactions that
+            # are not mined yet, so a second write does not reuse a nonce.
+            tx["nonce"] = web3.eth.get_transaction_count(self._wallet.address, "pending")
             tx["chainId"] = self._provider.chain_id
 
             # Set gas limit: explicit value or estimate with multiplier
@@ -398,6 +580,7 @@ class ChainClient:
 
             # Sign and send
             raw_tx = self._wallet.sign_transaction(tx)
+            send_called = True
             tx_hash = web3.eth.send_raw_transaction(raw_tx)
 
             logger.debug("Transaction sent: %s", tx_hash.hex())
@@ -476,6 +659,34 @@ class ChainClient:
             tx_hash_str = None
             if "tx_hash" in dir():
                 tx_hash_str = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
+            elif send_called:
+                # The send raised before it returned the hash: the hash of
+                # the signed bytes is the same value
+                tx_hash_str = _signed_tx_hash(raw_tx)
+            # Transport only: connection, timeout, or an answer that is not
+            # JSON-RPC. A JSON-RPC error answer means the node answered. A
+            # receipt-wait timeout keeps its own handling.
+            if _is_rpc_failure(e) and not _is_rpc_rejection(e) and not _is_receipt_timeout(e):
+                if not send_called:
+                    raise ChainConnectionError(
+                        f"The RPC endpoint failed before the transaction was sent: {reason}",
+                        rpc_url=self._provider.rpc_url,
+                    ) from e
+                # The transaction may have been broadcast: do not sign or
+                # send a new one, and do not report it as failed
+                raise TransactionOutcomeUnknownError(
+                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} was "
+                    f"sent, but the connection to the RPC failed, so its outcome is "
+                    f"unknown: {reason}",
+                    tx_hash=tx_hash_str,
+                    event_name=expected_event,
+                    expected_count=expected_count,
+                    contract_address=self._contract.address,
+                    explorer_url=(
+                        self._provider.get_explorer_tx_url(tx_hash_str) if tx_hash_str else None
+                    ),
+                    reason=reason,
+                ) from e
             # No "Transaction failed:" prefix: the CLI adds its own
             raise ChainTransactionError(reason, tx_hash=tx_hash_str) from e
 
@@ -488,6 +699,7 @@ class ChainClient:
 
     # --- Write operations ---
 
+    @_write_method
     def anchor(
         self,
         swarm_hash: str,
@@ -566,6 +778,7 @@ class ChainClient:
             storage_ref=storage_ref,
         )
 
+    @_write_method
     def anchor_for(
         self,
         swarm_hash: str,
@@ -629,6 +842,7 @@ class ChainClient:
             storage_ref=storage_ref,
         )
 
+    @_write_method
     def batch_anchor(
         self,
         swarm_hashes: List[str],
@@ -671,6 +885,7 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    @_write_method
     def set_storage_ref(
         self,
         data_hash: str,
@@ -711,6 +926,7 @@ class ChainClient:
             storage_ref=storage_ref,
         )
 
+    @_read_method
     def get_by_storage_ref(
         self,
         storage_ref: str,
@@ -739,6 +955,7 @@ class ChainClient:
         data_hash = data_hash_bytes.hex()
         return self.get(data_hash, verbose=verbose)
 
+    @_write_method
     def transform(
         self,
         original_hash: str,
@@ -832,6 +1049,7 @@ class ChainClient:
             description=description,
         )
 
+    @_write_method
     def access(
         self,
         swarm_hash: str,
@@ -865,6 +1083,7 @@ class ChainClient:
             accessor=self._wallet.address,
         )
 
+    @_write_method
     def batch_access(
         self,
         swarm_hashes: List[str],
@@ -900,6 +1119,7 @@ class ChainClient:
             accessor=self._wallet.address,
         )
 
+    @_write_method
     def set_status(
         self,
         swarm_hash: str,
@@ -939,6 +1159,7 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    @_write_method
     def batch_set_status(
         self,
         swarm_hashes: List[str],
@@ -978,6 +1199,7 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    @_write_method
     def transfer_ownership(
         self,
         swarm_hash: str,
@@ -1015,6 +1237,7 @@ class ChainClient:
             owner=new_owner,
         )
 
+    @_write_method
     def set_delegate(
         self,
         delegate: str,
@@ -1053,6 +1276,7 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    @_write_method
     def merge_transform(
         self,
         source_hashes: List[str],
@@ -1107,6 +1331,7 @@ class ChainClient:
 
     # --- Read operations ---
 
+    @_read_method
     def get(
         self,
         swarm_hash: str,
@@ -1201,6 +1426,7 @@ class ChainClient:
             transformations=chain_transformations,
         )
 
+    @_read_method
     def verify(
         self,
         swarm_hash: str,
@@ -1208,6 +1434,10 @@ class ChainClient:
     ) -> bool:
         """
         Verify that a Swarm hash is registered on-chain.
+
+        This checks registration only: a RESTRICTED or DELETED record, or
+        one owned by any address, still returns True. Use get() to check
+        the record's status and owner.
 
         Args:
             swarm_hash: Swarm reference hash.
@@ -1222,6 +1452,7 @@ class ChainClient:
         except DataNotRegisteredError:
             return False
 
+    @_read_method
     def balance(self, verbose: bool = False) -> ChainWalletInfo:
         """
         Get wallet balance and chain info.
@@ -1251,6 +1482,7 @@ class ChainClient:
             contract_address=self._provider.contract_address,
         )
 
+    @_read_method
     def health_check(self, verbose: bool = False) -> bool:
         """
         Check if the chain provider is connected and healthy.
@@ -1280,6 +1512,7 @@ class ChainClient:
 
         return result
 
+    @_read_method
     def get_provenance_chain(
         self,
         swarm_hash: str,
@@ -1294,20 +1527,45 @@ class ChainClient:
         On v1 contracts, falls back to the cached event scan path.
         Falls back to per-node event scanning when the deploy block is unknown.
 
+        The walk fails closed: if any read fails, the call raises instead of
+        returning the nodes reached so far (#170).
+
         Args:
             swarm_hash: Starting Swarm reference hash.
-            max_depth: Maximum traversal depth. None means no limit (capped at 50).
+            max_depth: Maximum traversal depth, 0 to 50 (0 returns the start
+                node only). None means the default of 10. Nodes at
+                max_depth are returned but not expanded: their ``parents``
+                is None.
             verbose: Enable debug output.
 
         Returns:
             List of ChainProvenanceRecord forming the provenance chain,
-            starting with the given hash.
+            starting with the given hash, in breadth-first order. Each
+            expanded node carries its parent hashes in ``parents``. An
+            unregistered start hash returns an empty list.
+
+        Raises:
+            ChainValidationError: If max_depth is outside 0 to 50.
+            ChainConnectionError: If an RPC read fails during the walk.
+            ChainError: If another read fails during the walk, or a linked
+                hash reads as not registered.
         """
         logger.debug(
             "Get provenance chain: hash=%s max_depth=%s", swarm_hash, max_depth
         )
 
-        effective_max = max_depth if max_depth is not None else 50
+        if max_depth is None:
+            effective_max = DEFAULT_CHAIN_DEPTH
+        elif (
+            isinstance(max_depth, bool)
+            or not isinstance(max_depth, int)
+            or not 0 <= max_depth <= MAX_CHAIN_DEPTH
+        ):
+            raise ChainValidationError(
+                f"max_depth must be an integer from 0 to {MAX_CHAIN_DEPTH}, got {max_depth!r}"
+            )
+        else:
+            effective_max = max_depth
 
         # Detect contract version — state reads are much faster than event scans
         use_state_reads = False
@@ -1339,122 +1597,102 @@ class ChainClient:
                     redact_urls(str(e)),
                 )
 
+        def _hex(value) -> str:
+            return value.hex() if isinstance(value, bytes) else str(value)
+
+        # Child and parent hashes come back as lower-case hex without 0x.
+        # Key the start hash the same way, or it is visited twice and the
+        # event index misses its edges.
+        start_hash = swarm_hash
+        if isinstance(start_hash, str):
+            start_hash = start_hash.lower()
+            if start_hash.startswith("0x"):
+                start_hash = start_hash[2:]
+
         chain = []
         visited = set()
-        to_visit = [(swarm_hash, 0)]
+        to_visit = [(start_hash, 0)]
 
         while to_visit:
             current_hash, current_depth = to_visit.pop(0)
             if current_hash in visited:
                 continue
-            if current_depth > effective_max:
-                logger.debug("Depth limit reached at %d", current_depth)
-                continue
             visited.add(current_hash)
 
             try:
                 record = self.get(current_hash, verbose=verbose)
-            except DataNotRegisteredError:
-                logger.debug("Hash %s not registered, skipping", current_hash)
-                continue
+            except DataNotRegisteredError as e:
+                if current_depth == 0:
+                    logger.debug("Hash %s not registered", current_hash)
+                    continue
+                raise _traversal_error(current_hash, current_depth, e) from _traversal_cause(e)
+            except Exception as e:
+                logger.debug(
+                    "Record read failed for %s: %s", current_hash, redact_urls(str(e))
+                )
+                raise _traversal_error(current_hash, current_depth, e) from _traversal_cause(e)
 
-            if use_state_reads:
-                # V2 contract: state-based traversal
-                try:
+            # Nodes at the depth limit keep their child edges but are not
+            # expanded: parents are not read and stay None.
+            expand = current_depth < effective_max
+            parents = None
+            try:
+                if use_state_reads:
+                    # V2 contract: state-based traversal
                     links = self._contract.get_transformation_links(current_hash)
                     if links:
                         record.transformations = [
-                            ChainTransformation(
-                                description=desc,
-                                new_data_hash=(
-                                    nh.hex() if isinstance(nh, bytes) else str(nh)
-                                ),
-                            )
+                            ChainTransformation(description=desc, new_data_hash=_hex(nh))
                             for nh, desc in links
                         ]
-                        for nh, _ in links:
-                            nh_hex = nh.hex() if isinstance(nh, bytes) else str(nh)
-                            if nh_hex not in visited:
-                                to_visit.append((nh_hex, current_depth + 1))
-                except Exception as e:
-                    logger.warning(
-                        "State-based forward read failed for %s: %s",
-                        current_hash,
-                        redact_urls(str(e)),
-                    )
-                # Reverse: parents via state
-                try:
-                    parents = self._contract.get_transformation_parents(current_hash)
-                    for p in parents:
-                        p_hex = p.hex() if isinstance(p, bytes) else str(p)
-                        if p_hex not in visited:
-                            to_visit.append((p_hex, current_depth + 1))
-                except Exception as e:
-                    logger.warning(
-                        "State-based reverse read failed for %s: %s",
-                        current_hash,
-                        redact_urls(str(e)),
-                    )
-            elif use_local_index:
-                # V1 contract: use pre-built event cache index
-                fwd = forward.get(current_hash, [])
-                if fwd:
-                    record.transformations = [
-                        ChainTransformation(description=desc, new_data_hash=nh)
-                        for nh, desc in fwd
-                    ]
-                    for nh, _ in fwd:
-                        if nh not in visited:
-                            to_visit.append((nh, current_depth + 1))
-                # Reverse links (parents)
-                for orig_hex, _ in reverse.get(current_hash, []):
-                    if orig_hex not in visited:
-                        to_visit.append((orig_hex, current_depth + 1))
-            else:
-                # Per-node event scanning (fallback when deploy_block unknown)
-                try:
+                    children = [_hex(nh) for nh, _ in links]
+                    if expand:
+                        parents = [
+                            _hex(p)
+                            for p in self._contract.get_transformation_parents(current_hash)
+                        ]
+                elif use_local_index:
+                    # V1 contract: use pre-built event cache index
+                    fwd = forward.get(current_hash, [])
+                    if fwd:
+                        record.transformations = [
+                            ChainTransformation(description=desc, new_data_hash=nh)
+                            for nh, desc in fwd
+                        ]
+                    children = [nh for nh, _ in fwd]
+                    if expand:
+                        parents = [orig for orig, _ in reverse.get(current_hash, [])]
+                else:
+                    # Per-node event scanning (fallback when deploy_block unknown)
                     events = self._contract.get_transformations_from(current_hash)
-                    enriched = []
-                    for orig_bytes, new_bytes, desc in events:
-                        new_hash_hex = (
-                            new_bytes.hex()
-                            if isinstance(new_bytes, bytes)
-                            else str(new_bytes)
-                        )
-                        enriched.append(
-                            ChainTransformation(
-                                description=desc,
-                                new_data_hash=new_hash_hex,
-                            )
-                        )
-                        if new_hash_hex not in visited:
-                            to_visit.append((new_hash_hex, current_depth + 1))
+                    enriched = [
+                        ChainTransformation(description=desc, new_data_hash=_hex(new_bytes))
+                        for _, new_bytes, desc in events
+                    ]
                     if enriched:
                         record.transformations = enriched
-                except Exception as e:
-                    logger.warning("Event query failed for %s: %s", current_hash, redact_urls(str(e)))
-                    for t in record.transformations:
-                        if t.new_data_hash and t.new_data_hash not in visited:
-                            to_visit.append((t.new_data_hash, current_depth + 1))
-
-                try:
-                    reverse_events = self._contract.get_transformations_to(current_hash)
-                    for orig_bytes, new_bytes, desc in reverse_events:
-                        orig_hash = (
-                            orig_bytes.hex()
-                            if isinstance(orig_bytes, bytes)
-                            else str(orig_bytes)
-                        )
-                        if orig_hash not in visited:
-                            to_visit.append((orig_hash, current_depth + 1))
-                except Exception as e:
-                    logger.warning(
-                        "Reverse event query failed for %s: %s",
-                        current_hash,
-                        redact_urls(str(e)),
-                    )
+                    children = [t.new_data_hash for t in enriched]
+                    if expand:
+                        parents = [
+                            _hex(orig_bytes)
+                            for orig_bytes, _, _ in self._contract.get_transformations_to(current_hash)
+                        ]
+            except Exception as e:
+                logger.debug(
+                    "Link read failed for %s: %s", current_hash, redact_urls(str(e))
+                )
+                raise _traversal_error(current_hash, current_depth, e) from _traversal_cause(e)
 
             chain.append(record)
+
+            if not expand:
+                logger.debug("Depth limit reached at %d", current_depth)
+                continue
+
+            record.parents = list(dict.fromkeys(parents))
+            for next_hash in children + record.parents:
+                if next_hash not in visited:
+                    to_visit.append((next_hash, current_depth + 1))
 
         logger.debug("Chain length: %d", len(chain))
 

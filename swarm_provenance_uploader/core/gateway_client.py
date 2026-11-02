@@ -19,8 +19,8 @@ import unicodedata
 import uuid
 import warnings
 from contextlib import contextmanager
-from decimal import Decimal
-from typing import Callable, List, Optional, Tuple
+from decimal import Decimal, InvalidOperation
+from typing import Callable, List, Optional, Tuple, Union
 from urllib.parse import urljoin, urlparse
 
 from ..exceptions import (
@@ -32,7 +32,6 @@ from ..exceptions import (
     PaymentRejectedError,
     PaymentRequiredError,
     PaymentSettledNotDeliveredError,
-    PaymentTransactionFailedError,
     StampPurchasePendingError,
     PoolNotEnabledError,
     PoolEmptyError,
@@ -71,6 +70,53 @@ def is_valid_idempotency_key(key: str) -> bool:
     return 0 < len(key) <= 255 and key.isascii() and key.isprintable()
 
 
+# A plain decimal or scientific number in ASCII digits. Decimal() also accepts
+# underscores (0_30 is 30) and non-ASCII digits, so a typo could raise the limit.
+_AUTO_PAY_LIMIT_RE = re.compile(r"\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\s*", re.ASCII)
+
+
+def parse_auto_pay_limit(limit) -> Decimal:
+    """
+    The auto-pay limit (USD) as an exact Decimal.
+
+    A float is converted through its shortest decimal form, so 0.30 becomes
+    Decimal("0.30") and a payment of exactly 0.30 USDC is within the limit.
+    Text must be a plain decimal or scientific number in ASCII digits
+    (surrounding whitespace allowed): no underscores, no other digits.
+
+    Raises:
+        ValueError: If the limit is not a number, or is NaN, infinite or negative.
+    """
+    try:
+        if isinstance(limit, bool) or limit is None:  # True would read as 1
+            raise TypeError
+        text = str(limit)
+        if not _AUTO_PAY_LIMIT_RE.fullmatch(text):
+            raise ValueError
+        value = Decimal(text)
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValueError(f"x402_max_auto_pay_usd must be a number, got {limit!r}") from None
+    if not value.is_finite() or value < 0:
+        raise ValueError(
+            f"x402_max_auto_pay_usd must be a finite number of 0 or more, got {limit!r}")
+    return value.copy_abs()  # exact (abs() rounds to 28 digits); -0.0 becomes 0
+
+
+def format_auto_pay_limit(limit: Decimal, places: int = 6) -> str:
+    """
+    The auto-pay limit as text, without the Decimal context's rounding.
+
+    `places` decimals below 1e15, or every decimal digit when `places` would
+    round the limit (0.2999999 is not shown as 0.300000); from 1e15, every
+    digit in scientific notation (1E+30), so a huge limit neither fails nor
+    prints hundreds of digits.
+    """
+    if limit and limit.adjusted() >= 15:
+        return f"{limit:E}"
+    text = f"{limit:.{places}f}"
+    return text if Decimal(text) == limit else f"{limit:f}"
+
+
 def _is_loopback_host(host: str) -> bool:
     if host == "localhost":
         return True
@@ -102,6 +148,14 @@ def _sanitize_gateway_text(text: Optional[str], limit: int = 80) -> Optional[str
     if len(text) > limit:
         text = text[: limit - 1] + "…"
     return text or None
+
+
+def _gateway_identifier(value) -> Optional[str]:
+    """A gateway-sent identifier (transaction, nonce) cleaned for the payment report.
+
+    Values that are not strings are ignored (None), so the caller's own value is kept.
+    """
+    return _sanitize_gateway_text(value) if isinstance(value, str) else None
 
 
 class GatewayClient:
@@ -143,7 +197,7 @@ class GatewayClient:
         x402_private_key: Optional[str] = None,
         x402_network: str = "base-sepolia",
         x402_auto_pay: bool = False,
-        x402_max_auto_pay_usd: float = 1.00,
+        x402_max_auto_pay_usd: Union[float, int, str, Decimal] = 1.00,
         x402_payment_callback: Optional[Callable[..., bool]] = None,
         free_tier: bool = False,
         x402_on_payment_sent: Optional[Callable[[dict], None]] = None,
@@ -164,6 +218,9 @@ class GatewayClient:
             x402_max_auto_pay_usd: Maximum auto-pay amount in USD. With auto-pay
                                    and no callback this is a hard cap: a larger
                                    amount is refused before anything is signed.
+                                   Compared exactly, as the decimal value
+                                   written (0.30 allows 0.30 USDC). Must be
+                                   finite and not negative.
             x402_payment_callback: Optional callback for payment confirmation,
                                    asked for any amount not auto-paid.
                                    Called with (amount_usd, description) -> bool;
@@ -189,6 +246,10 @@ class GatewayClient:
                                    mistake, not a bug). Defaults to whether
                                    idempotency_key was passed.
 
+        Raises:
+            ValueError: If x402_max_auto_pay_usd is not a number, or is NaN,
+                        infinite or negative.
+
         Warns:
             InsecureGatewayWarning: If x402 is enabled and the gateway URL is
                                     plain http on a non-loopback host.
@@ -202,7 +263,7 @@ class GatewayClient:
         self._x402_private_key = x402_private_key  # gitleaks:allow (a variable name, not a key)
         self._x402_network = x402_network
         self._x402_auto_pay = x402_auto_pay
-        self._x402_max_auto_pay_usd = x402_max_auto_pay_usd
+        self._x402_max_auto_pay_usd = parse_auto_pay_limit(x402_max_auto_pay_usd)
         self._x402_payment_callback = x402_payment_callback
         self._x402_on_payment_sent = x402_on_payment_sent
         self._x402_expected_pay_to = x402_expected_pay_to
@@ -247,7 +308,7 @@ class GatewayClient:
         return urljoin(self.base_url + "/", path.lstrip("/"))
 
     def _should_auto_pay(self, amount_usd) -> bool:
-        """Check if amount (USD, float or Decimal) is within auto-pay limit."""
+        """Check if amount (USD, float or Decimal) is within the exact auto-pay limit."""
         return bool(self._x402_auto_pay and amount_usd <= self._x402_max_auto_pay_usd)
 
     def _handle_402_response(
@@ -353,8 +414,9 @@ class GatewayClient:
         requirements = x402_client.parse_402_response(body)
         option = x402_client.select_payment_option(requirements)
         amount_usd = x402_client.format_amount_usd(option.maxAmountRequired)
-        # Exact, and no float overflow for an absurdly long amount
-        amount_float = Decimal(int(option.maxAmountRequired)).scaleb(-6)
+        # Exact, and no float overflow for an absurdly long amount. Built from
+        # a string: scaleb() would round to the 28-digit Decimal context (#152).
+        amount_float = Decimal(f"{int(option.maxAmountRequired)}E-6")
 
         if verbose:
             print(f"DEBUG: Selected payment option: {amount_usd} on {option.network}")
@@ -372,7 +434,7 @@ class GatewayClient:
                 # hard cap, so refuse before anything is signed.
                 raise PaymentRequiredError(
                     f"Payment of {amount_usd} exceeds the auto-pay limit of "
-                    f"${self._x402_max_auto_pay_usd:.6f}; nothing was signed. "
+                    f"${format_auto_pay_limit(self._x402_max_auto_pay_usd)}; nothing was signed. "
                     "Raise the limit or confirm the payment interactively.",
                     payment_options=[option.model_dump()],
                 )
@@ -490,7 +552,9 @@ class GatewayClient:
 
         Raises:
             PaymentRequiredError: If payment required but not configured/confirmed
-            PaymentTransactionFailedError: If payment was signed but on-chain tx failed
+            PaymentOutcomeUnknownError: If the payment may have been taken but the
+                result is not known, including a success whose payment receipt
+                says the payment failed
         """
         response = requests.request(method, url, **kwargs)
         response.x402_payment = None
@@ -569,31 +633,25 @@ class GatewayClient:
             if verbose:
                 print(f"DEBUG: Paid request status: {response.status_code}")
 
-            # Check x-payment-response header to verify payment actually succeeded
+            # The payment receipt (X-PAYMENT-RESPONSE). The gateway sends it only
+            # after a successful settlement and never falls back to the free
+            # tier, so a receipt that says success:false contradicts the answer
+            # it came with: what happened to the payment is unknown (#143).
             payment_result = self._parse_payment_response(response, verbose)
-            if payment_result:
-                if not payment_result.success and outstanding is not None:
-                    # This attempt failed on-chain; an earlier one may not have.
+            if payment_result and not payment_result.success:
+                if outstanding is not None:
+                    # This attempt failed; an earlier one may not have.
                     raise unknown("A retry's payment failed, which does not say what happened "
                                   "to an earlier attempt.")
-                if not payment_result.success:
-                    # Payment was signed but the on-chain transaction failed
-                    # Gateway may have fallen back to free tier
-                    error_msg = (
-                        f"Payment transaction failed: {payment_result.errorReason or 'unknown error'}. "
-                        "The gateway may have used free tier instead."
-                    )
-                    if verbose:
-                        print(f"WARNING: {error_msg}")
-                    raise PaymentTransactionFailedError(
-                        error_msg,
-                        error_reason=payment_result.errorReason,
-                        payer=payment_result.payer,
-                    )
-                else:
-                    if verbose:
-                        tx_hash = payment_result.transaction or "pending"
-                        print(f"DEBUG: Payment successful, tx: {tx_hash}")
+                outstanding = payment
+                reason = _sanitize_gateway_text(payment_result.errorReason, limit=100) or "no reason given"
+                raise unknown(
+                    f"The gateway answered HTTP {response.status_code}, but its payment receipt "
+                    f"says the payment failed ({reason}). The two contradict each other."
+                )
+            if payment_result and verbose:
+                tx_hash = payment_result.transaction or "pending"
+                print(f"DEBUG: Payment successful, tx: {tx_hash}")
 
             payment["transaction"] = self._payment_transaction(response, payment_result)
             response.x402_payment = payment
@@ -711,17 +769,17 @@ class GatewayClient:
                 if isinstance(item, dict):
                     loc = ".".join(str(part) for part in item.get("loc") or [])
                     msg = str(item.get("msg") or "invalid")
-                    # Each field bounded, so "and N more" survives the limit below
-                    fields.append(_sanitize_gateway_text(f"{loc}: {msg}" if loc else msg, limit=60))
+                    # Each field message in full (#193); only the list as a whole is cut.
+                    fields.append(_sanitize_gateway_text(f"{loc}: {msg}" if loc else msg,
+                                                         limit=cls._GATEWAY_MESSAGE_LIMIT))
             if fields:
-                listed = "; ".join(fields)
                 more = len(detail) - cls._MAX_VALIDATION_ERRORS_SHOWN
-                if more > 0:
-                    listed += f"; and {more} more"
-                if message:
-                    message = f"{_sanitize_gateway_text(message, limit=100)} ({listed})"
-                else:
-                    message = listed
+                suffix = f"; and {more} more" if more > 0 else ""
+                head = _sanitize_gateway_text(message, limit=100) if message else None
+                # Leave room for the head and "; and N more" within the limit below.
+                room = cls._GATEWAY_MESSAGE_LIMIT - len(suffix) - (len(head) + 3 if head else 0)
+                listed = _sanitize_gateway_text("; ".join(fields), limit=max(room, 20)) + suffix
+                message = f"{head} ({listed})" if head else listed
 
         return (_sanitize_gateway_text(code, limit=64),
                 _sanitize_gateway_text(message, limit=cls._GATEWAY_MESSAGE_LIMIT))
@@ -835,11 +893,31 @@ class GatewayClient:
         response: requests.Response,
         payment_result: Optional[X402PaymentResponse],
     ) -> Optional[str]:
-        """The settlement transaction hash, from the header or the payment response."""
-        tx = response.headers.get("X-Payment-Transaction")
+        """The settlement transaction hash, from the header or the payment response.
+
+        Gateway-authored and printed in the payment report, so it is cleaned (#151).
+        """
+        tx = _gateway_identifier(response.headers.get("X-Payment-Transaction"))
         if not tx and payment_result:
-            tx = payment_result.transaction
+            tx = _gateway_identifier(payment_result.transaction)
         return tx if tx and tx != "unknown" else None
+
+    @staticmethod
+    def _require_reference(data, response: requests.Response, what: str) -> str:
+        """
+        The Swarm reference of a 2xx upload answer (#143).
+
+        A success without a reference stored nothing the caller can find, so
+        it is an error: a ConnectionError here, which `_reading_paid_result`
+        turns into PaymentSettledNotDeliveredError when a payment was sent.
+        """
+        reference = data.get("reference") if isinstance(data, dict) else None
+        if not isinstance(reference, str) or not reference.strip():
+            raise ConnectionError(
+                f"Failed to {what}: the gateway answered HTTP {response.status_code} "
+                "but sent no Swarm reference."
+            )
+        return reference.strip()
 
     @staticmethod
     def _error_body(response: requests.Response) -> dict:
@@ -897,11 +975,14 @@ class GatewayClient:
         key = payment.get("idempotency_key")
         first = dict(outstanding or payment)
         first["idempotency_key"] = key
-        transaction = body.get("transaction") or response.headers.get("X-Payment-Transaction")
+        # Gateway-authored, printed in the do-not-re-run report: cleaned (#151)
+        transaction = (_gateway_identifier(body.get("transaction"))
+                       or _gateway_identifier(response.headers.get("X-Payment-Transaction")))
         transaction = transaction if transaction and transaction != "unknown" else None
 
         if code == "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN":
-            first.update(nonce=body.get("nonce") or first.get("nonce"), transaction=None,
+            first.update(nonce=_gateway_identifier(body.get("nonce")) or first.get("nonce"),
+                         transaction=None,
                          valid_before=first.get("valid_before") if outstanding else None)
             raise PaymentOutcomeUnknownError(
                 "The first request with this Idempotency-Key was sent for settlement and no "
@@ -1150,12 +1231,15 @@ class GatewayClient:
         """
         body = self._error_body(response)
         payment = dict(getattr(response, "x402_payment", None) or {})
-        payment["transaction"] = body.get("transaction") or payment.get("transaction")
+        # Gateway-authored text, printed in the payment report: cleaned (#151)
+        payment["transaction"] = _gateway_identifier(body.get("transaction")) or payment.get("transaction")
+        label = body.get("label")
+        depth = body.get("depth")
         raise StampPurchasePendingError(
-            body.get("message")
+            _sanitize_gateway_text(body.get("message"), limit=300)
             or "Payment received, but the stamp purchase is not confirmed yet.",
-            label=body.get("label"),
-            depth=body.get("depth"),
+            label=_sanitize_gateway_text(label, limit=64) if isinstance(label, str) else label,
+            depth=depth if isinstance(depth, int) and not isinstance(depth, bool) else None,
             lookup=body.get("lookup"),
             status_code=response.status_code,
             code=body.get("code"),
@@ -1197,23 +1281,53 @@ class GatewayClient:
                 print(f"ERROR: Get stamp failed: {e}")
             raise ConnectionError(f"Failed to get stamp {stamp_id}: {e}") from e
 
-    def extend_stamp(self, stamp_id: str, amount: int, verbose: bool = False) -> str:
+    def extend_stamp(
+        self,
+        stamp_id: str,
+        amount: Optional[int] = None,
+        verbose: bool = False,
+        duration_hours: Optional[int] = None,
+    ) -> str:
         """
-        Extend an existing stamp by adding funds.
+        Extend an existing stamp.
+
+        The gateway charges for an extension like a purchase (x402, or the
+        free tier), and with x402 on it extends a stamp registered to a payer
+        only for a paid request from that payer. The request goes through
+        _make_paid_request, so a 402 is paid with this client's x402 settings
+        and Idempotency-Key.
 
         Args:
             stamp_id: The stamp batch ID to extend
-            amount: Amount of BZZ to add
+            amount: Legacy - PLUR per chunk to add (use duration_hours instead).
+                    The gateway refuses an amount worth less than 24 hours.
             verbose: Enable debug output
+            duration_hours: Hours to add (min 24). If neither this nor amount
+                            is given, the gateway adds its default (25 hours).
 
         Returns:
             The batch ID of the extended stamp.
+
+        Raises:
+            ValueError: Bad stamp ID, both amount and duration_hours given,
+                        amount not greater than 0, or duration_hours below
+                        24. Nothing is sent.
         """
         from .file_utils import is_stamp_id
         if not is_stamp_id(stamp_id):
             raise ValueError(f"Not a stamp ID (64 hex characters): {stamp_id!r}")
+        if amount is not None and duration_hours is not None:
+            raise ValueError("Give amount or duration_hours, not both.")
+        if amount is not None and amount <= 0:
+            raise ValueError(f"amount must be greater than 0, got {amount}.")
+        if duration_hours is not None and duration_hours < 24:
+            raise ValueError(f"duration_hours must be at least 24, got {duration_hours}.")
         url = self._make_url(f"/api/v1/stamps/{stamp_id.lower()}/extend")
-        payload = {"amount": amount}
+        payload = {}
+        if duration_hours is not None:
+            payload["duration_hours"] = duration_hours
+        if amount is not None:
+            payload["amount"] = amount
 
         if verbose:
             print(f"--- DEBUG: Extend Stamp ---")
@@ -1221,14 +1335,19 @@ class GatewayClient:
             print(f"Payload: {payload}")
 
         try:
-            response = requests.patch(
-                url, json=payload, headers=self._get_headers(), timeout=60
+            response = self._make_paid_request(
+                "PATCH",
+                url,
+                json=payload,
+                headers=self._get_headers(),
+                timeout=self.PAID_REQUEST_TIMEOUT,
+                verbose=verbose,
             )
             if verbose:
                 print(f"DEBUG: Extend stamp status: {response.status_code}")
             self._raise_for_gateway_error(response)
-            data = response.json()
-            result = StampExtensionResponse.model_validate(data)
+            with self._reading_paid_result(response):
+                result = StampExtensionResponse.model_validate(response.json())
             if verbose:
                 print(f"DEBUG: Extended stamp ID: {result.batchID}")
             return result.batchID
@@ -1290,10 +1409,12 @@ class GatewayClient:
                 print(f"DEBUG: Upload status: {response.status_code}")
             self._raise_for_gateway_error(response)
             with self._reading_paid_result(response):
-                result = DataUploadResponse.model_validate(response.json())
+                data = response.json()
+                reference = self._require_reference(data, response, "upload data")
+                DataUploadResponse.model_validate(data)
             if verbose:
-                print(f"DEBUG: Upload reference: {result.reference}")
-            return result.reference
+                print(f"DEBUG: Upload reference: {reference}")
+            return reference
         except requests.exceptions.RequestException as e:
             if verbose:
                 print(f"ERROR: Upload failed: {e}")
@@ -1476,7 +1597,7 @@ class GatewayClient:
         Raises:
             PoolNotEnabledError: If pool is not enabled on this gateway
         """
-        url = self._make_url("/api/v1/pool/stamps")
+        url = self._make_url("/api/v1/pool/available")
         if verbose:
             print(f"--- DEBUG: List Pool Stamps ---")
             print(f"URL: GET {url}")
@@ -1491,8 +1612,9 @@ class GatewayClient:
 
             self._raise_for_gateway_error(response)
             data = response.json()
-            # Response contains {"stamps": [...], "count": n}
-            stamps_data = data.get("stamps", data)
+            # The gateway answers with a bare list; older shapes wrapped it
+            # as {"stamps": [...], "count": n}.
+            stamps_data = data.get("stamps", data) if isinstance(data, dict) else data
             if isinstance(stamps_data, list):
                 return [PoolStampInfo.model_validate(item) for item in stamps_data]
             return []
@@ -1726,6 +1848,8 @@ class GatewayClient:
             NotaryNotEnabledError: If notary is not enabled
             NotaryNotConfiguredError: If notary is enabled but not configured
             InvalidDocumentFormatError: If document is not valid JSON or missing 'data' field
+            ValueError: If the gateway does not accept the `sign` option
+            ConnectionError: If the request fails, or the gateway sends no reference
         """
         url = self._make_url("/api/v1/data/")
         params = {
@@ -1763,40 +1887,34 @@ class GatewayClient:
             if verbose:
                 print(f"DEBUG: Upload with signing status: {response.status_code}")
 
-            # Handle specific error codes
+            # Notary refusals. The code and message are read the same way as
+            # for any gateway error: top level (current gateways) or under
+            # `detail` (older ones), so the message is text, never a dict (#194).
             if response.status_code == 400:
-                try:
-                    error_data = response.json()
-                    error_code = error_data.get("code", "")
-                    error_message = error_data.get("detail", str(error_data))
-
-                    if error_code == "NOTARY_NOT_ENABLED":
-                        raise NotaryNotEnabledError(
-                            "Notary signing is not enabled on this gateway."
-                        )
-                    elif error_code == "NOTARY_NOT_CONFIGURED":
-                        raise NotaryNotConfiguredError(
-                            "Notary is enabled but not fully configured on this gateway."
-                        )
-                    elif error_code == "INVALID_DOCUMENT_FORMAT":
-                        raise InvalidDocumentFormatError(
-                            f"Invalid document format: {error_message}"
-                        )
-                    elif error_code == "INVALID_SIGN_OPTION":
-                        raise ValueError(f"Invalid sign option: {error_message}")
-                except (ValueError, KeyError):
-                    pass  # Fall through to _raise_for_gateway_error
+                error_code, error_message = self._gateway_error(response)
+                if error_code == "NOTARY_NOT_ENABLED":
+                    raise NotaryNotEnabledError(
+                        "Notary signing is not enabled on this gateway."
+                    )
+                if error_code == "NOTARY_NOT_CONFIGURED":
+                    raise NotaryNotConfiguredError(
+                        "Notary is enabled but not fully configured on this gateway."
+                    )
+                if error_code == "INVALID_DOCUMENT_FORMAT":
+                    raise InvalidDocumentFormatError(
+                        f"Invalid document format: {error_message or 'no reason given'}"
+                    )
+                if error_code == "INVALID_SIGN_OPTION":
+                    raise ValueError(error_message or f"Invalid sign option: {sign}")
 
             self._raise_for_gateway_error(response)
             with self._reading_paid_result(response):
                 data_response = response.json()
 
                 # Build response - gateway may return signed_document or just reference
-                reference = data_response.get("reference", "")
+                reference = self._require_reference(data_response, response, "upload data with signing")
                 signed_doc = data_response.get("signed_document")
                 message = data_response.get("message")
-                if response.x402_payment and not reference:
-                    raise ValueError("no reference in the response")
 
             if verbose:
                 print(f"DEBUG: Upload reference: {reference}")
@@ -1824,7 +1942,7 @@ class GatewayClient:
         validate_stamp: bool = True,
         deferred: bool = False,
         include_timing: bool = False,
-        redundancy: bool = False,
+        redundancy: Optional[int] = None,
         verbose: bool = False,
     ) -> ManifestUploadResponse:
         """Upload a TAR archive as a Swarm manifest.
@@ -1838,12 +1956,20 @@ class GatewayClient:
             validate_stamp: Whether to validate stamp before upload.
             deferred: Use deferred upload mode.
             include_timing: Include timing breakdown in response.
-            redundancy: Enable redundancy for the upload.
+            redundancy: Erasure coding level 0-4. None sends no level, and the
+                gateway uses its default (2).
             verbose: Enable debug output.
 
         Returns:
             ManifestUploadResponse with reference and file count.
+
+        Raises:
+            ValueError: If redundancy is not an integer from 0 to 4.
         """
+        if redundancy is not None and (
+            isinstance(redundancy, bool) or not isinstance(redundancy, int) or not 0 <= redundancy <= 4
+        ):
+            raise ValueError(f"redundancy must be an integer from 0 to 4, not {redundancy!r}")
         url = self._make_url("/api/v1/data/manifest")
         params = {"stamp_id": stamp_id.lower()}
         if not validate_stamp:
@@ -1852,8 +1978,8 @@ class GatewayClient:
             params["deferred"] = "true"
         if include_timing:
             params["include_timing"] = "true"
-        if redundancy:
-            params["redundancy"] = "true"
+        if redundancy is not None:
+            params["redundancy"] = str(redundancy)
 
         if verbose:
             print(f"--- DEBUG: Upload Manifest ---")
@@ -1897,13 +2023,11 @@ class GatewayClient:
                     timing = ManifestUploadTiming.model_validate(data["timing"])
 
                 result = ManifestUploadResponse(
-                    reference=data.get("reference", ""),
+                    reference=self._require_reference(data, response, "upload manifest"),
                     file_count=data.get("file_count"),
                     message=data.get("message"),
                     timing=timing,
                 )
-                if response.x402_payment and not result.reference:
-                    raise ValueError("no reference in the response")
 
             if verbose:
                 print(f"DEBUG: Manifest reference: {result.reference}")
