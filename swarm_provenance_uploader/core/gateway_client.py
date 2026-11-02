@@ -1189,23 +1189,50 @@ class GatewayClient:
                 print(f"ERROR: Get stamp failed: {e}")
             raise ConnectionError(f"Failed to get stamp {stamp_id}: {e}") from e
 
-    def extend_stamp(self, stamp_id: str, amount: int, verbose: bool = False) -> str:
+    def extend_stamp(
+        self,
+        stamp_id: str,
+        amount: Optional[int] = None,
+        verbose: bool = False,
+        duration_hours: Optional[int] = None,
+    ) -> str:
         """
-        Extend an existing stamp by adding funds.
+        Extend an existing stamp.
+
+        The gateway charges for an extension like a purchase (x402, or the
+        free tier), and with x402 on it extends a stamp registered to a payer
+        only for a paid request from that payer. The request goes through
+        _make_paid_request, so a 402 is paid with this client's x402 settings
+        and Idempotency-Key.
 
         Args:
             stamp_id: The stamp batch ID to extend
-            amount: Amount of BZZ to add
+            amount: Legacy - PLUR per chunk to add (use duration_hours instead).
+                    The gateway refuses an amount worth less than 24 hours.
             verbose: Enable debug output
+            duration_hours: Hours to add (min 24). If neither this nor amount
+                            is given, the gateway adds its default (25 hours).
 
         Returns:
             The batch ID of the extended stamp.
+
+        Raises:
+            ValueError: Bad stamp ID, both amount and duration_hours given, or
+                        duration_hours below 24. Nothing is sent.
         """
         from .file_utils import is_stamp_id
         if not is_stamp_id(stamp_id):
             raise ValueError(f"Not a stamp ID (64 hex characters): {stamp_id!r}")
+        if amount is not None and duration_hours is not None:
+            raise ValueError("Give amount or duration_hours, not both.")
+        if duration_hours is not None and duration_hours < 24:
+            raise ValueError(f"duration_hours must be at least 24, got {duration_hours}.")
         url = self._make_url(f"/api/v1/stamps/{stamp_id.lower()}/extend")
-        payload = {"amount": amount}
+        payload = {}
+        if duration_hours is not None:
+            payload["duration_hours"] = duration_hours
+        if amount is not None:
+            payload["amount"] = amount
 
         if verbose:
             print(f"--- DEBUG: Extend Stamp ---")
@@ -1213,14 +1240,19 @@ class GatewayClient:
             print(f"Payload: {payload}")
 
         try:
-            response = requests.patch(
-                url, json=payload, headers=self._get_headers(), timeout=60
+            response = self._make_paid_request(
+                "PATCH",
+                url,
+                json=payload,
+                headers=self._get_headers(),
+                timeout=self.PAID_REQUEST_TIMEOUT,
+                verbose=verbose,
             )
             if verbose:
                 print(f"DEBUG: Extend stamp status: {response.status_code}")
             self._raise_for_gateway_error(response)
-            data = response.json()
-            result = StampExtensionResponse.model_validate(data)
+            with self._reading_paid_result(response):
+                result = StampExtensionResponse.model_validate(response.json())
             if verbose:
                 print(f"DEBUG: Extended stamp ID: {result.batchID}")
             return result.batchID
