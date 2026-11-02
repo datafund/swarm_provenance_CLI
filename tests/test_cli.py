@@ -4314,6 +4314,11 @@ class TestChainTransformAdditional:
 # UPLOAD-COLLECTION TESTS
 # =============================================================================
 
+def _usable_stamp(stamp_id, usable=True):
+    return StampDetails(batchID=stamp_id, usable=usable, exists=True, depth=17, amount="1",
+                        bucketDepth=16, immutableFlag=False, batchTTL=3600)
+
+
 class TestUploadCollectionCommand:
     """Tests for upload-collection command."""
 
@@ -4323,6 +4328,7 @@ class TestUploadCollectionCommand:
 
         mock_client = mocker.MagicMock()
         mock_client.purchase_stamp.return_value = DUMMY_STAMP
+        mock_client.get_stamp.return_value = _usable_stamp(DUMMY_STAMP)
         mock_client.upload_manifest.return_value = ManifestUploadResponse(
             reference=DUMMY_SWARM_REF,
             file_count=2,
@@ -4332,6 +4338,7 @@ class TestUploadCollectionCommand:
             "swarm_provenance_uploader.cli._get_gateway_client_with_x402",
             return_value=mock_client,
         )
+        mocker.patch("swarm_provenance_uploader.cli.time.sleep")
         return mock_client
 
     def test_upload_collection_success(self, mocker):
@@ -4497,7 +4504,7 @@ class TestUploadCollectionCommand:
             mock_client.upload_manifest.assert_called_once()
 
     def test_upload_collection_deferred_and_redundancy(self, mocker):
-        """Tests that --deferred and --redundancy flags are passed through."""
+        """Tests that --deferred and --redundancy LEVEL are passed through (#138)."""
         mock_client = self._mock_gateway_for_collection(mocker)
 
         with runner.isolated_filesystem():
@@ -4507,14 +4514,218 @@ class TestUploadCollectionCommand:
                 f.write("data")
 
             result = runner.invoke(
-                app, ["upload-collection", "mydir", "--deferred", "--redundancy"]
+                app, ["upload-collection", "mydir", "--deferred", "--redundancy", "3"]
             )
 
             assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
             # Verify flags were passed to upload_manifest
             call_kwargs = mock_client.upload_manifest.call_args
-            assert call_kwargs.kwargs.get("deferred") is True or call_kwargs[1].get("deferred") is True
-            assert call_kwargs.kwargs.get("redundancy") is True or call_kwargs[1].get("redundancy") is True
+            assert call_kwargs.kwargs.get("deferred") is True
+            assert call_kwargs.kwargs.get("redundancy") == 3
+
+    def test_upload_collection_no_redundancy_by_default(self, mocker):
+        """Tests that no redundancy level is passed without --redundancy (gateway default applies)."""
+        mock_client = self._mock_gateway_for_collection(mocker)
+
+        with runner.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/file.txt", "w") as f:
+                f.write("data")
+
+            result = runner.invoke(app, ["upload-collection", "mydir"])
+
+            assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
+            assert mock_client.upload_manifest.call_args.kwargs.get("redundancy") is None
+
+    @pytest.mark.parametrize("value", ["5", "-1", "high"])
+    def test_upload_collection_rejects_bad_redundancy(self, mocker, value):
+        """Tests that a redundancy level outside 0-4 is refused before a stamp is bought (#138)."""
+        mock_client = self._mock_gateway_for_collection(mocker)
+
+        with runner.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/file.txt", "w") as f:
+                f.write("data")
+
+            result = runner.invoke(app, ["upload-collection", "mydir", "--redundancy", value])
+
+            assert result.exit_code == 2
+            mock_client.purchase_stamp.assert_not_called()
+            mock_client.upload_manifest.assert_not_called()
+
+    def test_upload_collection_bare_redundancy_is_rejected(self, mocker):
+        """Tests that --redundancy without a level is a usage error, not a silent default (#138)."""
+        mock_client = self._mock_gateway_for_collection(mocker)
+
+        with runner.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/file.txt", "w") as f:
+                f.write("data")
+
+            result = runner.invoke(app, ["upload-collection", "mydir", "--redundancy"])
+
+            assert result.exit_code == 2
+            mock_client.purchase_stamp.assert_not_called()
+            mock_client.upload_manifest.assert_not_called()
+
+    def test_upload_collection_waits_for_usable_stamp(self, mocker):
+        """Tests that the collection is uploaded only after the stamp is usable (#138)."""
+        mock_client = self._mock_gateway_for_collection(mocker)
+        events = []
+        stamps = iter([_usable_stamp(DUMMY_STAMP, usable=False), _usable_stamp(DUMMY_STAMP)])
+
+        def get_stamp(*args, **kwargs):
+            events.append("get_stamp")
+            return next(stamps)
+
+        def upload_manifest(*args, **kwargs):
+            events.append("upload_manifest")
+            return self._manifest_response()
+
+        mock_client.get_stamp.side_effect = get_stamp
+        mock_client.upload_manifest.side_effect = upload_manifest
+
+        with runner.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/file.txt", "w") as f:
+                f.write("data")
+
+            result = runner.invoke(app, ["upload-collection", "mydir", "--stamp-interval", "0"])
+
+            assert result.exit_code == 0, f"CLI Failed: {result.output}"
+            assert events == ["get_stamp", "get_stamp", "upload_manifest"]
+            assert "Waiting for stamp to become usable" in result.output
+            assert "Checking stamp usability (attempt 2/12)... OK" in result.output
+
+    @pytest.mark.parametrize("args,message", [
+        ([], "Waiting for stamp to become usable"),
+        (["--stamp-id", DUMMY_STAMP], "Verifying stamp is usable..."),
+        (["--usePool"], "Verifying pooled stamp is usable..."),
+    ])
+    def test_upload_collection_checks_stamp_for_each_source(self, mocker, args, message):
+        """Tests that bought, existing and pooled stamps are all checked before upload (#138)."""
+        mock_client = self._mock_gateway_for_collection(mocker)
+        mock_client.acquire_stamp_from_pool.return_value = mocker.MagicMock(
+            batch_id=DUMMY_STAMP, fallback_used=False,
+        )
+
+        with runner.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/file.txt", "w") as f:
+                f.write("data")
+
+            result = runner.invoke(app, ["upload-collection", "mydir", *args])
+
+            assert result.exit_code == 0, f"CLI Failed: {result.output}"
+            assert message in result.output
+            mock_client.get_stamp.assert_called_with(DUMMY_STAMP, verbose=False)
+
+    def test_upload_collection_stamp_never_usable(self, mocker):
+        """Tests that no upload happens and the bought stamp is offered for reuse when it never becomes usable."""
+        mock_client = self._mock_gateway_for_collection(mocker)
+        mock_client.get_stamp.return_value = _usable_stamp(DUMMY_STAMP, usable=False)
+
+        with runner.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/file.txt", "w") as f:
+                f.write("data")
+
+            result = runner.invoke(
+                app, ["upload-collection", "mydir", "--stamp-retries", "2", "--stamp-interval", "0"]
+            )
+
+            assert result.exit_code == 1
+            assert f"Stamp {DUMMY_STAMP} did not become USABLE after 2 retries." in result.output
+            assert mock_client.get_stamp.call_count == 2
+            mock_client.upload_manifest.assert_not_called()
+            assert f"--stamp-id {DUMMY_STAMP}" in result.output
+
+    @pytest.mark.parametrize("args", [
+        ["--stamp-retries", "0"], ["--stamp-retries", "-1"], ["--stamp-interval", "-1"],
+    ])
+    def test_upload_collection_rejects_bad_stamp_check_values(self, mocker, args):
+        """Tests that a retry count below 1 or a negative interval is a usage error, before a stamp is bought."""
+        mock_client = self._mock_gateway_for_collection(mocker)
+
+        with runner.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/file.txt", "w") as f:
+                f.write("data")
+
+            result = runner.invoke(app, ["upload-collection", "mydir", *args])
+
+            assert result.exit_code == 2
+            mock_client.purchase_stamp.assert_not_called()
+            mock_client.upload_manifest.assert_not_called()
+
+    @pytest.mark.parametrize("failure", [
+        "purchase_error", "pool_not_enabled", "pool_error", "payment_required",
+        "payment_outcome_unknown", "never_usable", "upload_error", "tar_error",
+    ])
+    def test_upload_collection_removes_temp_tar_on_failure(self, mocker, tmp_path, failure):
+        """Tests that the temp folder with the TAR is removed on every exit after it is created."""
+        mock_client = self._mock_gateway_for_collection(mocker)
+        temp_dir = tmp_path / "collection-tmp"
+        temp_dir.mkdir()
+        mocker.patch("tempfile.mkdtemp", return_value=str(temp_dir))
+        args = []
+        if failure == "purchase_error":
+            mock_client.purchase_stamp.side_effect = ConnectionError("nope")
+        elif failure == "pool_not_enabled":
+            mock_client.acquire_stamp_from_pool.side_effect = exceptions.PoolNotEnabledError("off")
+            args = ["--usePool"]
+        elif failure == "pool_error":
+            mock_client.acquire_stamp_from_pool.side_effect = ConnectionError("nope")
+            args = ["--usePool"]
+        elif failure == "payment_required":
+            mock_client.purchase_stamp.side_effect = exceptions.PaymentRequiredError("pay")
+        elif failure == "payment_outcome_unknown":
+            mock_client.purchase_stamp.side_effect = exceptions.PaymentOutcomeUnknownError("timed out")
+        elif failure == "never_usable":
+            mock_client.get_stamp.return_value = _usable_stamp(DUMMY_STAMP, usable=False)
+            args = ["--stamp-retries", "1"]
+        elif failure == "upload_error":
+            mock_client.upload_manifest.side_effect = ConnectionError("nope")
+        elif failure == "tar_error":
+            mocker.patch("swarm_provenance_uploader.cli.file_utils.create_tar_from_directory",
+                         side_effect=OSError("disk full"))
+
+        data_dir = tmp_path / "mydir"
+        data_dir.mkdir()
+        (data_dir / "file.txt").write_text("data")
+
+        result = runner.invoke(app, ["upload-collection", str(data_dir), *args])
+
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(result.exception, SystemExit), result.exception
+        assert not temp_dir.exists()
+
+    def test_upload_collection_removes_temp_tar_on_success(self, mocker, tmp_path):
+        """Tests that the temp folder with the TAR is removed after a successful upload."""
+        self._mock_gateway_for_collection(mocker)
+        temp_dir = tmp_path / "collection-tmp"
+        temp_dir.mkdir()
+        mocker.patch("tempfile.mkdtemp", return_value=str(temp_dir))
+        data_dir = tmp_path / "mydir"
+        data_dir.mkdir()
+        (data_dir / "file.txt").write_text("data")
+
+        result = runner.invoke(app, ["upload-collection", str(data_dir)])
+
+        assert result.exit_code == 0, result.output
+        assert not temp_dir.exists()
+
+    @staticmethod
+    def _manifest_response():
+        from swarm_provenance_uploader.models import ManifestUploadResponse
+        return ManifestUploadResponse(reference=DUMMY_SWARM_REF, file_count=1, message="ok")
 
 
 class TestChainGasLimitFlag:
@@ -4982,6 +5193,7 @@ class TestPaymentOutcomeReporting:
         (tmp_path / "a.txt").write_text("a")
         mock_client = mocker.MagicMock()
         mock_client.purchase_stamp.return_value = DUMMY_STAMP
+        mock_client.get_stamp.return_value = _usable_stamp(DUMMY_STAMP)
         mock_client.upload_manifest.side_effect = exceptions.PaymentOutcomeUnknownError(
             "The paid request failed with HTTP 502.", status_code=502, **self.PAYMENT,
         )
@@ -5379,6 +5591,17 @@ class TestStampIdVisibility:
         assert result.exit_code == 1
         assert "may have been taken" in result.output
         assert f"--stamp-id {self.STAMP}" in result.output
+
+    @pytest.mark.parametrize("args", [
+        ["--stamp-retries", "0"], ["--stamp-retries", "-1"], ["--stamp-interval", "-1"],
+    ])
+    def test_upload_rejects_bad_stamp_check_values(self, mocker, args):
+        """Tests that a retry count below 1 or a negative interval is a usage error, before a stamp is bought."""
+        client = self._client(mocker)
+        result = self._upload(*args)
+        assert result.exit_code == 2
+        client.purchase_stamp.assert_not_called()
+        client.upload_data.assert_not_called()
 
     def test_stamp_never_usable_gives_hint(self, mocker):
         self._client(mocker, usable=False)

@@ -455,8 +455,8 @@ swarm-prov-upload upload-collection /path/to/directory --usePool
 # JSON output with provenance metadata
 swarm-prov-upload upload-collection /path/to/directory --json
 
-# With existing stamp, deferred upload, and redundancy
-swarm-prov-upload upload-collection /path/to/directory --stamp-id <id> --deferred --redundancy
+# With existing stamp, deferred upload, and redundancy level 3
+swarm-prov-upload upload-collection /path/to/directory --stamp-id <id> --deferred --redundancy 3
 ```
 
 **Collection Options:**
@@ -468,7 +468,9 @@ swarm-prov-upload upload-collection /path/to/directory --stamp-id <id> --deferre
 | `--stamp-id`, `-s` | Use existing stamp (skip purchase) |
 | `--usePool` | Acquire stamp from pool (faster) |
 | `--deferred` | Deferred upload — the gateway returns immediately and processes the upload in the background. Useful for large collections. |
-| `--redundancy` | Stores data on multiple nodes for higher availability. Increases upload cost. |
+| `--redundancy` | Erasure coding level from 0 to 4: `0` none, `1` medium, `2` strong, `3` insane, `4` paranoid. A higher level keeps the data retrievable when more chunks are lost, and uses more of the stamp. Without this option, the gateway uses level 2. |
+| `--stamp-retries` | Number of times to check that the stamp is usable before the upload (default: 12) |
+| `--stamp-interval` | Seconds between stamp usability checks (default: 20) |
 | `--json` | Output result as JSON (see example below) |
 
 **Example Output (text):**

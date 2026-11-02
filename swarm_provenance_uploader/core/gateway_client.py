@@ -1844,7 +1844,7 @@ class GatewayClient:
         validate_stamp: bool = True,
         deferred: bool = False,
         include_timing: bool = False,
-        redundancy: bool = False,
+        redundancy: Optional[int] = None,
         verbose: bool = False,
     ) -> ManifestUploadResponse:
         """Upload a TAR archive as a Swarm manifest.
@@ -1858,12 +1858,20 @@ class GatewayClient:
             validate_stamp: Whether to validate stamp before upload.
             deferred: Use deferred upload mode.
             include_timing: Include timing breakdown in response.
-            redundancy: Enable redundancy for the upload.
+            redundancy: Erasure coding level 0-4. None sends no level, and the
+                gateway uses its default (2).
             verbose: Enable debug output.
 
         Returns:
             ManifestUploadResponse with reference and file count.
+
+        Raises:
+            ValueError: If redundancy is not an integer from 0 to 4.
         """
+        if redundancy is not None and (
+            isinstance(redundancy, bool) or not isinstance(redundancy, int) or not 0 <= redundancy <= 4
+        ):
+            raise ValueError(f"redundancy must be an integer from 0 to 4, not {redundancy!r}")
         url = self._make_url("/api/v1/data/manifest")
         params = {"stamp_id": stamp_id.lower()}
         if not validate_stamp:
@@ -1872,8 +1880,8 @@ class GatewayClient:
             params["deferred"] = "true"
         if include_timing:
             params["include_timing"] = "true"
-        if redundancy:
-            params["redundancy"] = "true"
+        if redundancy is not None:
+            params["redundancy"] = str(redundancy)
 
         if verbose:
             print(f"--- DEBUG: Upload Manifest ---")
