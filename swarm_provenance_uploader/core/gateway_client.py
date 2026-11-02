@@ -641,6 +641,11 @@ class GatewayClient:
             if replayed and outstanding is None:
                 # The answer is an earlier run's; this run's authorization was unused.
                 payment.update(nonce=None, valid_before=None)
+            elif replayed:
+                # The answer is the earlier attempt's, which may have been
+                # collected; this attempt's authorization was unused (#156).
+                payment = {**outstanding, "transaction": payment["transaction"]}
+                response.x402_payment = payment
             if (outstanding is not None and not 200 <= response.status_code < 300
                     and not body_code.startswith("IDEMPOTENCY")):
                 # Says nothing about the earlier attempt that may have been collected.
