@@ -9,6 +9,7 @@ Requires optional dependencies (the `blockchain` extra): web3 and eth-account.
 """
 
 import ast
+import functools
 import json
 import logging
 from typing import List, Optional
@@ -23,6 +24,7 @@ from ..chain.exceptions import (
     InsufficientFundsError,
     TransactionNotRecordedError,
     TransactionNotVerifiedError,
+    TransactionOutcomeUnknownError,
     DataAlreadyRegisteredError,
     DataNotRegisteredError,
     TransformationAlreadyExistsError,
@@ -37,6 +39,7 @@ from ..models import (
     MergeTransformResult,
     TransformResult,
 )
+from ..chain.exceptions import redact_exception_chain
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +93,36 @@ def _is_rpc_rejection(error: Exception) -> bool:
     return "Web3RPCError" in names and "RequestTimedOut" not in names
 
 
+def _is_receipt_timeout(error: Exception) -> bool:
+    """True if web3's receipt wait timed out (TimeExhausted).
+
+    Matched by class name, like _is_contract_revert. _is_rpc_failure counts
+    it as an RPC failure; _send_transaction leaves it to its own handling.
+    """
+    return any(cls.__name__ == "TimeExhausted" for cls in type(error).__mro__)
+
+
+def _signed_tx_hash(raw_tx) -> Optional[str]:
+    """The hash of a signed transaction (keccak-256 of its bytes), or None.
+
+    The same value send_raw_transaction returns, so it is known even when
+    the send raised before it returned. Formatted like the returned hash,
+    with HexBytes.hex(), so the format (with or without "0x") follows the
+    installed hexbytes version.
+    """
+    try:
+        from .swarm_verify import keccak256
+
+        digest = keccak256(bytes(raw_tx))
+    except Exception:
+        return None
+    try:
+        from hexbytes import HexBytes
+    except ImportError:
+        return digest.hex()
+    return HexBytes(digest).hex()
+
+
 def _error_reason(error: Exception) -> str:
     """The readable reason of a web3 error.
 
@@ -129,6 +162,59 @@ def _rpc_rejection_message(error: Exception) -> Optional[str]:
     if not _is_rpc_rejection(error):
         return None
     return _error_reason(error)
+
+
+def _read_error(error: Exception, rpc_url: Optional[str]) -> Optional[ChainError]:
+    """The chain error for an RPC failure in a read, or None if it is not one (#187).
+
+    A JSON-RPC error answer becomes ChainConfigurationError, like the
+    contract code check; a transport failure, a timeout or an answer that
+    is not JSON-RPC becomes ChainConnectionError. ChainError redacts the
+    message, and ChainConnectionError the URL.
+    """
+    rejection = _rpc_rejection_message(error)
+    if rejection is not None:
+        return ChainConfigurationError(f"The RPC rejected the request: {rejection}")
+    if _is_rpc_failure(error):
+        return ChainConnectionError(_error_reason(error), rpc_url=rpc_url)
+    return None
+
+
+def _redacted_errors(map_rpc_failures: bool):
+    """Decorate a public ChainClient method so its errors do not repeat the RPC URL (#187).
+
+    A ChainError the method raises gets a redacted exception chain
+    (redact_exception_chain), because library callers can print
+    ``__cause__`` and ``__context__``. With map_rpc_failures (read
+    methods), a raw RPC failure becomes a chain error (_read_error), raised
+    from it, so the redacted original stays in ``__cause__`` and a
+    traceback still shows where it failed. Other exceptions pass through
+    unchanged.
+    """
+    def decorator(method):
+        @functools.wraps(method)
+        def wrapper(self, *args, **kwargs):
+            try:
+                try:
+                    return method(self, *args, **kwargs)
+                except ChainError:
+                    raise
+                except Exception as e:
+                    if not map_rpc_failures:
+                        raise
+                    error = _read_error(e, self._provider.rpc_url)
+                    if error is None:
+                        raise
+                    raise error from e
+            except ChainError as e:
+                redact_exception_chain(e)
+                raise
+        return wrapper
+    return decorator
+
+
+_read_method = _redacted_errors(map_rpc_failures=True)
+_write_method = _redacted_errors(map_rpc_failures=False)
 
 
 class ChainClient:
@@ -271,17 +357,22 @@ class ChainClient:
 
     def _check_contract_code(self) -> None:
         """
-        Refuse to write if the configured contract address has no code.
+        Refuse to write to the wrong chain or to an address without code.
 
-        A transaction to an address without code succeeds and records
-        nothing. Checked once per client, before the first signature.
+        First the RPC's chain ID is confirmed (ChainProvider.confirm_chain_id),
+        then the code at the contract address is read: a transaction to an
+        address without code succeeds and records nothing. Both are checked
+        once per client, before the first signature.
 
         Raises:
+            ChainIdMismatchError: If the RPC is on another chain than a named
+                network preset.
             ChainConfigurationError: If the address has no contract code, the
                 RPC rejected the check (a JSON-RPC error answer), or the check
                 fails for a reason other than the RPC.
             ChainConnectionError: If the RPC cannot be reached.
         """
+        self._provider.confirm_chain_id()
         if self._contract_code_checked:
             return
         # The checksummed address: web3 rejects a lowercase one, and the
@@ -320,6 +411,10 @@ class ChainClient:
         or an RPC failure can happen here, before _send_transaction. Nothing
         has been sent at this point, so no error carries a tx_hash.
 
+        With an explicit gas limit, it is passed to the build method as
+        ``gas``, so web3 does not run eth_estimateGas. A transaction that
+        would revert is then not caught here: it is sent and costs gas.
+
         Raises:
             InsufficientFundsError: If the RPC reports insufficient funds.
             ChainTransactionError: If the contract reverts, the RPC answers
@@ -327,6 +422,8 @@ class ChainClient:
             ChainConnectionError: If the RPC cannot be reached or its answer
                 is not JSON-RPC.
         """
+        if self._gas_limit is not None:
+            kwargs["gas"] = self._gas_limit
         try:
             return build(*args, **kwargs)
         except ChainError:
@@ -391,15 +488,28 @@ class ChainClient:
                 contract did not emit expected_count expected_event events.
             TransactionNotVerifiedError: If the transaction was mined but its
                 events could not be decoded.
+            ChainConnectionError: If the RPC cannot be reached before the
+                transaction is sent. Nothing was sent.
+            TransactionOutcomeUnknownError: If the connection to the RPC
+                fails after send_raw_transaction was called. The
+                transaction may have been sent. The client does not sign
+                or send a new transaction (web3's HTTP provider may repeat
+                the eth_sendRawTransaction request with the same signed
+                bytes, which has the same hash and nonce).
             ChainTransactionError: If transaction fails.
         """
         web3 = self._provider.web3
+        # Set just before send_raw_transaction: after that, a transport
+        # failure does not mean that nothing was sent
+        send_called = False
+        raw_tx = None
 
         self._check_contract_code()
 
         try:
-            # Fill in nonce
-            tx["nonce"] = web3.eth.get_transaction_count(self._wallet.address)
+            # Fill in nonce. "pending" counts this wallet's transactions that
+            # are not mined yet, so a second write does not reuse a nonce.
+            tx["nonce"] = web3.eth.get_transaction_count(self._wallet.address, "pending")
             tx["chainId"] = self._provider.chain_id
 
             # Set gas limit: explicit value or estimate with multiplier
@@ -421,6 +531,7 @@ class ChainClient:
 
             # Sign and send
             raw_tx = self._wallet.sign_transaction(tx)
+            send_called = True
             tx_hash = web3.eth.send_raw_transaction(raw_tx)
 
             logger.debug("Transaction sent: %s", tx_hash.hex())
@@ -499,6 +610,34 @@ class ChainClient:
             tx_hash_str = None
             if "tx_hash" in dir():
                 tx_hash_str = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
+            elif send_called:
+                # The send raised before it returned the hash: the hash of
+                # the signed bytes is the same value
+                tx_hash_str = _signed_tx_hash(raw_tx)
+            # Transport only: connection, timeout, or an answer that is not
+            # JSON-RPC. A JSON-RPC error answer means the node answered. A
+            # receipt-wait timeout keeps its own handling.
+            if _is_rpc_failure(e) and not _is_rpc_rejection(e) and not _is_receipt_timeout(e):
+                if not send_called:
+                    raise ChainConnectionError(
+                        f"The RPC endpoint failed before the transaction was sent: {reason}",
+                        rpc_url=self._provider.rpc_url,
+                    ) from e
+                # The transaction may have been broadcast: do not sign or
+                # send a new one, and do not report it as failed
+                raise TransactionOutcomeUnknownError(
+                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} was "
+                    f"sent, but the connection to the RPC failed, so its outcome is "
+                    f"unknown: {reason}",
+                    tx_hash=tx_hash_str,
+                    event_name=expected_event,
+                    expected_count=expected_count,
+                    contract_address=self._contract.address,
+                    explorer_url=(
+                        self._provider.get_explorer_tx_url(tx_hash_str) if tx_hash_str else None
+                    ),
+                    reason=reason,
+                ) from e
             # No "Transaction failed:" prefix: the CLI adds its own
             raise ChainTransactionError(reason, tx_hash=tx_hash_str) from e
 
@@ -511,6 +650,7 @@ class ChainClient:
 
     # --- Write operations ---
 
+    @_write_method
     def anchor(
         self,
         swarm_hash: str,
@@ -589,6 +729,7 @@ class ChainClient:
             storage_ref=storage_ref,
         )
 
+    @_write_method
     def anchor_for(
         self,
         swarm_hash: str,
@@ -652,6 +793,7 @@ class ChainClient:
             storage_ref=storage_ref,
         )
 
+    @_write_method
     def batch_anchor(
         self,
         swarm_hashes: List[str],
@@ -694,6 +836,7 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    @_write_method
     def set_storage_ref(
         self,
         data_hash: str,
@@ -734,6 +877,7 @@ class ChainClient:
             storage_ref=storage_ref,
         )
 
+    @_read_method
     def get_by_storage_ref(
         self,
         storage_ref: str,
@@ -762,6 +906,7 @@ class ChainClient:
         data_hash = data_hash_bytes.hex()
         return self.get(data_hash, verbose=verbose)
 
+    @_write_method
     def transform(
         self,
         original_hash: str,
@@ -855,6 +1000,7 @@ class ChainClient:
             description=description,
         )
 
+    @_write_method
     def access(
         self,
         swarm_hash: str,
@@ -888,6 +1034,7 @@ class ChainClient:
             accessor=self._wallet.address,
         )
 
+    @_write_method
     def batch_access(
         self,
         swarm_hashes: List[str],
@@ -923,6 +1070,7 @@ class ChainClient:
             accessor=self._wallet.address,
         )
 
+    @_write_method
     def set_status(
         self,
         swarm_hash: str,
@@ -962,6 +1110,7 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    @_write_method
     def batch_set_status(
         self,
         swarm_hashes: List[str],
@@ -1001,6 +1150,7 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    @_write_method
     def transfer_ownership(
         self,
         swarm_hash: str,
@@ -1038,6 +1188,7 @@ class ChainClient:
             owner=new_owner,
         )
 
+    @_write_method
     def set_delegate(
         self,
         delegate: str,
@@ -1076,6 +1227,7 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    @_write_method
     def merge_transform(
         self,
         source_hashes: List[str],
@@ -1130,6 +1282,7 @@ class ChainClient:
 
     # --- Read operations ---
 
+    @_read_method
     def get(
         self,
         swarm_hash: str,
@@ -1224,6 +1377,7 @@ class ChainClient:
             transformations=chain_transformations,
         )
 
+    @_read_method
     def verify(
         self,
         swarm_hash: str,
@@ -1231,6 +1385,10 @@ class ChainClient:
     ) -> bool:
         """
         Verify that a Swarm hash is registered on-chain.
+
+        This checks registration only: a RESTRICTED or DELETED record, or
+        one owned by any address, still returns True. Use get() to check
+        the record's status and owner.
 
         Args:
             swarm_hash: Swarm reference hash.
@@ -1245,6 +1403,7 @@ class ChainClient:
         except DataNotRegisteredError:
             return False
 
+    @_read_method
     def balance(self, verbose: bool = False) -> ChainWalletInfo:
         """
         Get wallet balance and chain info.
@@ -1274,6 +1433,7 @@ class ChainClient:
             contract_address=self._provider.contract_address,
         )
 
+    @_read_method
     def health_check(self, verbose: bool = False) -> bool:
         """
         Check if the chain provider is connected and healthy.
@@ -1303,6 +1463,7 @@ class ChainClient:
 
         return result
 
+    @_read_method
     def get_provenance_chain(
         self,
         swarm_hash: str,
