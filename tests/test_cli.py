@@ -12,6 +12,7 @@ from swarm_provenance_uploader.models import (
     WalletResponse,
     ChequebookResponse,
 )
+from tests.test_chain_client import mock_chain_deps  # noqa: F401 (pytest fixture)
 
 # Create a Typer Test Runner
 runner = CliRunner()
@@ -6712,3 +6713,64 @@ class TestShortTokenEcho:
         assert isinstance(result.exception, SystemExit), result.exception
         assert "invalid api key: …" in result.output
         assert SHORT_TOKEN not in result.output
+
+
+class TestReadOnlyChainCommandsWithoutWalletKey:
+    """Read-only chain commands run without a wallet key; writes still need it (#140, #201).
+
+    ChainClient is real here; web3 and eth-account are mocked by mock_chain_deps.
+    """
+
+    UNSET_KEY_ENV = "PROVENANCE_WALLET_KEY_UNSET_FOR_TEST"
+    HASH = "a" * 64
+
+    @pytest.fixture
+    def no_key(self, monkeypatch):
+        monkeypatch.delenv(self.UNSET_KEY_ENV, raising=False)
+        monkeypatch.setitem(_chain_config, "wallet_key_env", self.UNSET_KEY_ENV)
+
+    @pytest.mark.parametrize("args", [
+        ["chain", "verify", HASH],
+        ["chain", "get", HASH],
+        ["chain", "get", HASH, "--json"],
+        ["chain", "get", HASH, "--follow"],
+        ["chain", "lookup", "e" * 64],
+        ["chain", "status", HASH],
+    ], ids=["verify", "get", "get-json", "get-follow", "lookup", "status-query"])
+    def test_read_command_works_without_key(self, no_key, mock_chain_deps, args):
+        from typer.testing import CliRunner as _Runner
+
+        contract = mock_chain_deps["contract"]
+        contract.functions.getDataHashByStorageRef.return_value.call.return_value = bytes.fromhex(self.HASH)
+
+        result = _Runner(mix_stderr=False).invoke(app, args)
+
+        assert result.exit_code == 0, result.stdout + result.stderr
+        assert "No wallet private key" not in result.stderr
+        assert "Check PROVENANCE_WALLET_KEY" not in result.stderr
+        mock_chain_deps["account_class"].from_key.assert_not_called()
+
+    @pytest.mark.parametrize("args", [
+        ["chain", "balance"],
+        ["chain", "anchor", HASH],
+        ["chain", "set-storage-ref", HASH, "e" * 64],
+        ["chain", "access", HASH],
+        ["chain", "status", HASH, "--set", "restricted"],
+        ["chain", "transfer", HASH, "--to", "0x" + "1" * 40],
+        ["chain", "delegate", "0x" + "1" * 40, "--authorize"],
+        ["chain", "transform", HASH, "c" * 64, "--description", "d"],
+        ["chain", "protect", HASH, "c" * 64],
+        ["chain", "merge", HASH, "b" * 64, "c" * 64, "--description", "d"],
+    ], ids=["balance", "anchor", "set-storage-ref", "access", "status-set", "transfer",
+            "delegate", "transform", "protect", "merge"])
+    def test_write_command_needs_key(self, no_key, mock_chain_deps, args):
+        from typer.testing import CliRunner as _Runner
+
+        result = _Runner(mix_stderr=False).invoke(app, args)
+
+        assert result.exit_code == 1, result.stdout + result.stderr
+        assert "No wallet private key" in result.stderr
+        assert "Check PROVENANCE_WALLET_KEY" in result.stderr
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.send_raw_transaction.assert_not_called()
+        web3.eth.get_transaction_count.assert_not_called()
