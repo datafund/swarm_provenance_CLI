@@ -660,6 +660,7 @@ swarm-prov-upload chain status aaa... --set restricted
 | `expected ACTIVE` | Original is RESTRICTED/DELETED | Set to ACTIVE first or use different hash |
 | `Transaction failed: reverted` | Not the owner or not authorized | Check owner with `chain get <hash>` |
 | `Cannot connect to chain` | RPC node unreachable | Check `CHAIN_RPC_URL` or network config |
+| `Outcome unknown` | RPC connection failed after the transaction was sent | Check the transaction in the explorer before you run the command again |
 
 ### Exit codes
 

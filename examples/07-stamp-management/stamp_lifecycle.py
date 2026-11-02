@@ -8,7 +8,7 @@ Demonstrates the full postage stamp lifecycle:
 3. List all stamps
 4. Inspect stamp details
 5. Health-check a stamp
-6. Attempt to extend a stamp (may require funded wallet)
+6. Attempt to extend a stamp (paid; needs x402 from the stamp's wallet)
 
 Usage:
     python stamp_lifecycle.py
@@ -85,9 +85,9 @@ def stamp_check(stamp_id: str):
     return result.returncode == 0
 
 
-def stamp_extend(stamp_id: str, amount: int = 1000000):
-    """Attempt to extend a stamp (requires funded wallet)."""
-    result = run_cli("stamps", "extend", stamp_id, "--amount", str(amount))
+def stamp_extend(stamp_id: str, duration_hours: int = 48):
+    """Attempt to extend a stamp (paid; needs --x402 from the wallet that bought it)."""
+    result = run_cli("stamps", "extend", stamp_id, "--duration-hours", str(duration_hours))
     print(result.stdout.strip() if result.stdout else result.stderr.strip())
     return result.returncode == 0
 
@@ -155,10 +155,10 @@ def main():
 
         # Step 6: Attempt extend (may fail without funded wallet)
         print(f"\n--- Step 6: Attempt stamp extension ---")
-        print("Note: Extension requires a funded wallet with BZZ tokens.")
+        print("Note: Extension is paid; a stamp you bought needs --x402 from the same wallet.")
         ok = stamp_extend(stamp_id)
         if not ok:
-            print("Extension failed (expected if wallet is not funded).")
+            print("Extension failed (expected without a paid x402 request from the stamp's wallet).")
             print("This is normal for demo environments.")
     else:
         print("\n--- Steps 4-6: Skipped (no stamp ID available) ---")
