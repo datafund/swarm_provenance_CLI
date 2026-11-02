@@ -142,7 +142,8 @@ X402_ENABLED=true
 # Your wallet private key (KEEP SECRET!)
 X402_PRIVATE_KEY=0x...your_private_key_here...
 
-# Network: base-sepolia (testnet) or base (mainnet)
+# Network: base-sepolia (testnet) or base (mainnet).
+# The CAIP-2 ids eip155:84532 and eip155:8453 also work.
 X402_NETWORK=base-sepolia
 
 # Optional: Auto-pay without prompts
@@ -153,7 +154,22 @@ X402_MAX_AUTO_PAY_USD=1.00
 
 # Optional: Only pay this recipient (the gateway operator's published pay-to address)
 X402_EXPECTED_PAY_TO=0x...
+
+# Optional: Custom RPC for the USDC balance and EIP-712 domain checks
+# X402_RPC_URL=https://your-rpc-provider.com
 ```
+
+`X402_RPC_URL` applies whichever `X402_NETWORK` is selected, the same way `CHAIN_RPC_URLS` does. If you switch networks, change the URL too.
+
+The CLI reads the `.env` of the folder you run it in, or the nearest `.env` in a parent folder. Variables already set in your environment take precedence.
+
+The key is looked up in this order, for both signing and `x402 status`:
+
+1. If `X402_PRIVATE_KEY_ENV` names another variable, only that variable. If it is not a valid variable name, or it contains a run of 32 or more hex digits (it looks like a key), no key is read at all, and the CLI says "X402_PRIVATE_KEY_ENV is not a valid variable name" without repeating the value.
+2. Otherwise `X402_PRIVATE_KEY`.
+3. Otherwise the legacy `SWARM_X402_PRIVATE_KEY`.
+
+Spaces and line breaks around the key are removed. A variable that is empty or blank counts as not set.
 
 ### Verify configuration
 
@@ -303,7 +319,7 @@ The gateway's payment request names a different USDC signing domain than the tok
 
 ### "No matching network option"
 
-The gateway doesn't support your configured network. Check that `X402_NETWORK` matches what the gateway accepts.
+The gateway doesn't support your configured network. Check that `X402_NETWORK` matches what the gateway accepts. The client treats the x402 v1 names and their CAIP-2 chain ids as the same network: `base-sepolia` is `eip155:84532` and `base` is `eip155:8453`.
 
 ## Security best practices
 

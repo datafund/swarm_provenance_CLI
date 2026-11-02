@@ -131,11 +131,12 @@ class X402NetworkError(X402Error):
 
 
 class PaymentTransactionFailedError(X402Error):
-    """Payment was signed but the on-chain transaction failed.
+    """No longer raised; kept so existing imports keep working (#143).
 
-    This occurs when the x402 facilitator could not execute the
-    TransferWithAuthorization on-chain. The gateway may have fallen
-    back to free tier.
+    It was raised for a success whose X-PAYMENT-RESPONSE receipt said
+    the payment failed. The gateway sends that receipt only after a
+    successful settlement and never falls back to the free tier, so such
+    an answer is now reported as PaymentOutcomeUnknownError.
     """
 
     def __init__(self, message: str, error_reason: str = None, payer: str = None):

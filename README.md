@@ -71,6 +71,7 @@ swarm-prov-upload download <swarm_hash> --output-dir ./downloads --no-verify
    ```bash
    cp .env.example .env
    ```
+   The CLI reads the `.env` of the folder you run it in. If there is none, it uses the nearest `.env` in a parent folder (up to the root, including your home folder). The folder the package is installed in does not matter. Variables already set in your environment take precedence over `.env`. Versions up to 0.12.0 searched from the folder the package was installed in, so with an editable install the repository's `.env` applied everywhere. If you relied on that, copy the `.env` to the folder you work in, or export the variables.
 3. Install in editable mode, including testing dependencies:
    ```bash
    pip install -e .[testing]
@@ -194,11 +195,14 @@ swarm-prov-upload x402 info
 |---------------------|-------------|---------|
 | `X402_ENABLED` | Enable x402 payments | `false` |
 | `X402_PRIVATE_KEY` | Wallet private key (keep secret!) | - |
-| `X402_NETWORK` | `base-sepolia` (testnet) or `base` (mainnet) | `base-sepolia` |
+| `X402_PRIVATE_KEY_ENV` | Name of the variable that holds the key. When set to another name, only that variable is read. A value that is not a valid variable name, or that looks like a key, is rejected and not printed | `X402_PRIVATE_KEY` |
+| `X402_NETWORK` | `base-sepolia` (testnet) or `base` (mainnet). The CAIP-2 ids `eip155:84532` and `eip155:8453` also work | `base-sepolia` |
 | `X402_AUTO_PAY` | Auto-pay without prompts | `false` |
 | `X402_MAX_AUTO_PAY_USD` | Maximum auto-pay amount per request | `1.00` |
 | `X402_EXPECTED_PAY_TO` | Only pay this recipient address (optional) | not set |
-| `X402_RPC_URL` | Custom RPC URL (optional) | Uses default |
+| `X402_RPC_URL` | Custom RPC URL for the USDC balance and EIP-712 domain checks (optional). Like `CHAIN_RPC_URLS`, applies whichever `X402_NETWORK` is selected | Uses the network preset |
+
+The signing key and `x402 status` use the same lookup: the variable named by `X402_PRIVATE_KEY_ENV` if that is set to another name (and nothing else), otherwise `X402_PRIVATE_KEY`, then the legacy `SWARM_X402_PRIVATE_KEY`.
 
 ### Global flags
 
@@ -208,7 +212,7 @@ swarm-prov-upload x402 info
 | `--x402` / `--no-x402` | Enable/disable x402 for this command |
 | `--auto-pay` / `--no-auto-pay` | Enable/disable auto-pay |
 | `--max-pay FLOAT` | Maximum auto-pay amount in USD |
-| `--x402-network TEXT` | Network: `base-sepolia` or `base` |
+| `--x402-network TEXT` | Network: `base-sepolia` or `base` (or the CAIP-2 ids `eip155:84532` and `eip155:8453`) |
 | `--idempotency-key TEXT` | Idempotency-Key for this command's paid requests; pass the key printed by a failed run to repeat it without paying twice (on a gateway that supports it) |
 
 ### Testnet setup
@@ -322,14 +326,13 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
-| `CHAIN_ENABLED` | Enable blockchain features | `false` |
 | `CHAIN_NAME` | `base-sepolia` (testnet), `base` (mainnet), or `localhost` (local development node; takes the chain ID the node reports) | `base-sepolia` |
 | `PROVENANCE_WALLET_KEY` | Wallet private key (keep secret!) | - |
 | `CHAIN_RPC_URL` | Custom RPC URL (optional). With `base` or `base-sepolia`, it must report the preset chain ID | Uses preset |
 | `CHAIN_CONTRACT` | Custom contract address (optional) | Uses preset |
 | `CHAIN_EXPLORER_URL` | Custom block explorer URL (optional) | Uses preset |
 | `CHAIN_GAS_LIMIT` | Explicit gas limit (optional, skips RPC estimation) | Auto-estimated |
-| `CHAIN_RPC_URLS` | Comma-separated fallback RPC URLs (optional) | Uses preset fallbacks |
+| `CHAIN_RPC_URLS` | Comma-separated fallback RPC URLs, tried in order after the main RPC (optional, replaces the preset fallbacks). Like `CHAIN_RPC_URL`, applies whatever chain is selected | Uses preset fallbacks |
 
 ### Testnet setup
 
@@ -902,12 +905,12 @@ See [examples/README.md](examples/README.md) for the full guide with walkthrough
 │  │                                 │  │ • X402_MAX_AUTO_PAY_USD             │  │
 │  │ Chain Models:                   │  │                                     │  │
 │  │ • ChainProvenanceRecord         │  │ Chain Configuration:                │  │
-│  │ • AnchorResult                  │  │ • CHAIN_ENABLED                     │  │
-│  │ • TransformResult               │  │ • CHAIN_NAME                        │  │
-│  │ • MergeTransformResult          │  │ • PROVENANCE_WALLET_KEY             │  │
-│  │ • AccessResult                  │  │ • CHAIN_RPC_URL                     │  │
-│  │ • ChainWalletInfo               │  │ • CHAIN_RPC_URLS (fallbacks)        │  │
-│  │                                 │  │ • CHAIN_EXPLORER_URL                │  │
+│  │ • AnchorResult                  │  │ • CHAIN_NAME                        │  │
+│  │ • TransformResult               │  │ • PROVENANCE_WALLET_KEY             │  │
+│  │ • MergeTransformResult          │  │ • CHAIN_RPC_URL                     │  │
+│  │ • AccessResult                  │  │ • CHAIN_RPC_URLS (fallbacks)        │  │
+│  │ • ChainWalletInfo               │  │ • CHAIN_EXPLORER_URL                │  │
+│  │                                 │  │                                     │  │
 │  └─────────────────────────────────┘  └─────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                         │

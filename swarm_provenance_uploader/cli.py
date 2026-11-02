@@ -15,6 +15,7 @@ from . import config, __version__
 from ._requirements import INSTALL_ETH_ACCOUNT, INSTALL_SIGNING_DEPS
 from .core import file_utils, swarm_client, metadata_builder
 from .core.gateway_client import GatewayClient, is_insecure_gateway_url, is_valid_idempotency_key
+from .core.x402_client import normalize_network
 from .models import ProvenanceMetadata, ValidationError
 from . import exceptions
 from .chain.redact import redact_url, redact_urls
@@ -65,7 +66,7 @@ _x402_config = {
     "enabled": config.X402_ENABLED,
     "auto_pay": config.X402_AUTO_PAY,
     "max_auto_pay_usd": config.X402_MAX_AUTO_PAY_USD,
-    "network": config.X402_NETWORK,
+    "network": normalize_network(config.X402_NETWORK),
     "expected_pay_to": config.X402_EXPECTED_PAY_TO,
 }
 
@@ -82,9 +83,9 @@ _unused_stamp = {"id": None, "how": None}
 
 # Global state for chain / blockchain configuration
 _chain_config = {
-    "enabled": config.CHAIN_ENABLED,
     "chain": config.CHAIN_NAME,
     "rpc_url": config.CHAIN_RPC_URL,
+    "rpc_fallbacks": config.CHAIN_RPC_URLS,
     "contract": config.CHAIN_CONTRACT,
     "wallet_key_env": config.CHAIN_WALLET_KEY_ENV,
     "explorer_url": config.CHAIN_EXPLORER_URL,
@@ -119,6 +120,7 @@ def _get_chain_client(verbose: bool = False):
         return ChainClient(
             chain=_chain_config["chain"],
             rpc_url=_chain_config["rpc_url"],
+            rpc_fallbacks=_chain_config.get("rpc_fallbacks"),
             contract_address=_chain_config["contract"],
             private_key_env=_chain_config["wallet_key_env"],
             explorer_url=_chain_config["explorer_url"],
@@ -644,6 +646,11 @@ def upload(
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
             _report_payment_outcome(e, "the pool stamp acquisition")
+        except typer.Exit:
+            # The availability check above already printed its error and chose
+            # the exit code; the catch-all would re-report it as an empty
+            # "Failed acquiring stamp from pool:" line (#164).
+            raise
         except Exception as e:
             typer.secho(f"ERROR: Failed acquiring stamp from pool: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -709,7 +716,6 @@ def upload(
                 stamp_details = gw_client.get_stamp(stamp_id, verbose=verbose)
                 if stamp_details:
                     stamp_info = {
-                        "exists": stamp_details.exists,
                         "usable": stamp_details.usable,
                         "batchTTL": stamp_details.batchTTL,
                     }
@@ -719,15 +725,14 @@ def upload(
                 stamp_info = swarm_client.get_stamp_info(local_bee_url, stamp_id, verbose=verbose)
 
             if stamp_info:
-                exists = stamp_info.get("exists")
                 usable = stamp_info.get("usable", False)
                 batch_ttl_seconds = stamp_info.get("batchTTL")  # TTL in seconds
 
                 if verbose:
                     ttl_str = f"{batch_ttl_seconds // 60}m {batch_ttl_seconds % 60}s" if batch_ttl_seconds is not None else "N/A"
-                    typer.echo(f"    Attempt {i+1}: Stamp found - Exists={exists}, Usable={usable}, TTL={ttl_str}")
+                    typer.echo(f"    Attempt {i+1}: Stamp found - Usable={usable}, TTL={ttl_str}")
 
-                # Check usable flag - exists may be None from gateway API
+                # Only the usable flag decides; the gateway may send it as null
                 if usable:
                     stamp_is_ready_for_upload = True
                     if not verbose: typer.echo(typer.style("OK", fg=typer.colors.GREEN))
@@ -1409,6 +1414,29 @@ def upload_collection(
 
 # --- Stamps Subcommands ---
 
+def _format_utilization(percent: Optional[float]) -> str:
+    """The gateway's `utilizationPercent` for display (#143).
+
+    Not `utilization`: that is the raw bucket fill level, so a depth-17
+    batch at 50 % has utilization 1.
+    """
+    return "unknown" if percent is None else f"{round(percent, 1):g}%"
+
+
+def _or_unknown(value) -> str:
+    """A gateway value for display; the gateway sends null when it cannot tell (#143)."""
+    return "unknown" if value is None else str(value)
+
+
+def _format_usable(usable: Optional[bool], width: int = 0) -> str:
+    """Yes, No or Unknown, padded before styling so colour codes do not count."""
+    if usable is None:
+        return typer.style(f"{'Unknown':<{width}}", fg=typer.colors.YELLOW)
+    if usable:
+        return typer.style(f"{'Yes':<{width}}", fg=typer.colors.GREEN)
+    return typer.style(f"{'No':<{width}}", fg=typer.colors.RED)
+
+
 def _sanitize_label(label: Optional[str]) -> str:
     """A stamp label as printable text (labels come from the gateway)."""
     return "".join(ch for ch in (label or "") if ch.isprintable())
@@ -1466,10 +1494,9 @@ def stamps_list(
         for stamp in result.stamps:
             stamp_id_str = stamp.batchID if full else f"{stamp.batchID[:8]}...{stamp.batchID[-8:]}"
             # Pad before styling: colour codes would count towards the width
-            usable_str = (typer.style(f"{'Yes':<8}", fg=typer.colors.GREEN) if stamp.usable
-                          else typer.style(f"{'No':<8}", fg=typer.colors.RED))
+            usable_str = _format_usable(stamp.usable, 8)
             ttl_str = _format_ttl(stamp.batchTTL)
-            util_str = f"{stamp.utilization}%"
+            util_str = _format_utilization(stamp.utilizationPercent)
             line = f"{stamp_id_str:<{id_width}} {usable_str} {ttl_str:<12} {stamp.depth:<6} {util_str:<12}"
             if full:
                 line += f" {_sanitize_label(stamp.label)}"
@@ -1515,12 +1542,13 @@ def stamps_info(
 
             typer.echo(f"\nStamp Details:")
             typer.echo(f"  Batch ID:    {stamp.batchID}")
-            typer.echo(f"  Usable:      {typer.style('Yes', fg=typer.colors.GREEN) if stamp.usable else typer.style('No', fg=typer.colors.RED)}")
-            typer.echo(f"  Exists:      {'Yes' if stamp.exists else 'No'}")
+            typer.echo(f"  Usable:      {_format_usable(stamp.usable)}")
+            # `local`: the batch is on this gateway's node. The gateway sends no `exists`.
+            typer.echo(f"  Local:       {'Unknown' if stamp.local is None else 'Yes' if stamp.local else 'No'}")
             typer.echo(f"  TTL:         {_format_ttl(stamp.batchTTL)}")
             typer.echo(f"  Depth:       {stamp.depth}")
             typer.echo(f"  Amount:      {stamp.amount}")
-            typer.echo(f"  Utilization: {stamp.utilization}%")
+            typer.echo(f"  Utilization: {_format_utilization(stamp.utilizationPercent)}")
             if stamp.label:
                 typer.echo(f"  Label:       {_sanitize_label(stamp.label)}")
         else:
@@ -1727,7 +1755,7 @@ def wallet(
         wallet_info = gw_client.get_wallet(verbose=verbose)
         typer.echo(f"\nWallet Information:")
         typer.echo(f"  Address: {wallet_info.walletAddress}")
-        typer.echo(f"  BZZ Balance: {wallet_info.bzzBalance}")
+        typer.echo(f"  BZZ Balance: {_or_unknown(wallet_info.bzzBalance)}")
     except Exception as e:
         typer.secho(f"ERROR: Failed to get wallet info: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -1753,8 +1781,8 @@ def chequebook(
         cheque_info = gw_client.get_chequebook(verbose=verbose)
         typer.echo(f"\nChequebook Information:")
         typer.echo(f"  Address:           {cheque_info.chequebookAddress}")
-        typer.echo(f"  Available Balance: {cheque_info.availableBalance}")
-        typer.echo(f"  Total Balance:     {cheque_info.totalBalance}")
+        typer.echo(f"  Available Balance: {_or_unknown(cheque_info.availableBalance)}")
+        typer.echo(f"  Total Balance:     {_or_unknown(cheque_info.totalBalance)}")
     except Exception as e:
         typer.secho(f"ERROR: Failed to get chequebook info: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -1848,11 +1876,19 @@ def x402_status(
         typer.secho("  WARNING: X402_EXPECTED_PAY_TO is not an address; every payment will be refused.",
                     fg=typer.colors.RED)
 
-    # Check for private key (don't show the actual key)
-    pk_env_name = config.X402_PRIVATE_KEY_ENV
-    has_pk = bool(os.getenv(pk_env_name) or os.getenv("X402_PRIVATE_KEY"))
-    pk_str = typer.style("Configured", fg=typer.colors.GREEN) if has_pk else typer.style("Not set", fg=typer.colors.RED)
+    # Check for private key the way the signer does (#141); show only the
+    # name of the variable it came from, never the key
+    from .core.x402_client import (INVALID_PRIVATE_KEY_ENV_MESSAGE, printable_key_env_name,
+                                   resolve_x402_private_key, x402_private_key_env_name)
+    pk_env_name = x402_private_key_env_name()  # None when invalid: never print the raw value
+    pk_source = resolve_x402_private_key()[1]
+    has_pk = pk_source is not None
+    pk_str = (typer.style("Configured", fg=typer.colors.GREEN)
+              + f" (from {printable_key_env_name(pk_source)})" if has_pk
+              else typer.style("Not set", fg=typer.colors.RED))
     typer.echo(f"  Private key:  {pk_str}")
+    if pk_env_name is None:
+        typer.secho(f"  WARNING: {INVALID_PRIVATE_KEY_ENV_MESSAGE}; no key is read.", fg=typer.colors.RED)
 
     if has_pk and verbose:
         # Show wallet address (safe to display)
@@ -1861,13 +1897,20 @@ def x402_status(
             client = X402Client(network=network)
             typer.echo(f"  Wallet:       {client.wallet_address}")
         except Exception as e:
-            typer.echo(f"  Wallet:       {typer.style(f'Error: {e}', fg=typer.colors.RED)}")
+            typer.echo(f"  Wallet:       {typer.style(f'Error: {redact_urls(str(e))}', fg=typer.colors.RED)}")
 
     typer.echo("")
 
     if not has_pk:
-        typer.echo("To enable x402 payments, set your private key:")
-        typer.echo(f"  export {pk_env_name}=0x...")
+        if pk_env_name is None:
+            typer.echo("To enable x402 payments, set X402_PRIVATE_KEY_ENV to a variable name")
+            typer.echo("(or unset it to use X402_PRIVATE_KEY), and put your key in that variable.")
+        else:
+            typer.echo("To enable x402 payments, set your private key:")
+            if printable_key_env_name(pk_env_name) == pk_env_name:
+                typer.echo(f"  export {pk_env_name}=0x...")
+            else:
+                typer.echo(f"  put it in {printable_key_env_name(pk_env_name)}")
         typer.echo("")
 
 
@@ -1880,13 +1923,22 @@ def x402_balance(
     """
     import os
 
-    # Check for private key
-    pk_env_name = config.X402_PRIVATE_KEY_ENV
-    has_pk = bool(os.getenv(pk_env_name) or os.getenv("X402_PRIVATE_KEY"))
+    # Check for private key, the same way the signer does (#141)
+    from .core.x402_client import (INVALID_PRIVATE_KEY_ENV_MESSAGE, printable_key_env_name,
+                                   resolve_x402_private_key, x402_private_key_env_name)
+    pk_env_name = x402_private_key_env_name()  # None when invalid: never print the raw value
+    has_pk = resolve_x402_private_key()[0] is not None
 
+    if pk_env_name is None:
+        typer.secho(f"ERROR: {INVALID_PRIVATE_KEY_ENV_MESSAGE}.", fg=typer.colors.RED, err=True)
+        typer.echo("Set it to the name of the variable that holds your key, or unset it.")
+        raise typer.Exit(code=1)
     if not has_pk:
         typer.secho(f"ERROR: No private key configured.", fg=typer.colors.RED, err=True)
-        typer.echo(f"Set your private key: export {pk_env_name}=0x...")
+        if printable_key_env_name(pk_env_name) == pk_env_name:
+            typer.echo(f"Set your private key: export {pk_env_name}=0x...")
+        else:
+            typer.echo(f"Set your private key in {printable_key_env_name(pk_env_name)}.")
         raise typer.Exit(code=1)
 
     network = _x402_config["network"]
@@ -1911,7 +1963,7 @@ def x402_balance(
             typer.echo("Get testnet USDC: https://faucet.circle.com/")
 
     except Exception as e:
-        typer.secho(f"ERROR: Failed to get balance: {e}", fg=typer.colors.RED, err=True)
+        typer.secho(f"ERROR: Failed to get balance: {redact_urls(str(e))}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
 
@@ -1929,6 +1981,8 @@ def x402_info():
 
     typer.echo("\n2. Set environment variable:")
     typer.echo("   export X402_PRIVATE_KEY=0x...")
+    typer.echo("   (X402_PRIVATE_KEY_ENV can name another variable; the legacy")
+    typer.echo("   SWARM_X402_PRIVATE_KEY is still read. See docs/x402-setup.md.)")
 
     typer.echo("\n3. Get testnet funds (for testing):")
     typer.echo("   - ETH (gas): https://www.alchemy.com/faucets/base-sepolia")
@@ -3433,7 +3487,7 @@ def main(
     )] = None,
     x402_network: Annotated[Optional[str], typer.Option(
         "--x402-network",
-        help="x402 network: 'base-sepolia' (testnet) or 'base' (mainnet). [default: base-sepolia]"
+        help="x402 network: 'base-sepolia' (testnet) or 'base' (mainnet); the CAIP-2 ids 'eip155:84532' and 'eip155:8453' also work. [default: base-sepolia]"
     )] = None,
     chain: Annotated[Optional[str], typer.Option(
         "--chain",
@@ -3463,7 +3517,8 @@ def main(
     Use --backend local for direct Bee node communication.
 
     For pay-per-request mode, use --x402 to enable x402 payments.
-    Requires X402_PRIVATE_KEY environment variable.
+    Requires X402_PRIVATE_KEY environment variable (or the variable named by
+    X402_PRIVATE_KEY_ENV, or the legacy SWARM_X402_PRIVATE_KEY; see docs/x402-setup.md).
 
     For testing/development, use --free for rate-limited free tier access.
     """
@@ -3499,10 +3554,12 @@ def main(
     if max_pay is not None:
         _x402_config["max_auto_pay_usd"] = max_pay
     if x402_network:
-        if x402_network not in ("base-sepolia", "base"):
-            typer.secho(f"ERROR: Invalid x402 network '{x402_network}'. Use 'base-sepolia' or 'base'.", fg=typer.colors.RED, err=True)
+        network = normalize_network(x402_network)
+        if network not in ("base-sepolia", "base"):
+            typer.secho(f"ERROR: Invalid x402 network '{x402_network}'. Use 'base-sepolia' or 'base' "
+                        "(or 'eip155:84532' or 'eip155:8453').", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
-        _x402_config["network"] = x402_network
+        _x402_config["network"] = network
 
     # Free tier configuration
     if free is not None:

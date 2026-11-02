@@ -35,7 +35,7 @@ def reset_backend_config():
     _x402_config["network"] = "base-sepolia"
     _x402_config["expected_pay_to"] = None
     _backend_config.pop("_http_warning_shown", None)
-    _chain_config["enabled"] = False
+    _chain_config["rpc_fallbacks"] = None
     _chain_config["chain"] = "base-sepolia"
     _chain_config["rpc_url"] = None
     _chain_config["contract"] = None
@@ -54,7 +54,7 @@ def reset_backend_config():
     _x402_config["network"] = "base-sepolia"
     _x402_config["expected_pay_to"] = None
     _backend_config.pop("_http_warning_shown", None)
-    _chain_config["enabled"] = False
+    _chain_config["rpc_fallbacks"] = None
     _chain_config["chain"] = "base-sepolia"
     _chain_config["rpc_url"] = None
     _chain_config["contract"] = None
@@ -1109,6 +1109,30 @@ class TestUploadWithPool:
         assert result.exit_code == 1
         assert "not enabled" in result.stdout.lower()
         assert "without --usePool" in result.stdout
+
+    def test_usepool_pool_empty_no_second_error(self, mocker, tmp_path):
+        """The pool-empty exit must not be re-caught and re-printed as an empty
+        "Failed acquiring stamp from pool:" line (#164)."""
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("test content")
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_pool_available_count.return_value = 0
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli._get_gateway_client_with_x402",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(
+            app,
+            ["upload", "--file", str(test_file), "--usePool"]
+        )
+
+        assert result.exit_code == 1
+        assert "No stamps available in pool" in result.stdout
+        assert "Failed acquiring stamp from pool" not in result.stdout
+        assert result.stdout.count("ERROR:") == 1
 
 
 # =============================================================================
@@ -4868,7 +4892,7 @@ class TestPaymentOutcomeReporting:
     )
     TX = "0x" + "cd" * 32
 
-    def _upload(self, mocker, **client_behaviour):
+    def _upload(self, mocker, color=False, **client_behaviour):
         mock_client = mocker.MagicMock()
         mock_client.purchase_stamp.return_value = DUMMY_STAMP
         mock_client.get_stamp.return_value = StampDetails(
@@ -4882,7 +4906,7 @@ class TestPaymentOutcomeReporting:
         with runner.isolated_filesystem():
             with open("data.txt", "w") as f:
                 f.write("data")
-            return runner.invoke(app, ["upload", "--file", "data.txt"])
+            return runner.invoke(app, ["upload", "--file", "data.txt"], color=color)
 
     def test_unknown_outcome_on_purchase(self, mocker):
         err = exceptions.PaymentOutcomeUnknownError("The paid request did not complete (ReadTimeout).", **self.PAYMENT)
@@ -4926,6 +4950,33 @@ class TestPaymentOutcomeReporting:
         assert "Do not buy another one" in result.output
         assert f"stamps list --wallet {self.PAYMENT['payer']} --full" in result.output
         assert "Idempotency-Key" not in result.output  # the gateway's hint does not apply to the CLI
+
+    def test_purchase_pending_gateway_text_cannot_hide_warning(self, mocker):
+        """An ANSI sequence in the gateway's 202 body must not reach the terminal (#151)."""
+        import requests
+        from swarm_provenance_uploader.core.gateway_client import GatewayClient
+
+        response = requests.Response()
+        response.status_code = 202
+        response._content = json.dumps({
+            "code": "PURCHASE_PENDING",
+            "message": "Pending.\x1b[2K\x1b[1A\x1b[8m",
+            "label": "x402-abc\x1b[8m",
+            "transaction": self.TX + "\x1b[8m",
+            "depth": 17,
+        }).encode()
+        response.x402_payment = dict(self.PAYMENT)
+        with pytest.raises(exceptions.StampPurchasePendingError) as exc_info:
+            GatewayClient(base_url="https://gateway.example")._raise_purchase_pending(response)
+
+        # color=True: Click strips escape sequences from non-terminal output otherwise
+        result = self._upload(mocker, color=True, purchase_stamp=exc_info.value)
+
+        assert result.exit_code == 1
+        for sequence in ("\x1b[2K", "\x1b[1A", "\x1b[8m"):
+            assert sequence not in result.output
+        assert "Pending." in result.output
+        assert "Do not buy another one" in result.output
 
     def test_upload_collection_unknown_outcome(self, mocker, tmp_path):
         (tmp_path / "a.txt").write_text("a")
@@ -6877,3 +6928,161 @@ class TestShortTokenEcho:
         assert isinstance(result.exception, SystemExit), result.exception
         assert "invalid api key: …" in result.output
         assert SHORT_TOKEN not in result.output
+
+
+# =============================================================================
+# GATEWAY NULL FIELDS AND CAIP-2 NETWORK NAMES (#143)
+# =============================================================================
+
+class TestGatewayNullFieldsDisplay:
+    """Fields the gateway sends as null are shown as 'unknown', not 'None' (#143)."""
+
+    @staticmethod
+    def _stamp():
+        return StampDetails(batchID=DUMMY_STAMP, usable=None, depth=20, amount="1",
+                            bucketDepth=16, immutableFlag=None, batchTTL=3600, utilization=None)
+
+    def test_stamps_list_shows_unknown(self, mocker):
+        mock_client = mocker.MagicMock()
+        mock_client.list_stamps.return_value = StampListResponse(stamps=[self._stamp()], total_count=1)
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+
+        result = runner.invoke(app, ["stamps", "list"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "None" not in result.stdout
+        assert "unknown" in result.stdout.lower()
+
+    def test_stamps_info_shows_unknown(self, mocker):
+        mock_client = mocker.MagicMock()
+        mock_client.get_stamp.return_value = self._stamp()
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+
+        result = runner.invoke(app, ["stamps", "info", DUMMY_STAMP])
+
+        assert result.exit_code == 0, result.stdout
+        assert "None" not in result.stdout
+        assert re.search(r"Usable:\s+Unknown", result.stdout)
+        assert re.search(r"Utilization:\s+unknown", result.stdout)
+
+    @pytest.mark.parametrize("local,shown", [(True, "Yes"), (False, "No")])
+    def test_stamps_info_shows_local_not_exists(self, mocker, local, shown):
+        """The gateway sends `local` (batch on this gateway's node), never `exists` (#143)."""
+        stamp = self._stamp().model_copy(update={"local": local})
+        mock_client = mocker.MagicMock()
+        mock_client.get_stamp.return_value = stamp
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+
+        result = runner.invoke(app, ["stamps", "info", DUMMY_STAMP])
+
+        assert result.exit_code == 0, result.stdout
+        assert re.search(rf"Local:\s+{shown}\b", result.stdout)
+        assert "Exists:" not in result.stdout
+
+    def test_usability_poll_debug_omits_exists(self, mocker, tmp_path):
+        """The verbose usability poll no longer prints the `exists` the gateway never sends."""
+        data_file = tmp_path / "d.txt"
+        data_file.write_text("x")
+        stamp = self._stamp().model_copy(update={"usable": True, "local": True})
+        mock_client = mocker.MagicMock()
+        mock_client.get_stamp.return_value = stamp
+        mock_client.upload_data.return_value = DUMMY_SWARM_REF
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+
+        result = runner.invoke(app, ["upload", "--file", str(data_file), "--stamp-id", DUMMY_STAMP, "-v"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "Stamp found" in result.stdout
+        assert "Exists=" not in result.stdout
+
+    def test_wallet_shows_unknown_balance(self, mocker):
+        mock_client = mocker.MagicMock()
+        mock_client.get_wallet.return_value = WalletResponse(walletAddress="0x" + "1" * 40, bzzBalance=None)
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+
+        result = runner.invoke(app, ["wallet"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "BZZ Balance: unknown" in result.stdout
+
+    def test_chequebook_shows_unknown_balances(self, mocker):
+        mock_client = mocker.MagicMock()
+        mock_client.get_chequebook.return_value = ChequebookResponse(
+            chequebookAddress="0x" + "2" * 40, availableBalance=None, totalBalance=None)
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+
+        result = runner.invoke(app, ["chequebook"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "None" not in result.stdout
+        assert re.search(r"Available Balance:\s+unknown", result.stdout)
+        assert re.search(r"Total Balance:\s+unknown", result.stdout)
+
+
+class TestX402NetworkCaip2:
+    def test_caip2_network_flag_is_accepted(self):
+        saved = _x402_config["network"]
+        try:
+            result = runner.invoke(app, ["--x402-network", "eip155:8453", "x402", "status"])
+            assert result.exit_code == 0, result.stdout
+            assert _x402_config["network"] == "base"
+        finally:
+            _x402_config["network"] = saved
+
+    def test_unknown_caip2_network_is_rejected(self):
+        result = runner.invoke(app, ["--x402-network", "eip155:1", "x402", "status"])
+        assert result.exit_code == 1
+        assert "Invalid x402 network" in result.stdout
+
+
+class TestStampUtilizationPercent:
+    """The percentage is `utilizationPercent`; `utilization` is the raw bucket fill level (#143)."""
+
+    @staticmethod
+    def _production_stamp(**update):
+        # A production depth-17 batch: utilization 1 is 50 % of 2^(17-16) = 2 bucket slots.
+        values = dict(batchID=DUMMY_STAMP, usable=True, depth=17, amount="1", bucketDepth=16,
+                      batchTTL=86400, utilization=1, utilizationPercent=50.0, local=True)
+        values.update(update)
+        return StampDetails(**values)
+
+    def _run(self, mocker, stamp, args):
+        mock_client = mocker.MagicMock()
+        mock_client.list_stamps.return_value = StampListResponse(stamps=[stamp], total_count=1)
+        mock_client.get_stamp.return_value = stamp
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        result = runner.invoke(app, args)
+        assert result.exit_code == 0, result.stdout
+        return result.stdout
+
+    def test_stamps_list_shows_percent_not_raw_level(self, mocker):
+        out = self._run(mocker, self._production_stamp(), ["stamps", "list"])
+        assert "50%" in out
+        assert " 1%" not in out
+
+    def test_stamps_info_shows_percent_not_raw_level(self, mocker):
+        out = self._run(mocker, self._production_stamp(), ["stamps", "info", DUMMY_STAMP])
+        assert re.search(r"Utilization:\s+50%", out)
+        assert not re.search(r"Utilization:\s+1%", out)
+
+    def test_fractional_percent_is_kept(self, mocker):
+        out = self._run(mocker, self._production_stamp(utilizationPercent=12.5), ["stamps", "info", DUMMY_STAMP])
+        assert re.search(r"Utilization:\s+12\.5%", out)
+
+    @pytest.mark.parametrize("args", [["stamps", "list"], ["stamps", "info", DUMMY_STAMP]])
+    def test_missing_percent_is_unknown_even_with_raw_level(self, mocker, args):
+        out = self._run(mocker, self._production_stamp(utilizationPercent=None), args)
+        assert "unknown" in out
+        assert "1%" not in out
+
+    def test_gateway_stamp_parses_utilization_percent(self, requests_mock):
+        from swarm_provenance_uploader.core.gateway_client import GatewayClient
+
+        gw = "https://test.gateway.io"
+        requests_mock.get(f"{gw}/api/v1/stamps/{DUMMY_STAMP}", json={
+            "batchID": DUMMY_STAMP, "amount": "1", "depth": 17, "bucketDepth": 16, "batchTTL": 86400,
+            "utilization": 1, "utilizationPercent": 50.0, "utilizationStatus": "ok",
+            "usable": True, "expectedExpiration": "2026-10-30-10-30", "local": True})
+        stamp = GatewayClient(base_url=gw).get_stamp(DUMMY_STAMP)
+        assert stamp.utilization == 1
+        assert stamp.utilizationPercent == 50.0
