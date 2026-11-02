@@ -145,6 +145,9 @@ class ChainProvider:
         # loops below then leave the fallback to it, so one call tries each
         # endpoint at most once
         self._fallback_active = False
+        # Endpoints tried during one public ChainClient call, shared by all
+        # its steps (set by ChainClient's method decorators); None otherwise
+        self._fallback_tried = None
 
         # Build ordered list of RPC URLs to try
         if rpc_fallbacks is not None:

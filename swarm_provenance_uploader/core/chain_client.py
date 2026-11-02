@@ -137,15 +137,20 @@ def _with_fallback(provider, operation):
 
     Only the outermost call runs the loop. A call made while a loop is
     already active (a read such as verify() calling get()) runs operation
-    once and leaves the fallback to the outer loop, so one public call tries
-    each endpoint at most once. ChainProvider.health_check() and
-    get_block_number() do the same with their own loops.
+    once and leaves the fallback to the outer loop. ChainProvider's
+    health_check() and get_block_number() do the same with their own loops.
+    The steps of one public call share one set of tried endpoints
+    (``provider._fallback_tried``, set by _redacted_errors), so a later step
+    does not go back to an endpoint that an earlier step left. Together, one
+    public call tries each endpoint at most once.
     """
     if getattr(provider, "_fallback_active", False) is True:
         return operation()
     provider._fallback_active = True
     try:
-        tried = set()
+        tried = getattr(provider, "_fallback_tried", None)
+        if not isinstance(tried, set):
+            tried = set()
         while True:
             try:
                 return operation()
@@ -164,6 +169,17 @@ def _with_fallback(provider, operation):
                 )
     finally:
         provider._fallback_active = False
+
+
+def _duplicate_check_connection_error(error: Exception, rpc_url: Optional[str]) -> ChainConnectionError:
+    """The error for transform()'s duplicate check when no RPC endpoint is left (#168)."""
+    if isinstance(error, ChainConnectionError):
+        rpc_url = error.rpc_url
+    return ChainConnectionError(
+        f"The RPC endpoint failed during the duplicate transformation check: "
+        f"{_error_reason(error)}. Nothing was sent.",
+        rpc_url=rpc_url,
+    )
 
 
 def _signed_tx_hash(raw_tx) -> Optional[str]:
@@ -307,6 +323,12 @@ def _redacted_errors(map_rpc_failures: bool):
     def decorator(method):
         @functools.wraps(method)
         def wrapper(self, *args, **kwargs):
+            # One set of tried endpoints for the whole public call (#168):
+            # the outermost decorated method creates it, nested ones reuse it
+            provider = self._provider
+            owns_tried = not isinstance(getattr(provider, "_fallback_tried", None), set)
+            if owns_tried:
+                provider._fallback_tried = set()
             try:
                 try:
                     if map_rpc_failures:
@@ -325,6 +347,9 @@ def _redacted_errors(map_rpc_failures: bool):
             except ChainError as e:
                 redact_exception_chain(e)
                 raise
+            finally:
+                if owns_tried:
+                    provider._fallback_tried = None
         return wrapper
     return decorator
 
@@ -1084,9 +1109,15 @@ class ChainClient:
 
         # Pre-check: avoid wasting gas on duplicate transformations.
         # Prefer state read on v2 contracts, fall back to event cache.
+        # Transport failures go through the fallbacks; when no endpoint is
+        # left, the write stops before anything is sent (#168). Other errors
+        # are logged and the write goes on.
         if self._contract.supports_transformation_links():
             try:
-                links = self._contract.get_transformation_links(original_hash)
+                links = _with_fallback(
+                    self._provider,
+                    lambda: self._contract.get_transformation_links(original_hash),
+                )
                 for existing_new, existing_desc in links:
                     existing_hex = (
                         existing_new.hex()
@@ -1103,6 +1134,8 @@ class ChainClient:
             except TransformationAlreadyExistsError:
                 raise
             except Exception as e:
+                if _is_transport_failure(e):
+                    raise _duplicate_check_connection_error(e, self._provider.rpc_url) from e
                 logger.warning("State-based duplicate check failed: %s", redact_urls(str(e)))
         else:
             deploy_block = self._provider.deploy_block
@@ -1113,7 +1146,9 @@ class ChainClient:
                     cache = get_cache(
                         self._provider.chain, self._provider.contract_address
                     )
-                    current_block = self._provider.web3.eth.block_number
+                    current_block = _with_fallback(
+                        self._provider, lambda: self._provider.web3.eth.block_number
+                    )
                     forward, _ = cache.get_maps(
                         self._contract, deploy_block, current_block
                     )
@@ -1128,6 +1163,8 @@ class ChainClient:
                 except TransformationAlreadyExistsError:
                     raise
                 except Exception as e:
+                    if _is_transport_failure(e):
+                        raise _duplicate_check_connection_error(e, self._provider.rpc_url) from e
                     logger.warning("Duplicate check failed, proceeding: %s", redact_urls(str(e)))
 
         tx = self._build_tx(
