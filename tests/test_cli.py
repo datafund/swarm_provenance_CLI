@@ -6769,6 +6769,14 @@ class TestStampsExtendPaid:
         assert "at least 24" in result.output
         client.extend_stamp.assert_not_called()
 
+    @pytest.mark.parametrize("amount", ["0", "-5"])
+    def test_amount_not_positive_refused(self, mocker, amount):
+        result, client, constructor = self._extend(mocker, "--amount", amount, global_args=["--x402"])
+        assert result.exit_code == 1
+        assert "greater than 0" in result.output
+        client.extend_stamp.assert_not_called()
+        constructor.assert_not_called()
+
     def test_help_describes_amount_as_plur(self):
         result = runner.invoke(app, ["stamps", "extend", "--help"])
         text = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
@@ -6824,7 +6832,9 @@ class TestStampsExtendPaid:
         result, _, _ = self._extend(mocker, "--duration-hours", "48", global_args=["--free"],
                                     effect=self._denied())
         assert result.exit_code == 1
-        assert "HTTP 403 STAMP_OWNERSHIP_DENIED: Cannot extend this stamp" in result.output
+        assert "ERROR: Failed to extend stamp: HTTP 403 STAMP_OWNERSHIP_DENIED: Cannot extend this stamp" \
+            in result.output
+        assert result.output.count("Failed to extend stamp") == 1
         assert "only with a paid request" in result.output
         assert "--x402" in result.output
 
@@ -6832,5 +6842,16 @@ class TestStampsExtendPaid:
         result, _, _ = self._extend(mocker, "--duration-hours", "48", global_args=["--x402"],
                                     effect=self._denied())
         assert result.exit_code == 1
-        assert "STAMP_OWNERSHIP_DENIED" in result.output
+        assert "ERROR: Failed to extend stamp: HTTP 403 STAMP_OWNERSHIP_DENIED" in result.output
+        assert result.output.count("Failed to extend stamp") == 1
         assert "only with a paid request" not in result.output
+
+    def test_connection_failure_reads_once(self, mocker):
+        import requests
+        cause = requests.exceptions.ConnectionError("Connection refused")
+        err = ConnectionError(f"Failed to extend stamp {DUMMY_STAMP}: {cause}")
+        err.__cause__ = cause
+        result, _, _ = self._extend(mocker, "--duration-hours", "48", effect=err)
+        assert result.exit_code == 1
+        assert "ERROR: Failed to extend stamp: Connection refused" in result.output
+        assert result.output.count("Failed to extend stamp") == 1

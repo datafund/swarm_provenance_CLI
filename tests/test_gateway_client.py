@@ -2824,6 +2824,12 @@ class TestExtendStampPaid:
             GatewayClient(base_url=GW).extend_stamp(DUMMY_STAMP, duration_hours=23)
         assert requests_mock.call_count == 0
 
+    @pytest.mark.parametrize("amount", [0, -1])
+    def test_amount_not_positive_refused_before_sending(self, requests_mock, amount):
+        with pytest.raises(ValueError, match="greater than 0"):
+            GatewayClient(base_url=GW).extend_stamp(DUMMY_STAMP, amount=amount)
+        assert requests_mock.call_count == 0
+
     def test_free_tier_header_sent(self, requests_mock):
         requests_mock.patch(EXTEND_URL, json={"batchID": DUMMY_STAMP, "message": "ok"})
         GatewayClient(base_url=GW, free_tier=True).extend_stamp(DUMMY_STAMP)
