@@ -240,9 +240,12 @@ MAX_CHAIN_DEPTH = 50
 def _traversal_error(data_hash: str, depth: int, error: Exception) -> ChainError:
     """The error that stops a provenance chain walk at one node (#170).
 
-    The walk fails closed: a partial lineage is never returned. RPC failures
-    become ChainConnectionError and everything else ChainError; both name
-    the node and its depth. Chain errors other than connection and
+    The walk fails closed: a partial lineage is never returned. A JSON-RPC
+    error answer becomes ChainConfigurationError, as in _read_error: the
+    node answered, so it is not a connection failure and the walk does not
+    move to a fallback (#168). Other RPC failures become
+    ChainConnectionError and everything else ChainError; all name the node
+    and its depth. Chain errors other than connection and
     not-registered errors (for example ChainValidationError) keep their
     class. A linked hash that reads as not registered means an inconsistent
     read (the contract registers every derived hash), so it is a ChainError
@@ -260,6 +263,12 @@ def _traversal_error(data_hash: str, depth: int, error: Exception) -> ChainError
     message = f"Provenance chain read failed at {data_hash} (depth {depth}): {reason}"
     if isinstance(error, ChainConnectionError):
         return ChainConnectionError(message, rpc_url=error.rpc_url)
+    if _is_rpc_rejection(error):
+        # Checked before _is_rpc_failure, which also counts a JSON-RPC error answer
+        return ChainConfigurationError(
+            f"Provenance chain read failed at {data_hash} (depth {depth}): "
+            f"The RPC rejected the request: {reason}"
+        )
     if _is_rpc_failure(error):
         return ChainConnectionError(message)
     return ChainError(message)
@@ -1635,6 +1644,8 @@ class ChainClient:
             True if healthy.
 
         Raises:
+            ChainIdMismatchError: If the RPC in use reports another chain ID.
+                No fallback is tried in this case.
             ChainConnectionError: If health check fails.
         """
         logger.debug(
