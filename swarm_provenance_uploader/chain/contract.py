@@ -177,12 +177,26 @@ class DataProvenanceContract:
 
     # --- Build transaction methods (return tx dicts) ---
 
+    def _tx_params(self, sender: str, gas: Optional[int]) -> dict:
+        """
+        Transaction parameters for build_transaction.
+
+        web3 runs eth_estimateGas only when the parameters have no "gas",
+        so an explicit gas limit skips the estimate. web3 still fills in
+        the fee fields.
+        """
+        params = {"from": self._web3.to_checksum_address(sender)}
+        if gas is not None:
+            params["gas"] = gas
+        return params
+
     def build_register_data_tx(
         self,
         data_hash: str,
         data_type: str,
         sender: str,
         storage_ref: Optional[str] = None,
+        gas: Optional[int] = None,
     ) -> dict:
         """
         Build transaction to register a data hash on-chain.
@@ -192,13 +206,14 @@ class DataProvenanceContract:
             data_type: Category/type string (max 64 chars).
             sender: Address of the transaction sender.
             storage_ref: Optional 64-char hex storage reference (e.g. Swarm hash).
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
 
         Returns:
             Unsigned transaction dict.
         """
         hash_bytes = _normalize_hash(data_hash)
         _validate_data_type(data_type)
-        tx_params = {"from": self._web3.to_checksum_address(sender)}
+        tx_params = self._tx_params(sender, gas)
         if storage_ref is not None:
             ref_bytes = _normalize_hash(storage_ref)
             return self._contract.functions.registerData(
@@ -215,6 +230,7 @@ class DataProvenanceContract:
         actual_owner: str,
         sender: str,
         storage_ref: Optional[str] = None,
+        gas: Optional[int] = None,
     ) -> dict:
         """
         Build transaction to register data on behalf of another owner.
@@ -227,6 +243,7 @@ class DataProvenanceContract:
             actual_owner: Address of the actual data owner.
             sender: Address of the delegate sending the transaction.
             storage_ref: Optional 64-char hex storage reference (e.g. Swarm hash).
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
 
         Returns:
             Unsigned transaction dict.
@@ -234,7 +251,7 @@ class DataProvenanceContract:
         hash_bytes = _normalize_hash(data_hash)
         _validate_data_type(data_type)
         owner_addr = self._web3.to_checksum_address(actual_owner)
-        tx_params = {"from": self._web3.to_checksum_address(sender)}
+        tx_params = self._tx_params(sender, gas)
         if storage_ref is not None:
             ref_bytes = _normalize_hash(storage_ref)
             return self._contract.functions.registerDataFor(
@@ -250,6 +267,7 @@ class DataProvenanceContract:
         data_types: List[str],
         sender: str,
         storage_refs: Optional[List[str]] = None,
+        gas: Optional[int] = None,
     ) -> dict:
         """
         Build transaction to register multiple data hashes in one call.
@@ -260,6 +278,7 @@ class DataProvenanceContract:
             sender: Address of the transaction sender.
             storage_refs: Optional list of 64-char hex storage references
                 (same length as hashes). Pass None to omit storage refs.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
 
         Returns:
             Unsigned transaction dict.
@@ -281,7 +300,7 @@ class DataProvenanceContract:
         for dt in data_types:
             _validate_data_type(dt)
 
-        tx_params = {"from": self._web3.to_checksum_address(sender)}
+        tx_params = self._tx_params(sender, gas)
         if storage_refs is not None:
             if len(storage_refs) != len(data_hashes):
                 raise ChainValidationError(
@@ -302,6 +321,7 @@ class DataProvenanceContract:
         new_hash: str,
         description: str,
         sender: str,
+        gas: Optional[int] = None,
     ) -> dict:
         """
         Build transaction to record a data transformation.
@@ -311,6 +331,7 @@ class DataProvenanceContract:
             new_hash: Hash of the transformed data.
             description: Description of the transformation (max 256 chars).
             sender: Address of the transaction sender.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
 
         Returns:
             Unsigned transaction dict.
@@ -320,14 +341,13 @@ class DataProvenanceContract:
         _validate_transformation(description)
         return self._contract.functions.recordTransformation(
             orig_bytes, new_bytes, description
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(self._tx_params(sender, gas))
 
     def build_record_access_tx(
         self,
         data_hash: str,
         sender: str,
+        gas: Optional[int] = None,
     ) -> dict:
         """
         Build transaction to record that data was accessed.
@@ -335,6 +355,7 @@ class DataProvenanceContract:
         Args:
             data_hash: Hash of the accessed data.
             sender: Address of the accessor.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
 
         Returns:
             Unsigned transaction dict.
@@ -342,14 +363,13 @@ class DataProvenanceContract:
         hash_bytes = _normalize_hash(data_hash)
         return self._contract.functions.recordAccess(
             hash_bytes
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(self._tx_params(sender, gas))
 
     def build_batch_record_access_tx(
         self,
         data_hashes: List[str],
         sender: str,
+        gas: Optional[int] = None,
     ) -> dict:
         """
         Build transaction to record access to multiple data hashes.
@@ -357,6 +377,7 @@ class DataProvenanceContract:
         Args:
             data_hashes: List of data hashes accessed.
             sender: Address of the accessor.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
 
         Returns:
             Unsigned transaction dict.
@@ -371,15 +392,14 @@ class DataProvenanceContract:
         hash_bytes_list = [_normalize_hash(h) for h in data_hashes]
         return self._contract.functions.batchRecordAccess(
             hash_bytes_list
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(self._tx_params(sender, gas))
 
     def build_set_data_status_tx(
         self,
         data_hash: str,
         status: int,
         sender: str,
+        gas: Optional[int] = None,
     ) -> dict:
         """
         Build transaction to change the status of registered data.
@@ -388,6 +408,7 @@ class DataProvenanceContract:
             data_hash: Hash of the data.
             status: New status (0=ACTIVE, 1=RESTRICTED, 2=DELETED).
             sender: Address of the data owner.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
 
         Returns:
             Unsigned transaction dict.
@@ -395,15 +416,14 @@ class DataProvenanceContract:
         hash_bytes = _normalize_hash(data_hash)
         return self._contract.functions.setDataStatus(
             hash_bytes, status
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(self._tx_params(sender, gas))
 
     def build_batch_set_data_status_tx(
         self,
         data_hashes: List[str],
         statuses: List[int],
         sender: str,
+        gas: Optional[int] = None,
     ) -> dict:
         """
         Build transaction to change the status of multiple data hashes.
@@ -412,6 +432,7 @@ class DataProvenanceContract:
             data_hashes: List of data hashes.
             statuses: List of new statuses (0=ACTIVE, 1=RESTRICTED, 2=DELETED).
             sender: Address of the data owner.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
 
         Returns:
             Unsigned transaction dict.
@@ -431,15 +452,14 @@ class DataProvenanceContract:
         hash_bytes_list = [_normalize_hash(h) for h in data_hashes]
         return self._contract.functions.batchSetDataStatus(
             hash_bytes_list, statuses
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(self._tx_params(sender, gas))
 
     def build_transfer_ownership_tx(
         self,
         data_hash: str,
         new_owner: str,
         sender: str,
+        gas: Optional[int] = None,
     ) -> dict:
         """
         Build transaction to transfer data ownership.
@@ -448,6 +468,7 @@ class DataProvenanceContract:
             data_hash: Hash of the data.
             new_owner: Address of the new owner.
             sender: Address of the current owner.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
 
         Returns:
             Unsigned transaction dict.
@@ -456,15 +477,14 @@ class DataProvenanceContract:
         return self._contract.functions.transferDataOwnership(
             hash_bytes,
             self._web3.to_checksum_address(new_owner),
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(self._tx_params(sender, gas))
 
     def build_set_delegate_tx(
         self,
         delegate: str,
         authorized: bool,
         sender: str,
+        gas: Optional[int] = None,
     ) -> dict:
         """
         Build transaction to authorize or revoke a delegate.
@@ -473,6 +493,7 @@ class DataProvenanceContract:
             delegate: Address of the delegate.
             authorized: True to authorize, False to revoke.
             sender: Address of the data owner.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
 
         Returns:
             Unsigned transaction dict.
@@ -480,15 +501,14 @@ class DataProvenanceContract:
         return self._contract.functions.setDelegate(
             self._web3.to_checksum_address(delegate),
             authorized,
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(self._tx_params(sender, gas))
 
     def build_set_storage_ref_tx(
         self,
         data_hash: str,
         storage_ref: str,
         sender: str,
+        gas: Optional[int] = None,
     ) -> dict:
         """
         Build transaction to set the storage reference for an existing record.
@@ -499,6 +519,7 @@ class DataProvenanceContract:
             data_hash: 64-char hex hash of the registered data.
             storage_ref: 64-char hex storage reference (e.g. Swarm hash).
             sender: Address of the data owner.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
 
         Returns:
             Unsigned transaction dict.
@@ -507,9 +528,7 @@ class DataProvenanceContract:
         ref_bytes = _normalize_hash(storage_ref)
         return self._contract.functions.setStorageRef(
             hash_bytes, ref_bytes
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(self._tx_params(sender, gas))
 
     # --- Read methods (direct contract calls) ---
 
@@ -744,6 +763,7 @@ class DataProvenanceContract:
         description: str,
         new_data_type: str,
         sender: str,
+        gas: Optional[int] = None,
     ) -> dict:
         """
         Build tx for N-to-1 merge transformation (v2+).
@@ -754,6 +774,7 @@ class DataProvenanceContract:
             description: Transformation description (max 256 chars).
             new_data_type: Data type for the merged result (max 64 chars).
             sender: Address of the transaction sender.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
 
         Returns:
             Unsigned transaction dict.
@@ -780,9 +801,7 @@ class DataProvenanceContract:
             new_bytes,
             description,
             new_data_type,
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(self._tx_params(sender, gas))
 
     # --- Event queries ---
 

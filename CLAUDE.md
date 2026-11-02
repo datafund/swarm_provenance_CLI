@@ -137,7 +137,7 @@ swarm-prov-upload download <swarm_hash> --output-dir ./downloads
 swarm-prov-upload stamps list
 swarm-prov-upload stamps list --full --wallet <address>   # Full IDs + labels, one wallet's stamps
 swarm-prov-upload stamps info <stamp_id>
-swarm-prov-upload stamps extend <stamp_id> --amount 1000000
+swarm-prov-upload --x402 stamps extend <stamp_id> --duration-hours 48   # Paid; owner only
 swarm-prov-upload stamps check <stamp_id>     # Health check
 swarm-prov-upload stamps pool-status          # Pool availability
 
@@ -177,8 +177,9 @@ swarm-prov-upload chain anchor <hash> --owner <address>                      # A
 swarm-prov-upload chain anchor <hash> --storage-ref <ref>                    # Anchor with Swarm storage reference
 swarm-prov-upload chain get <hash>                                           # Get on-chain provenance record
 swarm-prov-upload chain get <hash> --follow                                  # Walk transformation chain
-swarm-prov-upload chain get <hash> --follow --depth 3                        # Limit chain walk depth
-swarm-prov-upload chain verify <hash>                                        # Verify hash is anchored
+swarm-prov-upload chain get <hash> --follow --depth 3                        # Limit chain walk depth (1-50, default 10)
+swarm-prov-upload chain verify <hash>                                        # Verify hash is anchored (shows status and owner)
+swarm-prov-upload chain verify <hash> --require-active --owner <address>     # Exit 1 unless ACTIVE and owned by <address>
 swarm-prov-upload chain access <hash>                                        # Record data access
 swarm-prov-upload chain status <hash>                                        # Query current status
 swarm-prov-upload chain status <hash> --set restricted                       # Set status (active|restricted|deleted)
@@ -202,7 +203,7 @@ swarm-prov-upload upload-collection /path/to/directory --usePool             # U
 swarm-prov-upload upload-collection /path/to/directory --stamp-id <id>       # Reuse existing stamp
 swarm-prov-upload upload-collection /path/to/directory --json                # JSON output
 swarm-prov-upload upload-collection /path/to/directory --deferred            # Deferred upload
-swarm-prov-upload upload-collection /path/to/directory --redundancy          # With redundancy
+swarm-prov-upload upload-collection /path/to/directory --redundancy 3        # Erasure coding level 0-4 (gateway default 2)
 ```
 
 ## Architecture
@@ -256,6 +257,7 @@ The application follows a modular architecture with clear separation of concerns
 - Wraps ChainProvider + ChainWallet + DataProvenanceContract
 - Write methods: `anchor()`, `anchor_for()`, `batch_anchor()`, `transform()`, `merge_transform()`, `access()`, `batch_access()`, `set_status()`, `transfer_ownership()`, `set_delegate()`, `set_storage_ref()`
 - Read methods: `get()`, `verify()`, `get_provenance_chain()`, `get_by_storage_ref()`, `balance()`, `health_check()`
+- `get_provenance_chain()` fails closed: any read error during the walk raises `ChainConnectionError` or `ChainError` naming the node and depth, never a partial list. `max_depth` is 0 to 50 (default 10); each expanded record has `parents`, and records at the limit have `parents=None` (#170)
 - Lazy-loads web3 and eth-account via `blockchain` optional dependency group
 - Targets DataProvenance v4 contract on Base Sepolia (`0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322`)
 - V2 auto-detection: state-based traversal on v2 contracts, event cache fallback on v1
@@ -275,6 +277,7 @@ The application follows a modular architecture with clear separation of concerns
 - `StampDetails`, `StampListResponse`, `StampPurchaseResponse`
 - `DataUploadResponse`, `DataDownloadResponse`
 - `WalletResponse`, `ChequebookResponse`
+- Fields the gateway can send as null are `Optional` here (#143): `StampDetails.usable` and `immutableFlag`, `WalletResponse.bzzBalance`, `ChequebookResponse.availableBalance` and `totalBalance`, `DataDownloadResponse.content_type`. The CLI shows them as `unknown`. Check a new field against swarm_connect `app/api/models` before making it required
 
 **x402 Payment Models**: Schemas for x402 payment handling:
 - `X402PaymentOption`: Individual payment option from 402 response
@@ -297,7 +300,7 @@ The application follows a modular architecture with clear separation of concerns
 - `SignedDocumentResponse`: Response from upload with sign=notary
 
 **Collection Models**: Schemas for collection/manifest uploads:
-- `ManifestUploadTiming`: Optional timing breakdown from manifest upload
+- `ManifestUploadTiming`: Optional timing breakdown from manifest upload, with the gateway's float millisecond fields (`file_read_ms`, `bee_upload_ms`, `total_ms`, `tar_*`, ...)
 - `ManifestUploadResponse`: Response with reference, file_count, timing
 - `CollectionFileInfo`: Per-file info (path, size, content_hash)
 - `CollectionProvenanceMetadata`: Full provenance metadata for a collection upload
@@ -328,9 +331,11 @@ The codebase implements comprehensive error handling:
 - File I/O error handling with clear user feedback
 - JSON parsing errors with context
 - Paid requests: once `X-PAYMENT` has been sent, `GatewayClient._make_paid_request` reports a timeout, dropped connection, Ctrl-C or 5xx as `PaymentOutcomeUnknownError`, not a plain `ConnectionError`; `PaymentSettledNotDeliveredError` / `StampPurchasePendingError` when the gateway confirms it collected the payment, and also (via `_reading_paid_result`) when a paid 2xx body cannot be parsed. They carry payer, nonce, amount, pay-to, `valid_before` and transaction; the CLI prints them via `_report_payment_outcome`. Ordinary errors remain for a `ConnectTimeout` (never connected, so never sent), a 4xx the gateway refused before settling, and the 5xx answers that state nothing was charged (`_says_not_charged`). Paid calls use `GatewayClient.PAID_REQUEST_TIMEOUT` ((10, 240) s connect/read)
-- Idempotency-Key (#124): `_make_paid_request` sends one key per paid operation (the CLI passes one per command, `--idempotency-key` to reuse a failed run's) resending the same authorization after IN_PROGRESS / UNAVAILABLE (the gateway releases it) and signing a new one (no new prompt, at most `MAX_SIGNATURES_PER_OPERATION`) only after an attempt with no answer. While such an attempt is outstanding, any answer other than an IDEMPOTENCY_* code or a success is reported as an unknown outcome naming it. It retries only `IDEMPOTENCY_KEY_IN_PROGRESS` / `IDEMPOTENCY_UNAVAILABLE`, and a timeout only once the gateway has answered with such a code; `_raise_for_idempotency_answer` maps SETTLEMENT_UNKNOWN / SETTLED_PENDING / DELIVERED_NOT_STORED / REUSED / INVALID to exceptions. `PaymentDeliveredNotStoredError` is a success: the CLI exits 0 when it is the command's last step
+- Idempotency-Key (#124): `_make_paid_request` sends one key per paid operation (the CLI passes one per command, `--idempotency-key` to reuse a failed run's) resending the same authorization after IN_PROGRESS / UNAVAILABLE (the gateway releases it) and signing a new one (no new prompt, at most `MAX_SIGNATURES_PER_OPERATION`) only after an attempt with no answer. While such an attempt is outstanding, any answer other than an IDEMPOTENCY_* code or a success is reported as an unknown outcome naming it. It retries only `IDEMPOTENCY_KEY_IN_PROGRESS` / `IDEMPOTENCY_UNAVAILABLE`, and a timeout only once the gateway has answered with such a code; `_raise_for_idempotency_answer` maps SETTLEMENT_UNKNOWN / SETTLED_PENDING / DELIVERED_NOT_STORED / REUSED / INVALID to exceptions. `PaymentDeliveredNotStoredError` is a success: the CLI exits 0 when it is the command's last step; `upload-collection --json` then still prints its JSON document, with `swarm_reference: null`, `status: "delivered_not_stored"`, `transaction`, `payer` and `idempotency_key` (#153)
 - Gateway error responses (#139): every non-2xx answer that no special case handles goes through `GatewayClient._raise_for_gateway_error`, which raises `GatewayHTTPError` (a `requests.exceptions.HTTPError` that keeps `.response`, with `code`, `gateway_message` and `retry_after`). The public methods wrap it in `ConnectionError`, `PoolAcquisitionError` or similar, so callers reach it as `e.__cause__`. It reads `code`/`message` from the top level of the body (swarm_connect #381), then from `detail` (dict, string, or a 422 field list, at most 3 fields then "and N more"), drops a placeholder `HTTP_<status>` code and adds the Retry-After header. Example as the CLI prints it: `Failed to upload data: HTTP 403 STAMP_OWNERSHIP_DENIED: <message>`. A body with nothing readable raises requests' own HTTPError unchanged. The URL is left out of the text; `--verbose` prints it. Messages are cut at `_GATEWAY_MESSAGE_LIMIT` (500) characters. With x402 off, a 402 that has a real code, or that answers a `--free` request, raises `PaymentRequiredError` with `code`, `gateway_message`, `resets_at` and `free_tier_used`; `free_tier_helps` decides whether the CLI suggests `--free`
+- Upload answers (#143): `upload_data`, `upload_data_with_signing` and `upload_manifest` read the reference through `GatewayClient._require_reference`. A 2xx without a reference (missing, empty or whitespace) raises `ConnectionError`, or `PaymentSettledNotDeliveredError` when a payment was sent. A 2xx whose `X-PAYMENT-RESPONSE` receipt says `success: false` raises `PaymentOutcomeUnknownError`: the gateway sends the receipt only after a successful settlement. `PaymentTransactionFailedError` is no longer raised. Notary 400s (`NOTARY_NOT_ENABLED`, `NOTARY_NOT_CONFIGURED`, `INVALID_DOCUMENT_FORMAT`, `INVALID_SIGN_OPTION`) are read through `_gateway_error`, so every body shape gives text
 - Chain pre-flight balance check: `_send_transaction()` estimates gas cost and raises `InsufficientFundsError` with actionable guidance (wallet address, balance, estimated cost, faucet/bridge URL) before broadcasting
+- Chain errors to library callers (#187): every public `ChainClient` method has a `_read_method` or `_write_method` decorator. Both run `redact_exception_chain()` (`chain/exceptions.py`) on a `ChainError` they raise, which replaces each raw exception in `__cause__` / `__context__` with a `RedactedException` copy (redacted text, `original_type`, the original traceback). `_read_method` also turns a raw RPC failure into `ChainConnectionError` (transport, timeout, non-JSON answer) or `ChainConfigurationError` ("The RPC rejected the request: ...", a JSON-RPC error answer), raised from the original, so the redacted original stays in `__cause__`. With `-v`, the read commands, `chain anchor` and `chain protect` (verify and anchor steps) print the redacted traceback of such an error (`_print_chain_traceback` in `cli.py`). `_write_method` does not map raw exceptions: the write path classifies its own errors in `_build_tx`, `_send_transaction` and `_check_contract_code`
 
 ### Configuration management
 Uses python-dotenv for environment configuration. `config.py` loads `find_dotenv(usecwd=True)`: the `.env` of the working directory, else the nearest one in a parent directory; never the install directory (#141).
@@ -353,19 +358,19 @@ Uses python-dotenv for environment configuration. `config.py` loads `find_dotenv
 - `X402_PRIVATE_KEY`: Wallet private key for signing payments
 - `X402_PRIVATE_KEY_ENV`: Name of the variable holding the key (default `X402_PRIVATE_KEY`). Signer and `x402 status`/`balance` share `resolve_x402_private_key()`: a custom name is read alone, otherwise `X402_PRIVATE_KEY` then legacy `SWARM_X402_PRIVATE_KEY`. A value that is not a valid variable name (or contains a run of 32+ hex digits anywhere) resolves no key and is never printed; names are printed only through `printable_key_env_name()`
 - `X402_RPC_URL`: RPC for the USDC balance and EIP-712 domain checks (optional; `X402Client(rpc_url=...)` wins, else the network preset). Registered for redaction
-- `X402_NETWORK`: `base-sepolia` (testnet) or `base` (mainnet)
+- `X402_NETWORK`: `base-sepolia` (testnet) or `base` (mainnet). The CAIP-2 ids `eip155:84532` and `eip155:8453` are accepted too (`normalize_network()` in `core/x402_client.py`); a payment option named either way matches, and the signed payload repeats the option's own name
 - `X402_AUTO_PAY`: Enable auto-pay without prompts (default: false; `--no-auto-pay` overrides it per command)
 - `X402_MAX_AUTO_PAY_USD`: Maximum auto-pay amount per request (default: 1.00). A hard cap: above it the CLI prompts (default No) and library use without a callback refuses before signing. Compared exactly as the decimal value written (`parse_auto_pay_limit()` in `core/gateway_client.py`), so 0.30 allows a payment of 0.30 USDC. `config.X402_MAX_AUTO_PAY_USD` and `--max-pay` are kept as strings (no float round-trip). A value that is not a finite number of 0 or more (`abc`, `nan`, `inf`, `-1`), or is not written in plain ASCII digits (`0_30`), is rejected: `GatewayClient` raises `ValueError`; the CLI exits 1 for `--max-pay` in `main()`, and for the variable in `_get_gateway_client_with_x402()`, so `x402 status` (which warns) and `--help` still work
 - `X402_EXPECTED_PAY_TO`: Only sign payments to this address (optional). Independently of it, `X402Client.refusal_reason()` refuses non-`exact` schemes, a non-USDC `asset` and malformed amounts or recipients before signing
 
 **Chain / Blockchain Configuration**:
-- `CHAIN_NAME`: `base-sepolia` (testnet, default) or `base` (mainnet)
-- `CHAIN_RPC_URL`: Custom RPC URL (optional, overrides preset)
+- `CHAIN_NAME`: `base-sepolia` (testnet, default), `base` (mainnet), or `localhost` (local development node; takes the chain ID the node reports)
+- `CHAIN_RPC_URL`: Custom RPC URL (optional, overrides preset). With `base`/`base-sepolia` its chain ID must match the preset; use `CHAIN_NAME=localhost` for a local node
 - `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs (optional, replaces the preset fallbacks)
 - `CHAIN_CONTRACT`: Custom contract address (optional, overrides preset)
 - `CHAIN_EXPLORER_URL`: Custom block explorer URL (optional, overrides preset)
 - `CHAIN_GAS_LIMIT`: Explicit gas limit (optional, skips RPC estimation when set)
-- `PROVENANCE_WALLET_KEY`: Wallet private key for signing transactions
+- `PROVENANCE_WALLET_KEY`: Wallet private key for signing transactions. Only chain writes and `chain balance` need it; `_get_chain_client(require_wallet=True)` loads it up front for those commands, and read-only commands use a client that reads the key on first use (#140)
 
 ## Testing approach
 
