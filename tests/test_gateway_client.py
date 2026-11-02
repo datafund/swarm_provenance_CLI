@@ -2231,6 +2231,30 @@ class TestIdempotencyPaymentTotal:
             patcher.stop()
         assert len(sent) == 1
 
+    def _sent_after(self, idem_x402, requests_mock, responses):
+        sent = []
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED] + responses)
+        client, patcher = _client_with(idem_x402, x402_auto_pay=True, x402_on_payment_sent=sent.append)
+        try:
+            assert client.purchase_stamp() == DUMMY_STAMP
+        finally:
+            patcher.stop()
+        return sent
+
+    def test_fresh_success_after_timeout_reports_retry_nonce(self, idem_x402, requests_mock, no_sleep):
+        """A fresh 2xx (not a replay) was charged to the retry, not to the attempt that timed out (#156)."""
+        sent = self._sent_after(idem_x402, requests_mock, [
+            _idem("IDEMPOTENCY_KEY_IN_PROGRESS"), {"exc": requests.exceptions.ReadTimeout}, CREATED,
+        ])
+        assert [p["nonce"] for p in sent] == [NONCES[1]]
+        assert sent[0]["amount"] == "50000"
+
+    def test_fresh_success_after_already_used_reports_new_nonce(self, idem_x402, requests_mock, no_sleep):
+        """After 'already been used', a fresh 2xx was charged to the newly signed attempt (#156)."""
+        used = {"status_code": 402, "json": {"detail": {"error": "This payment authorization has already been used."}}}
+        sent = self._sent_after(idem_x402, requests_mock, [_idem("IDEMPOTENCY_KEY_IN_PROGRESS"), used, CREATED])
+        assert [p["nonce"] for p in sent] == [NONCES[1]]
+
 
 class TestIdempotencyVerificationCases:
     """Cases from the verification review of the retry loop."""
