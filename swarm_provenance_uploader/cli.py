@@ -189,6 +189,78 @@ def _record_x402_payment(payment: dict):
     _x402_session["payments"] += 1
 
 
+def _gateway_stamp_info(gw_client, stamp_id: str, verbose: bool) -> Optional[dict]:
+    """The gateway's stamp details as the dict the usability check reads."""
+    stamp_details = gw_client.get_stamp(stamp_id, verbose=verbose)
+    if not stamp_details:
+        return None
+    return {
+        "exists": stamp_details.exists,
+        "usable": stamp_details.usable,
+        "batchTTL": stamp_details.batchTTL,
+    }
+
+
+def _wait_for_stamp_usable(stamp_id: str, get_stamp_info, stamp_source: str,
+                           stamp_check_retries: int, stamp_check_interval: int, verbose: bool):
+    """Poll until the stamp is usable; exit 1 if it is not usable after all retries.
+
+    stamp_source is "existing", "pool" or "bought" and picks the first message.
+    get_stamp_info() returns a dict with "exists", "usable" and "batchTTL", or None.
+    """
+    if stamp_source == "existing":
+        typer.echo(f"Verifying stamp is usable...")
+    elif stamp_source == "pool":
+        typer.echo(f"Verifying pooled stamp is usable...")
+    else:
+        typer.echo(f"Waiting for stamp to become usable (up to {stamp_check_retries * stamp_check_interval // 60} minutes)...")
+    stamp_is_ready_for_upload = False
+    for i in range(stamp_check_retries):
+        if not verbose:
+            # Simple progress indicator for non-verbose mode
+            typer.echo(f"Checking stamp usability (attempt {i+1}/{stamp_check_retries})... ", nl=False)
+
+        try:
+            stamp_info = get_stamp_info()
+
+            if stamp_info:
+                exists = stamp_info.get("exists")
+                usable = stamp_info.get("usable", False)
+                batch_ttl_seconds = stamp_info.get("batchTTL")  # TTL in seconds
+
+                if verbose:
+                    ttl_str = f"{batch_ttl_seconds // 60}m {batch_ttl_seconds % 60}s" if batch_ttl_seconds is not None else "N/A"
+                    typer.echo(f"    Attempt {i+1}: Stamp found - Exists={exists}, Usable={usable}, TTL={ttl_str}")
+
+                # Check usable flag - exists may be None from gateway API
+                if usable:
+                    stamp_is_ready_for_upload = True
+                    if not verbose: typer.echo(typer.style("OK", fg=typer.colors.GREEN))
+                    else: typer.secho(f"    Stamp {stamp_id.lower()} is now USABLE!", fg=typer.colors.GREEN)
+                    break
+                else:
+                    if not verbose: typer.echo("retrying...")
+            else:
+                if not verbose: typer.echo("not found, retrying...")
+
+        except Exception as e:
+            if not verbose: typer.echo(typer.style("error checking, retrying...", fg=typer.colors.YELLOW))
+            else: typer.echo(f"    Warning: Error during stamp info check on attempt {i+1}: {e}")
+
+
+        if i < stamp_check_retries - 1:
+            if verbose:
+                typer.echo(f"    Waiting {stamp_check_interval}s before next check...")
+            time.sleep(stamp_check_interval)
+        elif not stamp_is_ready_for_upload and not verbose:  # Last attempt failed, print newline
+            typer.echo(typer.style("failed.", fg=typer.colors.RED))
+
+
+    if not stamp_is_ready_for_upload:
+        typer.secho(f"ERROR: Stamp {stamp_id.lower()} did not become USABLE after {stamp_check_retries} retries.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
 def _hold_unused_stamp(stamp_id: str, how: str):
     """Remember a stamp this command acquired until the upload that uses it succeeds."""
     _unused_stamp.update(id=stamp_id, how=how)
@@ -695,69 +767,20 @@ def upload(
 
     # Poll for stamp existence and usability
     if used_existing_stamp:
-        typer.echo(f"Verifying stamp is usable...")
+        stamp_source = "existing"
     elif acquired_from_pool:
-        typer.echo(f"Verifying pooled stamp is usable...")
+        stamp_source = "pool"
     else:
-        typer.echo(f"Waiting for stamp to become usable (up to {stamp_check_retries * stamp_check_interval // 60} minutes)...")
-    stamp_is_ready_for_upload = False
-    for i in range(stamp_check_retries):
-        if not verbose:
-            # Simple progress indicator for non-verbose mode
-            typer.echo(f"Checking stamp usability (attempt {i+1}/{stamp_check_retries})... ", nl=False)
+        stamp_source = "bought"
 
-        try:
-            # Get stamp info using appropriate backend
-            if use_gateway:
-                gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
-                stamp_details = gw_client.get_stamp(stamp_id, verbose=verbose)
-                if stamp_details:
-                    stamp_info = {
-                        "exists": stamp_details.exists,
-                        "usable": stamp_details.usable,
-                        "batchTTL": stamp_details.batchTTL,
-                    }
-                else:
-                    stamp_info = None
-            else:
-                stamp_info = swarm_client.get_stamp_info(local_bee_url, stamp_id, verbose=verbose)
+    def _get_stamp_info():
+        if use_gateway:
+            gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
+            return _gateway_stamp_info(gw_client, stamp_id, verbose)
+        return swarm_client.get_stamp_info(local_bee_url, stamp_id, verbose=verbose)
 
-            if stamp_info:
-                exists = stamp_info.get("exists")
-                usable = stamp_info.get("usable", False)
-                batch_ttl_seconds = stamp_info.get("batchTTL")  # TTL in seconds
-
-                if verbose:
-                    ttl_str = f"{batch_ttl_seconds // 60}m {batch_ttl_seconds % 60}s" if batch_ttl_seconds is not None else "N/A"
-                    typer.echo(f"    Attempt {i+1}: Stamp found - Exists={exists}, Usable={usable}, TTL={ttl_str}")
-
-                # Check usable flag - exists may be None from gateway API
-                if usable:
-                    stamp_is_ready_for_upload = True
-                    if not verbose: typer.echo(typer.style("OK", fg=typer.colors.GREEN))
-                    else: typer.secho(f"    Stamp {stamp_id.lower()} is now USABLE!", fg=typer.colors.GREEN)
-                    break
-                else:
-                    if not verbose: typer.echo("retrying...")
-            else:
-                if not verbose: typer.echo("not found, retrying...")
-
-        except Exception as e:
-            if not verbose: typer.echo(typer.style("error checking, retrying...", fg=typer.colors.YELLOW))
-            else: typer.echo(f"    Warning: Error during stamp info check on attempt {i+1}: {e}")
-
-
-        if i < stamp_check_retries - 1:
-            if verbose:
-                typer.echo(f"    Waiting {stamp_check_interval}s before next check...")
-            time.sleep(stamp_check_interval)
-        elif not stamp_is_ready_for_upload and not verbose:  # Last attempt failed, print newline
-            typer.echo(typer.style("failed.", fg=typer.colors.RED))
-
-
-    if not stamp_is_ready_for_upload:
-        typer.secho(f"ERROR: Stamp {stamp_id.lower()} did not become USABLE after {stamp_check_retries} retries.", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+    _wait_for_stamp_usable(stamp_id, _get_stamp_info, stamp_source,
+                           stamp_check_retries, stamp_check_interval, verbose)
 
     # 7. (Final) Construct "Provenance Metadata" JSON object
     final_metadata_obj = metadata_builder.create_provenance_metadata_object(
@@ -1229,7 +1252,9 @@ def upload_collection(
     stamp_id: Annotated[Optional[str], typer.Option("--stamp-id", "-s", help="Existing stamp ID to reuse (skips stamp purchase).")] = None,
     use_pool: Annotated[bool, typer.Option("--usePool", help="Acquire stamp from pool instead of purchasing (faster ~5s vs >1min).")] = False,
     deferred: Annotated[bool, typer.Option("--deferred", help="Use deferred upload mode.")] = False,
-    redundancy: Annotated[bool, typer.Option("--redundancy", help="Enable redundancy for the upload.")] = False,
+    redundancy: Annotated[Optional[int], typer.Option("--redundancy", min=0, max=4, help="Erasure coding level 0-4 (0 none, 1 medium, 2 strong, 3 insane, 4 paranoid). Default: the gateway's default, level 2.")] = None,
+    stamp_check_retries: Annotated[int, typer.Option("--stamp-retries", help="Number of times to check for stamp usability.")] = 12,
+    stamp_check_interval: Annotated[int, typer.Option("--stamp-interval", help="Seconds to wait between stamp usability checks.")] = 20,
     output_json: Annotated[bool, typer.Option("--json", help="Output result as JSON.")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False,
 ):
@@ -1279,8 +1304,8 @@ def upload_collection(
             typer.echo(f"    Size: {size}")
         if deferred:
             typer.echo(f"    Deferred: Yes")
-        if redundancy:
-            typer.echo(f"    Redundancy: Yes")
+        if redundancy is not None:
+            typer.echo(f"    Redundancy level: {redundancy}")
     else:
         typer.echo(f"Processing directory: {dir_path.name}/ ({len(all_files)} files)...")
 
@@ -1312,6 +1337,7 @@ def upload_collection(
         raise typer.Exit(code=1)
 
     # Acquire stamp
+    stamp_source = "existing" if stamp_id else ("pool" if use_pool else "bought")
     try:
         gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
 
@@ -1351,6 +1377,15 @@ def upload_collection(
     except Exception as e:
         typer.secho(f"ERROR: Failed acquiring stamp: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+    # Wait until the stamp is usable: the gateway cannot upload to it before that
+    try:
+        _wait_for_stamp_usable(stamp_id, lambda: _gateway_stamp_info(gw_client, stamp_id, verbose),
+                               stamp_source, stamp_check_retries, stamp_check_interval, verbose)
+    except typer.Exit:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
 
     # Upload manifest
     typer.echo("Uploading collection to Swarm...")
