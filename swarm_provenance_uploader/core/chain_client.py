@@ -134,24 +134,36 @@ def _with_fallback(provider, operation):
     Only operations that can safely run twice go through here: reads, and
     the steps of a write before send_raw_transaction. A send is never run
     again.
+
+    Only the outermost call runs the loop. A call made while a loop is
+    already active (a read such as verify() calling get()) runs operation
+    once and leaves the fallback to the outer loop, so one public call tries
+    each endpoint at most once. ChainProvider.health_check() and
+    get_block_number() do the same with their own loops.
     """
-    tried = set()
-    while True:
-        try:
-            return operation()
-        except Exception as e:
-            if not _is_transport_failure(e):
-                raise
-            failed_url = provider.rpc_url
-            tried.add(failed_url)
-            if provider._try_fallback(tried) is not True:
-                raise
-            logger.debug(
-                "RPC request to %s failed (%s); trying again on %s",
-                redact_url(failed_url),
-                redact_urls(_error_reason(e)),
-                redact_url(provider.rpc_url),
-            )
+    if getattr(provider, "_fallback_active", False) is True:
+        return operation()
+    provider._fallback_active = True
+    try:
+        tried = set()
+        while True:
+            try:
+                return operation()
+            except Exception as e:
+                if not _is_transport_failure(e):
+                    raise
+                failed_url = provider.rpc_url
+                tried.add(failed_url)
+                if provider._try_fallback(tried) is not True:
+                    raise
+                logger.debug(
+                    "RPC request to %s failed (%s); trying again on %s",
+                    redact_url(failed_url),
+                    redact_urls(_error_reason(e)),
+                    redact_url(provider.rpc_url),
+                )
+    finally:
+        provider._fallback_active = False
 
 
 def _signed_tx_hash(raw_tx) -> Optional[str]:
@@ -608,6 +620,8 @@ class ChainClient:
         # failure does not mean that nothing was sent
         send_called = False
         raw_tx = None
+        # Receipt waits started: more than one means the wait moved to a fallback
+        receipt_waits = [0]
 
         self._check_contract_code()
 
@@ -651,10 +665,11 @@ class ChainClient:
 
             # Wait for receipt. Polling may move to a fallback RPC for the
             # same hash; the transaction is never sent again.
-            receipt = _with_fallback(
-                self._provider,
-                lambda: web3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-            )
+            def wait_for_receipt():
+                receipt_waits[0] += 1
+                return web3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+            receipt = _with_fallback(self._provider, wait_for_receipt)
 
             if receipt["status"] != 1:
                 raise ChainTransactionError(
@@ -729,6 +744,25 @@ class ChainClient:
                 # The send raised before it returned the hash: the hash of
                 # the signed bytes is the same value
                 tx_hash_str = _signed_tx_hash(raw_tx)
+            if _is_receipt_timeout(e) and receipt_waits[0] > 1:
+                # The RPC failed during the wait, and the fallback did not
+                # return a receipt in time. The transaction was sent and may
+                # be mined: do not report it as failed (#168 review; #167
+                # changes the timeout handling as a whole)
+                raise TransactionOutcomeUnknownError(
+                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} was "
+                    f"sent, but the RPC failed while waiting for its receipt, and the "
+                    f"fallback RPC did not return the receipt in time, so its outcome "
+                    f"is unknown: {reason}",
+                    tx_hash=tx_hash_str,
+                    event_name=expected_event,
+                    expected_count=expected_count,
+                    contract_address=self._contract.address,
+                    explorer_url=(
+                        self._provider.get_explorer_tx_url(tx_hash_str) if tx_hash_str else None
+                    ),
+                    reason=reason,
+                ) from e
             # Transport only: connection, timeout, or an answer that is not
             # JSON-RPC. A JSON-RPC error answer means the node answered. A
             # receipt-wait timeout keeps its own handling.

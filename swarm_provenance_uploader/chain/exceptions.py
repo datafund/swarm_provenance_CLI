@@ -35,6 +35,8 @@ class ChainIdMismatchError(ChainConfigurationError):
 
     Raised for the ``base`` and ``base-sepolia`` presets, when the client
     starts or before its first signature. Nothing has been signed or sent.
+    ChainProvider.health_check() raises it for any preset when the RPC in
+    use reports another chain ID; no fallback is tried then.
     """
 
     def __init__(

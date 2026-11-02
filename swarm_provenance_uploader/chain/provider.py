@@ -141,6 +141,10 @@ class ChainProvider:
         self.deploy_block = preset.get("deploy_block")
         self._custom_rpc = rpc_url is not None
         self._request_timeout = request_timeout
+        # True while ChainClient's fallback loop (_with_fallback) runs: the
+        # loops below then leave the fallback to it, so one call tries each
+        # endpoint at most once
+        self._fallback_active = False
 
         # Build ordered list of RPC URLs to try
         if rpc_fallbacks is not None:
@@ -313,6 +317,9 @@ class ChainProvider:
             True if connected and chain ID matches.
 
         Raises:
+            ChainIdMismatchError: If the RPC in use reports another chain ID.
+                No fallback is tried: an endpoint on the wrong chain is a
+                configuration error, as in reads and writes.
             ChainConnectionError: If connection fails (after trying fallbacks).
         """
         tried = set()
@@ -325,15 +332,21 @@ class ChainProvider:
                     )
                 actual_chain_id = self._web3.eth.chain_id
                 if actual_chain_id != self.chain_id:
-                    raise ChainConnectionError(
-                        f"Chain ID mismatch: expected {self.chain_id}, got {actual_chain_id}",
-                        rpc_url=self.rpc_url,
+                    raise ChainIdMismatchError(
+                        f"Chain ID mismatch: chain '{self.chain}' has chain ID "
+                        f"{self.chain_id}, but the RPC endpoint "
+                        f"{redact_url(self.rpc_url)} reports chain ID {actual_chain_id}",
+                        chain=self.chain,
+                        expected_chain_id=self.chain_id,
+                        actual_chain_id=actual_chain_id,
                     )
                 return True
+            except ChainIdMismatchError:
+                raise
             except Exception as e:
                 # Each URL is tried at most once per call
                 tried.add(self.rpc_url)
-                if self._try_fallback(tried):
+                if not self._fallback_active and self._try_fallback(tried):
                     continue
                 if isinstance(e, ChainConnectionError):
                     raise
@@ -358,7 +371,7 @@ class ChainProvider:
                 return self._web3.eth.block_number
             except Exception as e:
                 tried.add(self.rpc_url)
-                if self._try_fallback(tried):
+                if not self._fallback_active and self._try_fallback(tried):
                     continue
                 raise ChainConnectionError(
                     f"Failed to get block number: {e}",
