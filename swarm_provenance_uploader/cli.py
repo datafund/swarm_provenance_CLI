@@ -2206,6 +2206,20 @@ def _rpc_rejection_message(e: Exception) -> Optional[str]:
     return rejection_message(e)
 
 
+def _print_chain_traceback(e: Exception, verbose: bool) -> None:
+    """With verbose, print the traceback of a chain error to stderr, URLs redacted.
+
+    Local variables are not printed. ChainClient redacts the exception chain
+    of the chain errors it raises (#187); redact_urls also covers the rest.
+    """
+    if not verbose:
+        return
+    import traceback
+
+    trace = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+    typer.echo(redact_urls(trace), err=True)
+
+
 def _report_unexpected_chain_error(e: Exception, verbose: bool = False) -> None:
     """Print an error that no chain command handles, without the RPC URL.
 
@@ -2214,11 +2228,7 @@ def _report_unexpected_chain_error(e: Exception, verbose: bool = False) -> None:
     also lists local variables (#169). With verbose, the traceback is
     printed without local variables and with URLs redacted.
     """
-    if verbose:
-        import traceback
-
-        trace = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-        typer.echo(redact_urls(trace), err=True)
+    _print_chain_traceback(e, verbose)
     rejection = _rpc_rejection_message(e)
     if rejection is not None:
         typer.secho(f"ERROR: The RPC rejected the request: {redact_urls(rejection)}",
@@ -2464,11 +2474,13 @@ def chain_balance(
     except typer.Exit:
         raise
     except exceptions.ChainConnectionError as e:
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
@@ -2511,11 +2523,13 @@ def chain_verify(
     except typer.Exit:
         raise
     except exceptions.ChainConnectionError as e:
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
@@ -2551,11 +2565,13 @@ def chain_get(
         except typer.Exit:
             raise
         except exceptions.ChainConnectionError as e:
+            _print_chain_traceback(e, verbose)
             typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
             if e.rpc_url:
                 typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
             raise typer.Exit(code=1)
         except exceptions.ChainError as e:
+            _print_chain_traceback(e, verbose)
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
 
@@ -2610,11 +2626,13 @@ def chain_get(
         typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
@@ -2808,11 +2826,13 @@ def chain_lookup(
         typer.secho(f"Not found: no record linked to storage ref {storage_ref}.", fg=typer.colors.YELLOW)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
@@ -2969,11 +2989,13 @@ def chain_status(
             typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
             raise typer.Exit(code=1)
         except exceptions.ChainConnectionError as e:
+            _print_chain_traceback(e, verbose)
             typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
             if e.rpc_url:
                 typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
             raise typer.Exit(code=1)
         except exceptions.ChainError as e:
+            _print_chain_traceback(e, verbose)
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
 
@@ -3229,11 +3251,15 @@ def chain_protect(
     try:
         record = client.get(original_hash, verbose=verbose)
     except exceptions.ChainError as e:
+        if not isinstance(e, exceptions.DataNotRegisteredError):
+            _print_chain_traceback(e, verbose)
         if output_json:
             _composite_step_failed(e, "verify", results, output_json=True)
         if isinstance(e, exceptions.DataNotRegisteredError):
             typer.secho(f"ERROR: Original hash is not registered on-chain.", fg=typer.colors.RED, err=True)
             typer.echo(f"  Anchor it first: swarm-prov-upload chain anchor {original_hash}", err=True)
+        elif isinstance(e, exceptions.ChainConnectionError):
+            typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         else:
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)

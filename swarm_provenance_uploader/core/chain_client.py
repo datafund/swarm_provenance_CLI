@@ -156,8 +156,9 @@ def _redacted_errors(map_rpc_failures: bool):
     (redact_exception_chain), because library callers can print
     ``__cause__`` and ``__context__``. With map_rpc_failures (read
     methods), a raw RPC failure becomes a chain error (_read_error), raised
-    from None; its suppressed ``__context__`` is redacted too. Other
-    exceptions pass through unchanged.
+    from it, so the redacted original stays in ``__cause__`` and a
+    traceback still shows where it failed. Other exceptions pass through
+    unchanged.
     """
     def decorator(method):
         @functools.wraps(method)
@@ -173,7 +174,7 @@ def _redacted_errors(map_rpc_failures: bool):
                     error = _read_error(e, self._provider.rpc_url)
                     if error is None:
                         raise
-                    raise error from None
+                    raise error from e
             except ChainError as e:
                 redact_exception_chain(e)
                 raise

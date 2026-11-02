@@ -5,6 +5,8 @@ the main ProvenanceError base to keep a unified exception tree while
 allowing the chain module to be self-contained.
 """
 
+from typing import Optional
+
 from ..exceptions import ProvenanceError
 from .redact import redact_url, redact_urls
 
@@ -216,7 +218,7 @@ class RedactedException(Exception):
     where the error happened. ``original_type`` is the qualified class name.
     """
 
-    def __init__(self, message: str, original_type: str = None):
+    def __init__(self, message: str, original_type: Optional[str] = None):
         super().__init__(message)
         self.original_type = original_type
 
