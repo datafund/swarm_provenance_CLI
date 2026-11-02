@@ -28,7 +28,10 @@ PLACEHOLDER = "…"
 # whitespace, quotes and angle brackets. The scheme is at most 32 characters:
 # an unbounded run made matching quadratic on long texts such as
 # "a.a.a.…" or "a-a-a-…", which web3 copies from a non-JSON RPC answer.
-_URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]{0,31}://[^\s\"'<>]+", re.IGNORECASE)
+# There is no word boundary before the scheme, so a URL directly after a
+# digit, an underscore or a percent-encoded character ("rpc_https://…",
+# "%22https://…") is matched too. The scheme limit keeps this linear.
+_URL_RE = re.compile(r"[a-z][a-z0-9+.-]{0,31}://[^\s\"'<>]+", re.IGNORECASE)
 
 # A scheme at the start of a string
 _SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)

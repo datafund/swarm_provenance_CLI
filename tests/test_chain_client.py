@@ -2210,6 +2210,226 @@ class TestProviderEnhancements:
         assert provider.deploy_block == 39_905_249
 
 
+def _web3_per_url(mock_chain_deps, chain_ids, down=()):
+    """Make Web3(HTTPProvider(url)) return a separate mock node for each URL.
+
+    chain_ids maps URL -> the chain ID that node reports. URLs in ``down``
+    do not connect and fail every call.
+    """
+    nodes = {}
+    for url, chain_id in chain_ids.items():
+        node = MagicMock()
+        node.to_checksum_address = lambda x: x
+        if url in down:
+            node.is_connected.return_value = False
+            type(node.eth).chain_id = PropertyMock(side_effect=ConnectionError("down"))
+            type(node.eth).block_number = PropertyMock(side_effect=ConnectionError("down"))
+        else:
+            node.is_connected.return_value = True
+            node.eth.chain_id = chain_id
+            node.eth.block_number = 100 + chain_id
+        nodes[url] = node
+
+    web3_class = mock_chain_deps["web3_class"]
+    web3_class.HTTPProvider.side_effect = lambda url, **kw: url
+    web3_class.side_effect = lambda url: nodes[url]
+    return nodes
+
+
+class TestChainIdPresetMismatch:
+    """A named preset with an RPC on another chain is an error before anything is read or signed (#142)."""
+
+    @pytest.mark.parametrize("chain,preset_id,node_id", [
+        ("base-sepolia", 84532, 8453),
+        ("base", 8453, 84532),
+    ])
+    def test_custom_rpc_on_another_chain_is_an_error(self, mock_chain_deps, chain, preset_id, node_id):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        mock_chain_deps["web3_instance"].eth.chain_id = node_id
+        with pytest.raises(ChainConfigurationError) as exc_info:
+            ChainProvider(chain=chain, rpc_url="https://custom.rpc.io", contract_address=DUMMY_CONTRACT)
+        message = str(exc_info.value)
+        assert str(preset_id) in message
+        assert str(node_id) in message
+        assert chain in message
+        assert "CHAIN_NAME=localhost" in message
+        assert "--chain localhost" not in message
+
+    def test_custom_rpc_on_the_preset_chain_is_accepted(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        mock_chain_deps["web3_instance"].eth.chain_id = 84532
+        provider = ChainProvider(chain="base-sepolia", rpc_url="https://custom.rpc.io")
+        assert provider.chain_id == 84532
+
+    def test_localhost_preset_still_auto_detects(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        mock_chain_deps["web3_instance"].eth.chain_id = 1337
+        provider = ChainProvider(chain="localhost", rpc_url="http://127.0.0.1:8546")
+        assert provider.chain_id == 1337
+
+    def test_detection_failure_keeps_the_preset_id(self, mock_chain_deps):
+        """Unchanged: an unreachable custom RPC is reported later by health_check, not at init."""
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        type(mock_chain_deps["web3_instance"].eth).chain_id = PropertyMock(side_effect=ConnectionError("down"))
+        provider = ChainProvider(chain="base-sepolia", rpc_url="https://custom.rpc.io")
+        assert provider.chain_id == 84532
+
+    def test_client_reads_fail_on_mismatch(self, mock_chain_deps):
+        """Reads fail too: the client is never created."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        mock_chain_deps["web3_instance"].eth.chain_id = 8453
+        with pytest.raises(ChainConfigurationError, match="84532"):
+            ChainClient(chain="base-sepolia", rpc_url="https://custom.rpc.io")
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.assert_not_called()
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    def test_get_block_number_does_not_switch_to_a_fallback_on_another_chain(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+        from swarm_provenance_uploader.chain.exceptions import ChainConnectionError
+
+        primary, wrong = "https://primary.rpc.io", "https://wrong-chain.rpc.io"
+        _web3_per_url(mock_chain_deps, {primary: 84532, wrong: 8453}, down=(primary,))
+        provider = ChainProvider(chain="base-sepolia", rpc_url=primary, rpc_fallbacks=[wrong])
+        with pytest.raises(ChainConnectionError):
+            provider.get_block_number()
+        assert provider.rpc_url == primary
+
+    def test_fallback_on_the_preset_chain_is_still_used(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        primary, wrong, good = "https://primary.rpc.io", "https://wrong-chain.rpc.io", "https://good.rpc.io"
+        _web3_per_url(mock_chain_deps, {primary: 84532, wrong: 8453, good: 84532}, down=(primary,))
+        provider = ChainProvider(chain="base-sepolia", rpc_url=primary, rpc_fallbacks=[wrong, good])
+        assert provider.get_block_number() == 100 + 84532
+        assert provider.rpc_url == good
+
+    def test_preset_fallbacks_are_checked_too(self, mock_chain_deps):
+        """No custom RPC, explicit fallbacks: a fallback on another chain is skipped by health_check."""
+        from swarm_provenance_uploader.chain.provider import ChainProvider, CHAIN_PRESETS
+        from swarm_provenance_uploader.chain.exceptions import ChainConnectionError
+
+        primary = CHAIN_PRESETS["base-sepolia"]["rpc_url"]
+        wrong = "https://wrong-chain.rpc.io"
+        _web3_per_url(mock_chain_deps, {primary: 84532, wrong: 8453}, down=(primary,))
+        provider = ChainProvider(chain="base-sepolia", rpc_fallbacks=[wrong])
+        with pytest.raises(ChainConnectionError):
+            provider.health_check()
+        assert provider.rpc_url == primary
+
+
+class TestChainIdCheckedBeforeFirstSignature:
+    """The chain ID is checked again before the first signature (#142 review).
+
+    If the custom RPC is unreachable when the client starts, the init check
+    cannot run. A node on another chain that comes up later must not get a
+    signed transaction.
+    """
+
+    def _unregistered(self, mock_chain_deps):
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
+        )
+
+    def _nothing_signed(self, mock_chain_deps):
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    def test_node_on_another_chain_after_start_is_refused(self, mock_chain_deps):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.chain.exceptions import ChainIdMismatchError
+
+        self._unregistered(mock_chain_deps)
+        eth = mock_chain_deps["web3_instance"].eth
+        # Down when the client starts ...
+        type(eth).chain_id = PropertyMock(side_effect=ConnectionError("down"))
+        client = ChainClient(chain="base-sepolia", rpc_url="http://127.0.0.1:8546", gas_limit=200_000)
+        # ... then a mainnet node comes up at the same URL
+        type(eth).chain_id = PropertyMock(return_value=8453)
+
+        with pytest.raises(ChainIdMismatchError) as exc_info:
+            client.anchor(swarm_hash=DUMMY_HASH)
+        assert isinstance(exc_info.value, ChainConfigurationError)
+        assert "84532" in str(exc_info.value) and "8453" in str(exc_info.value)
+        assert exc_info.value.expected_chain_id == 84532
+        assert exc_info.value.actual_chain_id == 8453
+        self._nothing_signed(mock_chain_deps)
+
+    def test_still_unreachable_fails_the_write(self, mock_chain_deps):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        self._unregistered(mock_chain_deps)
+        eth = mock_chain_deps["web3_instance"].eth
+        type(eth).chain_id = PropertyMock(side_effect=ConnectionError("down"))
+        client = ChainClient(chain="base-sepolia", rpc_url="http://127.0.0.1:8546", gas_limit=200_000)
+
+        with pytest.raises(ChainConnectionError):
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+        self._nothing_signed(mock_chain_deps)
+
+    def test_preset_rpc_on_another_chain_is_refused(self, mock_chain_deps):
+        """No custom RPC: the preset RPC is not queried at start, so the check runs before the write."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.chain.exceptions import ChainIdMismatchError
+
+        self._unregistered(mock_chain_deps)
+        mock_chain_deps["web3_instance"].eth.chain_id = 8453
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(ChainIdMismatchError):
+            client.anchor(swarm_hash=DUMMY_HASH)
+        self._nothing_signed(mock_chain_deps)
+
+    def test_checked_once_per_client(self, mock_chain_deps):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        self._unregistered(mock_chain_deps)
+        calls = PropertyMock(return_value=84532)
+        type(mock_chain_deps["web3_instance"].eth).chain_id = calls
+        client = ChainClient(chain="base-sepolia")
+        client.set_status(swarm_hash=DUMMY_HASH, status=1)
+        client.set_status(swarm_hash=DUMMY_HASH, status=0)
+        assert calls.call_count == 1
+        assert mock_chain_deps["account"].sign_transaction.call_count == 2
+
+    def test_init_mismatch_is_chain_id_mismatch_error(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+        from swarm_provenance_uploader.chain.exceptions import ChainIdMismatchError
+
+        mock_chain_deps["web3_instance"].eth.chain_id = 8453
+        with pytest.raises(ChainIdMismatchError) as exc_info:
+            ChainProvider(chain="base-sepolia", rpc_url="https://custom.rpc.io")
+        assert exc_info.value.chain == "base-sepolia"
+
+    def test_exported_from_package_exceptions(self):
+        from swarm_provenance_uploader import exceptions
+        from swarm_provenance_uploader.chain.exceptions import ChainIdMismatchError
+
+        assert exceptions.ChainIdMismatchError is ChainIdMismatchError
+
+class TestPendingNonce:
+    """The nonce counts pending transactions, so a second write does not reuse it (#142)."""
+
+    def test_send_transaction_uses_pending_nonce(self, mock_chain_deps):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
+        )
+        mock_chain_deps["web3_instance"].eth.get_transaction_count.return_value = 7
+
+        client = ChainClient(chain="base-sepolia")
+        client.anchor(swarm_hash=DUMMY_HASH)
+
+        mock_chain_deps["web3_instance"].eth.get_transaction_count.assert_called_with(DUMMY_ADDRESS, "pending")
+        tx = mock_chain_deps["account"].sign_transaction.call_args[0][0]
+        assert tx["nonce"] == 7
+
+
 class TestProvenanceChainV2StateReads:
     """Tests for provenance chain traversal using v2 state reads."""
 
@@ -3491,3 +3711,163 @@ class TestRpcUrlRedaction:
             assert provider.health_check() is True
         assert "RPC fallback" in caplog.text
         assert RPC_KEY not in caplog.text
+
+
+# --- #187: errors that ChainClient raises to library callers ---
+
+
+def _chain_texts(error):
+    """Text of error and of every exception linked through __cause__ and __context__."""
+    seen, texts, todo = set(), [], [error]
+    while todo:
+        exc = todo.pop(0)
+        if exc is None or id(exc) in seen:
+            continue
+        seen.add(id(exc))
+        texts.append(f"{type(exc).__name__}: {exc} {exc.args!r} {vars(exc)!r}")
+        todo.extend([exc.__cause__, exc.__context__])
+    return texts
+
+
+def _assert_no_key(error, key=RPC_KEY):
+    import traceback
+
+    from swarm_provenance_uploader.exceptions import ChainError
+
+    assert isinstance(error, ChainError), repr(error)
+    trace = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    assert key not in trace, trace
+    for text in _chain_texts(error):
+        assert key not in text, text
+
+
+_READ_CALLS = {
+    "get": lambda client: client.get(DUMMY_HASH),
+    "verify": lambda client: client.verify(DUMMY_HASH),
+    "get_by_storage_ref": lambda client: client.get_by_storage_ref(DUMMY_HASH),
+    "balance": lambda client: client.balance(),
+    "get_provenance_chain": lambda client: client.get_provenance_chain(DUMMY_HASH),
+}
+
+_READ_CASES = (
+    [(mode, m) for mode in ("http401", "jsonrpc", "refused") for m in _READ_CALLS]
+    + [("html", m) for m in ("get", "balance")]
+)
+
+
+class TestReadErrorsRealWeb3:
+    """Read methods with the real web3 and requests against failing local RPCs (#187).
+
+    No mock_chain_deps: it replaces web3 with a MagicMock. Only reads are
+    made, only to 127.0.0.1, with the dummy test key.
+    """
+
+    @pytest.mark.parametrize("path", [f"/v2/{RPC_KEY}", f"/?apikey={RPC_KEY}"], ids=["path", "query"])
+    @pytest.mark.parametrize("mode,method", _READ_CASES, ids=[f"{m}-{n}" for m, n in _READ_CASES])
+    def test_read_raises_redacted_chain_error(
+        self, monkeypatch, failing_rpc_server, closed_port, no_web3_retry_sleep, mode, method, path
+    ):
+        pytest.importorskip("web3")
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        monkeypatch.setenv("PROVENANCE_WALLET_KEY", DUMMY_PRIVATE_KEY)
+        failing_rpc_server.mode = mode
+        port = closed_port if mode == "refused" else failing_rpc_server.server_port
+        client = ChainClient(
+            chain="base-sepolia", rpc_url=f"http://127.0.0.1:{port}{path}", rpc_fallbacks=[]
+        )
+
+        expected = ChainConfigurationError if mode == "jsonrpc" else ChainConnectionError
+        with pytest.raises(expected) as exc_info:
+            _READ_CALLS[method](client)
+
+        error = exc_info.value
+        _assert_no_key(error)
+        if mode == "jsonrpc":
+            assert str(error).startswith("The RPC rejected the request: invalid api key in /")
+            assert error.__cause__.original_type == "web3.exceptions.Web3RPCError"
+        else:
+            assert error.rpc_url == f"http://127.0.0.1:{port}/…"
+            expected_text = {
+                "http401": "401 Client Error",
+                "refused": "Connection refused",
+                "html": "",
+            }[mode]
+            assert expected_text in str(error)
+            # The redacted original stays as the cause, so tracebacks show where it failed
+            assert error.__cause__.original_type.startswith(("requests.", "json.", "web3."))
+
+    @pytest.mark.parametrize("mode", ["jsonrpc", "refused"])
+    def test_health_check_chain_is_redacted(self, monkeypatch, failing_rpc_server, closed_port, no_web3_retry_sleep, mode):
+        """health_check already raises ChainConnectionError; its cause must be redacted too."""
+        pytest.importorskip("web3")
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        monkeypatch.setenv("PROVENANCE_WALLET_KEY", DUMMY_PRIVATE_KEY)
+        failing_rpc_server.mode = mode
+        port = closed_port if mode == "refused" else failing_rpc_server.server_port
+        client = ChainClient(
+            chain="base-sepolia", rpc_url=f"http://127.0.0.1:{port}/v2/{RPC_KEY}", rpc_fallbacks=[]
+        )
+        # is_connected() swallows the failure; the chain id request raises
+        monkeypatch.setattr(client._provider._web3, "is_connected", lambda *a, **k: True)
+
+        with pytest.raises(ChainConnectionError) as exc_info:
+            client.health_check()
+
+        _assert_no_key(exc_info.value)
+        assert exc_info.value.__cause__ is not None
+
+
+class TestChainErrorCauseRedaction:
+    """Every ChainError that ChainClient raises has a redacted chain (#187)."""
+
+    @pytest.mark.parametrize("rpc_url", RPC_URLS_WITH_KEY, ids=RPC_URL_IDS)
+    def test_code_check_cause(self, mock_chain_deps, rpc_url):
+        import requests
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.get_code.side_effect = requests.exceptions.HTTPError(
+            f"401 Client Error: Unauthorized for url: {rpc_url} (key {RPC_KEY})"
+        )
+        client = ChainClient(chain="base-sepolia", rpc_url=rpc_url)
+
+        with pytest.raises(ChainConnectionError) as exc_info:
+            client.access(swarm_hash=DUMMY_HASH)
+
+        _assert_no_key(exc_info.value)
+        cause = exc_info.value.__cause__
+        assert cause.original_type == "requests.exceptions.HTTPError"
+        assert "401 Client Error: Unauthorized" in str(cause)
+
+    def test_build_tx_cause(self, mock_chain_deps):
+        import requests
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.get_code.return_value = DUMMY_CODE
+        client = ChainClient(chain="base-sepolia", rpc_url=RPC_URLS_WITH_KEY[0])
+        client._contract.build_record_access_tx = MagicMock(
+            side_effect=requests.exceptions.ConnectionError(
+                f"Max retries exceeded with url: /v2/{RPC_KEY} ({RPC_URLS_WITH_KEY[0]})"
+            )
+        )
+
+        with pytest.raises(ChainConnectionError) as exc_info:
+            client.access(swarm_hash=DUMMY_HASH)
+
+        _assert_no_key(exc_info.value)
+
+    def test_write_method_passes_raw_errors_through(self, mock_chain_deps):
+        """Write paths keep their own classification: a raw error is not mapped here."""
+        import requests
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        client = ChainClient(chain="base-sepolia", rpc_url=RPC_URLS_WITH_KEY[0])
+        raw = requests.exceptions.ConnectionError("refused")
+        client._check_contract_code = MagicMock(side_effect=raw)
+
+        with pytest.raises(requests.exceptions.ConnectionError) as exc_info:
+            client.access(swarm_hash=DUMMY_HASH)
+        assert exc_info.value is raw

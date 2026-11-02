@@ -5,6 +5,8 @@ the main ProvenanceError base to keep a unified exception tree while
 allowing the chain module to be self-contained.
 """
 
+from typing import Optional
+
 from ..exceptions import ProvenanceError
 from .redact import redact_url, redact_urls
 
@@ -26,6 +28,26 @@ class ChainError(ProvenanceError):
 class ChainConfigurationError(ChainError):
     """Missing dependencies, invalid config, or missing wallet key."""
     pass
+
+
+class ChainIdMismatchError(ChainConfigurationError):
+    """The RPC endpoint is on another chain than the configured preset.
+
+    Raised for the ``base`` and ``base-sepolia`` presets, when the client
+    starts or before its first signature. Nothing has been signed or sent.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        chain: str = None,
+        expected_chain_id: int = None,
+        actual_chain_id: int = None,
+    ):
+        super().__init__(message)
+        self.chain = chain
+        self.expected_chain_id = expected_chain_id
+        self.actual_chain_id = actual_chain_id
 
 
 class ChainConnectionError(ChainError):
@@ -203,3 +225,80 @@ class TransformationAlreadyExistsError(ChainError):
         self.original_hash = original_hash
         self.new_hash = new_hash
         self.existing_description = existing_description
+
+
+class RedactedException(Exception):
+    """A redacted copy of an exception linked to a ChainError (#187).
+
+    :func:`redact_exception_chain` puts it in place of a raw exception, such
+    as a ``requests`` or web3 error, in a ChainError's ``__cause__`` or
+    ``__context__``, because the raw text can repeat the RPC URL with its
+    API key. The message is ``"<module>.<class>: <redacted text>"``, and
+    ``__traceback__`` is the original's, so a printed traceback still shows
+    where the error happened. ``original_type`` is the qualified class name.
+    """
+
+    def __init__(self, message: str, original_type: Optional[str] = None):
+        super().__init__(message)
+        self.original_type = original_type
+
+
+def _redacted_copy(error: BaseException) -> RedactedException:
+    cls = type(error)
+    original_type = f"{cls.__module__}.{cls.__qualname__}"
+    try:
+        text = redact_urls(str(error))
+    except Exception:  # an exception whose __str__ fails
+        text = ""
+    message = f"{original_type}: {text}" if text else original_type
+    return RedactedException(message, original_type=original_type).with_traceback(
+        error.__traceback__
+    )
+
+
+def redact_exception_chain(error: BaseException) -> BaseException:
+    """
+    Replace the raw exceptions linked to ``error`` with redacted copies.
+
+    Walks ``__cause__`` and ``__context__``, also of the linked exceptions.
+    Each linked exception that is not a ChainError is replaced by a
+    :class:`RedactedException`; a ChainError is kept, because its message is
+    redacted when it is created, and its own links are walked. The original
+    exceptions are not changed. ``__suppress_context__`` keeps its value, so
+    ``traceback.format_exception()`` shows the same links as before. Safe to
+    call more than once and on chains with cycles.
+
+    Frame local variables of the kept tracebacks are not changed: a tool
+    that prints them (``TracebackException(capture_locals=True)``, a
+    debugger) can still show the RPC URL.
+
+    Args:
+        error: The exception to clean, usually a ChainError.
+
+    Returns:
+        ``error`` itself.
+    """
+    replaced = {}
+
+    def visit(exc):
+        if exc is None:
+            return None
+        if id(exc) in replaced:
+            return replaced[id(exc)]
+        if isinstance(exc, (ChainError, RedactedException)) or exc is error:
+            result = exc
+        else:
+            result = _redacted_copy(exc)
+        replaced[id(exc)] = result
+        # Assigning __cause__ sets __suppress_context__: restore it after
+        suppress = exc.__suppress_context__
+        cause, context = visit(exc.__cause__), visit(exc.__context__)
+        if result.__cause__ is not cause:
+            result.__cause__ = cause
+        if result.__context__ is not context:
+            result.__context__ = context
+        result.__suppress_context__ = suppress
+        return result
+
+    visit(error)
+    return error
