@@ -226,7 +226,8 @@ _X402_EXPLORERS = {
 
 
 def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: str,
-                            final_step: bool = False, final_note: Optional[str] = None):
+                            final_step: bool = False, final_note: Optional[str] = None,
+                            final_stdout: Optional[List[str]] = None):
     """
     Explain a paid request whose payment may have been taken, then exit.
 
@@ -241,13 +242,15 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
             success (IDEMPOTENCY_KEY_DELIVERED_NOT_STORED) is the command's.
         final_note: For a final step that is not an upload: what to print
             when it succeeded but its result cannot be returned.
+        final_stdout: With final_note: the command's normal success lines,
+            printed to stdout in that case, so a script sees them with exit 0.
 
     Raises:
         typer.Exit: Always; code 0 when the final step is known to have
             succeeded, 1 otherwise.
     """
     if isinstance(e, exceptions.PaymentDeliveredNotStoredError):
-        _report_delivered_not_stored(e, action, final_step, final_note)
+        _report_delivered_not_stored(e, action, final_step, final_note, final_stdout)
     if isinstance(e, exceptions.StampPurchasePendingError):
         headline = f"Payment received, but {action} is not confirmed yet."
     elif e.settled:
@@ -395,7 +398,8 @@ def _report_payment_required(e: exceptions.PaymentRequiredError):
 
 
 def _report_delivered_not_stored(e: exceptions.PaymentDeliveredNotStoredError, action: str,
-                                 final_step: bool, final_note: Optional[str] = None):
+                                 final_step: bool, final_note: Optional[str] = None,
+                                 final_stdout: Optional[List[str]] = None):
     """
     The paid request succeeded and was paid once, but its result cannot be returned.
 
@@ -410,6 +414,8 @@ def _report_delivered_not_stored(e: exceptions.PaymentDeliveredNotStoredError, a
             typer.echo(f"  {name + ':':<17}{value}", err=True)
     if final_step and final_note:
         typer.echo(final_note, err=True)
+        for line in final_stdout or ():
+            typer.echo(line)
         raise typer.Exit(code=0)
     if final_step:
         _unused_stamp.update(id=None, how=None)  # the upload used it
@@ -1607,6 +1613,7 @@ def stamps_extend(
         _report_payment_outcome(
             e, "the stamp extension", final_step=True,
             final_note="The batch ID is the stamp ID you gave. Do not pay again.",
+            final_stdout=["SUCCESS: Stamp extended.", f"Batch ID: {stamp_id}"],
         )
     except Exception as e:
         cause = e.__cause__
