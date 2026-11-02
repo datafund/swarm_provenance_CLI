@@ -2907,6 +2907,133 @@ WRITE_FUNCTIONS = [
 ]
 
 
+class _RecordingProvider:
+    """Build a real web3 provider that records each JSON-RPC method it gets.
+
+    It answers only the calls build_transaction makes, so the test runs the
+    real web3 code that decides whether to run eth_estimateGas.
+    """
+
+    @staticmethod
+    def make(web3_module):
+        from web3.providers.base import BaseProvider
+
+        answers = {
+            "eth_chainId": hex(84532),
+            "eth_gasPrice": hex(1_000_000_000),
+            "eth_maxPriorityFeePerGas": hex(1_000_000_000),
+            "eth_estimateGas": hex(100_000),
+            "eth_getBlockByNumber": {
+                "number": "0x1",
+                "hash": "0x" + "11" * 32,
+                "parentHash": "0x" + "22" * 32,
+                "baseFeePerGas": "0x7",
+                "gasLimit": hex(30_000_000),
+                "gasUsed": "0x0",
+                "timestamp": "0x1",
+                "transactions": [],
+            },
+        }
+
+        class RecordingProvider(BaseProvider):
+            def __init__(self):
+                super().__init__()
+                self.methods = []
+
+            def make_request(self, method, params):
+                self.methods.append(method)
+                return {"jsonrpc": "2.0", "id": 1, "result": answers[method]}
+
+            def is_connected(self, show_traceback=False):
+                return True
+
+        return RecordingProvider()
+
+
+# Each build_*_tx method of DataProvenanceContract, with arguments
+BUILDERS = [
+    ("build_register_data_tx", {"data_hash": DUMMY_HASH, "data_type": "t"}),
+    ("build_register_data_for_tx", {"data_hash": DUMMY_HASH, "data_type": "t", "actual_owner": OTHER_ADDRESS}),
+    ("build_batch_register_data_tx", {"data_hashes": [DUMMY_HASH], "data_types": ["t"]}),
+    ("build_set_storage_ref_tx", {"data_hash": DUMMY_HASH, "storage_ref": "b" * 64}),
+    ("build_record_transformation_tx", {"original_hash": DUMMY_HASH, "new_hash": "b" * 64, "description": "d"}),
+    ("build_record_access_tx", {"data_hash": DUMMY_HASH}),
+    ("build_batch_record_access_tx", {"data_hashes": [DUMMY_HASH]}),
+    ("build_set_data_status_tx", {"data_hash": DUMMY_HASH, "status": 1}),
+    ("build_batch_set_data_status_tx", {"data_hashes": [DUMMY_HASH], "statuses": [1]}),
+    ("build_transfer_ownership_tx", {"data_hash": DUMMY_HASH, "new_owner": OTHER_ADDRESS}),
+    ("build_set_delegate_tx", {"delegate": OTHER_ADDRESS, "authorized": True}),
+    ("build_record_merge_transformation_tx", {"source_hashes": [DUMMY_HASH, "c" * 64], "new_hash": "b" * 64, "description": "d", "new_data_type": "t"}),
+]
+
+
+class TestBuildWithExplicitGas:
+    """An explicit gas limit means web3 does not run eth_estimateGas (#180)."""
+
+    def _contract(self):
+        web3_module = pytest.importorskip("web3")
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        provider = _RecordingProvider.make(web3_module)
+        web3 = web3_module.Web3(provider)
+        return DataProvenanceContract(web3, DUMMY_CONTRACT), provider
+
+    @pytest.mark.parametrize("builder,kwargs", BUILDERS, ids=[b[0] for b in BUILDERS])
+    def test_explicit_gas_skips_estimate(self, builder, kwargs):
+        contract, provider = self._contract()
+
+        tx = getattr(contract, builder)(sender=DUMMY_ADDRESS, gas=500_000, **kwargs)
+
+        assert tx["gas"] == 500_000
+        assert "eth_estimateGas" not in provider.methods
+        # web3 still fills in the fee fields
+        assert "maxFeePerGas" in tx
+
+    @pytest.mark.parametrize("builder,kwargs", BUILDERS, ids=[b[0] for b in BUILDERS])
+    def test_without_gas_estimates(self, builder, kwargs):
+        """Control: without a gas limit, web3 runs eth_estimateGas."""
+        contract, provider = self._contract()
+
+        tx = getattr(contract, builder)(sender=DUMMY_ADDRESS, **kwargs)
+
+        assert tx["gas"] == 100_000
+        assert "eth_estimateGas" in provider.methods
+
+
+class TestClientPassesGasLimit:
+    """ChainClient(gas_limit=N) gives N to build_transaction for every write (#180)."""
+
+    @pytest.mark.parametrize(
+        "write,function", list(zip(WRITES, WRITE_FUNCTIONS)), ids=[w[0] for w in WRITES]
+    )
+    def test_gas_limit_reaches_build_transaction(self, mock_chain_deps, write, function):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        method, kwargs, event = write
+        _write_client(mock_chain_deps, [_log(event)])
+        client = ChainClient(chain="base-sepolia", gas_limit=500_000)
+
+        getattr(client, method)(**kwargs)
+
+        build = getattr(mock_chain_deps["contract"].functions, function).return_value.build_transaction
+        assert build.call_args[0][0]["gas"] == 500_000
+        tx = mock_chain_deps["account"].sign_transaction.call_args[0][0]
+        assert tx["gas"] == 500_000
+        mock_chain_deps["web3_instance"].eth.estimate_gas.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "write,function", list(zip(WRITES, WRITE_FUNCTIONS)), ids=[w[0] for w in WRITES]
+    )
+    def test_no_gas_limit_leaves_gas_to_web3(self, mock_chain_deps, write, function):
+        method, kwargs, event = write
+        client = _write_client(mock_chain_deps, [_log(event)])
+
+        getattr(client, method)(**kwargs)
+
+        build = getattr(mock_chain_deps["contract"].functions, function).return_value.build_transaction
+        assert "gas" not in build.call_args[0][0]
+
+
 class ContractLogicError(Exception):
     """Stand-in for web3.exceptions.ContractLogicError (web3 is mocked here).
 
