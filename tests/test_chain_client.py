@@ -5271,7 +5271,9 @@ class TestProviderLoopsLeaveFallbackToActiveLoop:
         web3.is_connected.side_effect = None
         web3.is_connected.return_value = False
         provider = ChainProvider(chain="base-sepolia")
-        provider._try_fallback = MagicMock(return_value=True)
+        # Switches a few times, then has no endpoint left: without the guard
+        # the test fails instead of looping
+        provider._try_fallback = MagicMock(side_effect=[True, True, False])
         provider._fallback_active = True
 
         with pytest.raises(ChainConnectionError):
@@ -5283,7 +5285,9 @@ class TestProviderLoopsLeaveFallbackToActiveLoop:
 
         web3 = mock_chain_deps["web3_instance"]
         provider = ChainProvider(chain="base-sepolia")
-        provider._try_fallback = MagicMock(return_value=True)
+        # Switches a few times, then has no endpoint left: without the guard
+        # the test fails instead of looping
+        provider._try_fallback = MagicMock(side_effect=[True, True, False])
         provider._fallback_active = True
         type(web3.eth).block_number = PropertyMock(side_effect=ConnectionError("down"))
         try:
