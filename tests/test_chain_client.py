@@ -1221,8 +1221,8 @@ class TestChainClientProvenanceChain:
         assert len(chain) == 1
         assert chain[0].data_hash == hash_a
 
-    def test_get_provenance_chain_default_cap_at_50(self, mock_chain_deps):
-        """Tests that max_depth=None defaults to 50 (safety cap)."""
+    def test_get_provenance_chain_default_depth(self, mock_chain_deps):
+        """Tests that max_depth=None uses the default depth (10, #170)."""
         from swarm_provenance_uploader.core.chain_client import ChainClient
 
         hash_a = DUMMY_HASH
@@ -1247,12 +1247,12 @@ class TestChainClientProvenanceChain:
 
         client = ChainClient(chain="base-sepolia")
 
-        # max_depth=None should use internal cap of 50, not error
+        # max_depth=None should use the default depth, not error
         chain = client.get_provenance_chain(swarm_hash=hash_a, max_depth=None)
         assert len(chain) == 1
 
     def test_get_provenance_chain_negative_depth(self, mock_chain_deps):
-        """Tests that negative max_depth returns empty results (no records traversed)."""
+        """Tests that negative max_depth is rejected, not an empty chain (#170)."""
         from swarm_provenance_uploader.core.chain_client import ChainClient
 
         hash_a = DUMMY_HASH
@@ -1270,9 +1270,10 @@ class TestChainClientProvenanceChain:
 
         client = ChainClient(chain="base-sepolia")
 
-        # Negative depth: current_depth (0) > effective_max (-1) → skipped
-        chain = client.get_provenance_chain(swarm_hash=hash_a, max_depth=-1)
-        assert len(chain) == 0
+        # A negative depth used to return [], which the CLI printed as
+        # "not registered on-chain"
+        with pytest.raises(ChainValidationError):
+            client.get_provenance_chain(swarm_hash=hash_a, max_depth=-1)
 
 
 # --- Models tests ---
@@ -2606,6 +2607,336 @@ class TestMergeTransformResultModel:
             new_data_type="merged",
         )
         assert result.explorer_url is None
+
+
+def _hex_hash(n):
+    """A distinct 64-char hex hash for node n."""
+    return f"{n:064x}"
+
+
+def _mock_v2_graph(mock_chain_deps, children, registered=None, fail=None):
+    """Mock a v2 contract whose transformation graph is ``children``.
+
+    ``children`` maps a hash to its child hashes; parents are derived from it.
+    ``registered`` is the set of registered hashes (default: every hash in
+    the graph). ``fail`` maps (function name, hash) to the exception that
+    function raises for that hash.
+    """
+    fail = fail or {}
+    parents = {}
+    for parent, kids in children.items():
+        for kid in kids:
+            parents.setdefault(kid, []).append(parent)
+    nodes = set(children) | set(parents)
+    registered = nodes if registered is None else set(registered)
+    functions = mock_chain_deps["contract"].functions
+
+    def _call(name, data_hash, value):
+        mock_call = MagicMock()
+        error = fail.get((name, data_hash.hex()))
+        if error is not None:
+            mock_call.call.side_effect = error
+        else:
+            mock_call.call.return_value = value
+        return mock_call
+
+    def get_data_record(data_hash):
+        h = data_hash.hex()
+        owner = DUMMY_ADDRESS if h in registered else ZERO_ADDRESS
+        return _call(
+            "getDataRecord", data_hash,
+            (data_hash, owner, 1700000000, "swarm-provenance", b"\x00" * 32,
+             [(bytes.fromhex(k), "step") for k in children.get(h, [])], [], 0),
+        )
+
+    def get_links(data_hash):
+        h = data_hash.hex()
+        return _call(
+            "getTransformationLinks", data_hash,
+            [(bytes.fromhex(k), "step") for k in children.get(h, [])],
+        )
+
+    def get_parents(data_hash):
+        h = data_hash.hex()
+        return _call(
+            "getTransformationParents", data_hash,
+            [bytes.fromhex(p) for p in parents.get(h, [])],
+        )
+
+    functions.getDataRecord = get_data_record
+    functions.getTransformationLinks = get_links
+    functions.getTransformationParents = get_parents
+
+
+class TestProvenanceChainFailClosed:
+    """A read error during traversal fails the whole walk (#170)."""
+
+    def _chain(self, mock_chain_deps, children, start, **kwargs):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        _mock_v2_graph(mock_chain_deps, children, registered=kwargs.pop("registered", None),
+                       fail=kwargs.pop("fail", None))
+        client = ChainClient(chain="base-sepolia")
+        return client.get_provenance_chain(swarm_hash=start, **kwargs)
+
+    def test_parents_read_error_fails_closed(self, mock_chain_deps):
+        """An RPC error reading a child's parents raises; no partial chain."""
+        import requests
+
+        a, b, c = _hex_hash(1), _hex_hash(2), _hex_hash(3)
+        with pytest.raises(ChainConnectionError) as exc_info:
+            self._chain(
+                mock_chain_deps, {a: [b], b: [c]}, a,
+                fail={("getTransformationParents", b):
+                      requests.exceptions.ConnectionError("connection refused")},
+            )
+        message = str(exc_info.value)
+        assert b in message
+        assert "depth 1" in message
+        assert "connection refused" in message
+
+    def test_links_read_error_fails_closed(self, mock_chain_deps):
+        """An RPC error reading a node's transformation links raises."""
+        import requests
+
+        a, b = _hex_hash(1), _hex_hash(2)
+        with pytest.raises(ChainConnectionError) as exc_info:
+            self._chain(
+                mock_chain_deps, {a: [b]}, a,
+                fail={("getTransformationLinks", a): requests.exceptions.Timeout("read timed out")},
+            )
+        assert a in str(exc_info.value)
+        assert "depth 0" in str(exc_info.value)
+
+    def test_linked_record_read_error_fails_closed(self, mock_chain_deps):
+        """An RPC error reading a linked node's record raises."""
+        a, b = _hex_hash(1), _hex_hash(2)
+        with pytest.raises(ChainConnectionError) as exc_info:
+            self._chain(
+                mock_chain_deps, {a: [b]}, a,
+                fail={("getDataRecord", b): OSError("network unreachable")},
+            )
+        assert b in str(exc_info.value)
+
+    def test_non_rpc_error_fails_closed_as_chain_error(self, mock_chain_deps):
+        """A failure that is not an RPC failure raises ChainError, not a raw exception."""
+        from swarm_provenance_uploader.exceptions import ChainError
+
+        a, b = _hex_hash(1), _hex_hash(2)
+        with pytest.raises(ChainError) as exc_info:
+            self._chain(
+                mock_chain_deps, {a: [b]}, a,
+                fail={("getTransformationParents", b): ValueError("could not decode")},
+            )
+        assert not isinstance(exc_info.value, ChainConnectionError)
+        assert "could not decode" in str(exc_info.value)
+
+    def test_error_message_redacts_rpc_url(self, mock_chain_deps):
+        """A key in an RPC URL repeated by the error is not in the message."""
+        a, b = _hex_hash(1), _hex_hash(2)
+        with pytest.raises(ChainConnectionError) as exc_info:
+            self._chain(
+                mock_chain_deps, {a: [b]}, a,
+                fail={("getTransformationParents", b): OSError(
+                    "failed: https://rpc.example.org/v2/SECRETKEY123")},
+            )
+        assert "SECRETKEY123" not in str(exc_info.value)
+        # The original stays as a redacted cause (#187): the key is not in
+        # any linked exception
+        from swarm_provenance_uploader.chain.exceptions import RedactedException
+
+        assert isinstance(exc_info.value.__cause__, RedactedException)
+        for text in _chain_texts(exc_info.value):
+            assert "SECRETKEY123" not in text, text
+
+    def test_linked_hash_not_registered_fails_closed(self, mock_chain_deps):
+        """A linked hash that reads as not registered is an inconsistent read."""
+        from swarm_provenance_uploader.exceptions import ChainError
+
+        a, b = _hex_hash(1), _hex_hash(2)
+        with pytest.raises(ChainError) as exc_info:
+            self._chain(mock_chain_deps, {a: [b]}, a, registered={a})
+        assert not isinstance(exc_info.value, DataNotRegisteredError)
+        assert b in str(exc_info.value)
+        assert "not registered" in str(exc_info.value)
+
+    def test_unregistered_start_hash_returns_empty(self, mock_chain_deps):
+        """Only the start hash may be unregistered: the walk returns []."""
+        a = _hex_hash(1)
+        assert self._chain(mock_chain_deps, {a: []}, a, registered=set()) == []
+
+    def test_parents_filled_on_expanded_nodes(self, mock_chain_deps):
+        """Each expanded node carries its parent hashes."""
+        a, b, c = _hex_hash(1), _hex_hash(2), _hex_hash(3)
+        # a and b are both merged into c
+        chain = self._chain(mock_chain_deps, {a: [c], b: [c]}, c)
+        by_hash = {r.data_hash: r for r in chain}
+        assert set(by_hash) == {a, b, c}
+        assert sorted(by_hash[c].parents) == sorted([a, b])
+        assert by_hash[a].parents == []
+        assert by_hash[b].parents == []
+
+    def test_node_at_depth_limit_has_no_parents(self, mock_chain_deps):
+        """A node at max_depth is returned but not expanded: parents is None."""
+        a, b, c = _hex_hash(1), _hex_hash(2), _hex_hash(3)
+        chain = self._chain(mock_chain_deps, {a: [b], b: [c]}, a, max_depth=1)
+        assert [r.data_hash for r in chain] == [a, b]
+        assert chain[0].parents == []
+        assert chain[1].parents is None
+
+    def test_node_at_depth_limit_does_not_read_parents(self, mock_chain_deps):
+        """An error on a node beyond the limit's expansion does not matter."""
+        a, b = _hex_hash(1), _hex_hash(2)
+        chain = self._chain(
+            mock_chain_deps, {a: [b]}, a, max_depth=1,
+            fail={("getTransformationParents", b): OSError("not read")},
+        )
+        assert [r.data_hash for r in chain] == [a, b]
+
+    def test_prefixed_upper_case_start_hash_visited_once(self, mock_chain_deps):
+        """A 0x-prefixed upper-case start hash is the same node as its child's parent."""
+        a, b = "ab" * 32, "cd" * 32
+        chain = self._chain(mock_chain_deps, {a: [b]}, "0x" + a.upper())
+        assert [r.data_hash for r in chain] == [a, b]
+        assert chain[0].parents == []
+        assert chain[1].parents == [a]
+
+    def test_default_depth_is_10(self, mock_chain_deps):
+        """max_depth=None walks 10 levels: 11 nodes of a 13-node line."""
+        nodes = [_hex_hash(n) for n in range(1, 14)]
+        children = {nodes[i]: [nodes[i + 1]] for i in range(len(nodes) - 1)}
+        chain = self._chain(mock_chain_deps, children, nodes[0], max_depth=None)
+        assert [r.data_hash for r in chain] == nodes[:11]
+
+    def test_depth_50_is_accepted(self, mock_chain_deps):
+        """max_depth=50 is the largest accepted value."""
+        a = _hex_hash(1)
+        assert len(self._chain(mock_chain_deps, {a: []}, a, max_depth=50)) == 1
+
+    @pytest.mark.parametrize("depth", [-1, 51, 1000])
+    def test_depth_out_of_range_rejected(self, mock_chain_deps, depth):
+        """max_depth below 0 or above 50 raises ChainValidationError, before any read."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        client = ChainClient(chain="base-sepolia")
+        client._contract.get_data_record = MagicMock()
+        with pytest.raises(ChainValidationError):
+            client.get_provenance_chain(swarm_hash=DUMMY_HASH, max_depth=depth)
+        client._contract.get_data_record.assert_not_called()
+
+
+class TestProvenanceChainFailClosedEventPaths:
+    """The v1 event paths fail closed too (#170)."""
+
+    def _v1_client(self, mock_chain_deps, deploy_block):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        client = ChainClient(chain="base-sepolia")
+        client._contract._supports_v2 = False
+        client._provider.deploy_block = deploy_block
+        return client
+
+    def test_per_node_forward_query_error_fails_closed(self, mock_chain_deps):
+        """Per-node scan: a failed DataTransformed query from a node raises."""
+        client = self._v1_client(mock_chain_deps, None)
+        client._contract.get_transformations_from = MagicMock(side_effect=OSError("timeout"))
+        client._contract.get_transformations_to = MagicMock(return_value=[])
+        with pytest.raises(ChainConnectionError):
+            client.get_provenance_chain(swarm_hash=DUMMY_HASH)
+
+    def test_per_node_reverse_query_error_fails_closed(self, mock_chain_deps):
+        """Per-node scan: a failed reverse DataTransformed query raises."""
+        client = self._v1_client(mock_chain_deps, None)
+        client._contract.get_transformations_from = MagicMock(return_value=[])
+        client._contract.get_transformations_to = MagicMock(side_effect=OSError("timeout"))
+        with pytest.raises(ChainConnectionError):
+            client.get_provenance_chain(swarm_hash=DUMMY_HASH)
+
+    def test_per_node_parents_filled(self, mock_chain_deps):
+        """Per-node scan: parents come from the reverse query."""
+        parent = "c" * 64
+        client = self._v1_client(mock_chain_deps, None)
+        client._contract.get_transformations_from = MagicMock(return_value=[])
+        client._contract.get_transformations_to = MagicMock(
+            side_effect=lambda h: [(bytes.fromhex(parent), bytes.fromhex(h), "step")]
+            if h == DUMMY_HASH else []
+        )
+        chain = client.get_provenance_chain(swarm_hash=DUMMY_HASH, max_depth=1)
+        assert chain[0].parents == [parent]
+
+    def test_local_index_parents_filled(self, mock_chain_deps):
+        """Event index: parents come from the reverse map."""
+        from swarm_provenance_uploader.chain.event_cache import clear_registry
+
+        clear_registry()
+        parent = "c" * 64
+        mock_cache = MagicMock()
+        mock_cache.get_maps.return_value = ({}, {DUMMY_HASH: [(parent, "step")]})
+        with patch("swarm_provenance_uploader.chain.event_cache.get_cache", return_value=mock_cache):
+            client = self._v1_client(mock_chain_deps, 0)
+            chain = client.get_provenance_chain(swarm_hash=DUMMY_HASH, max_depth=1)
+        assert chain[0].data_hash == DUMMY_HASH
+        assert chain[0].parents == [parent]
+
+
+    def test_local_index_prefixed_upper_case_start_hash(self, mock_chain_deps):
+        """Event index: a 0x-prefixed upper-case start hash finds its edges, once."""
+        from swarm_provenance_uploader.chain.event_cache import clear_registry
+
+        clear_registry()
+        a, b = "ab" * 32, "cd" * 32
+
+        def get_data_record(data_hash):
+            mock_call = MagicMock()
+            mock_call.call.return_value = (
+                data_hash, DUMMY_ADDRESS, 1700000000, "swarm-provenance",
+                b"\x00" * 32, [], [], 0,
+            )
+            return mock_call
+
+        mock_chain_deps["contract"].functions.getDataRecord = get_data_record
+        mock_cache = MagicMock()
+        mock_cache.get_maps.return_value = ({a: [(b, "step")]}, {b: [(a, "step")]})
+        with patch("swarm_provenance_uploader.chain.event_cache.get_cache", return_value=mock_cache):
+            client = self._v1_client(mock_chain_deps, 0)
+            chain = client.get_provenance_chain(swarm_hash="0x" + a.upper())
+        assert [r.data_hash for r in chain] == [a, b]
+        assert chain[0].parents == []
+        assert chain[1].parents == [a]
+
+
+class TestTraversalErrorWithWeb3:
+    """How real web3 errors are classified when a walk fails (#170).
+
+    Runs without mock_chain_deps, which replaces web3 with a MagicMock.
+    """
+
+    def test_rpc_errors_become_connection_errors(self):
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        from swarm_provenance_uploader.core.chain_client import _traversal_error
+
+        for error in (
+            web3_exceptions.Web3RPCError("boom"),
+            web3_exceptions.ProviderConnectionError("down"),
+            web3_exceptions.TimeExhausted("slow"),
+            web3_exceptions.BadResponseFormat("not JSON-RPC"),
+        ):
+            result = _traversal_error(DUMMY_HASH, 2, error)
+            assert isinstance(result, ChainConnectionError), type(error)
+            assert DUMMY_HASH in str(result)
+            assert "depth 2" in str(result)
+
+    def test_revert_becomes_chain_error(self):
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        from swarm_provenance_uploader.core.chain_client import _traversal_error
+        from swarm_provenance_uploader.exceptions import ChainError
+
+        result = _traversal_error(
+            DUMMY_HASH, 0, web3_exceptions.ContractLogicError("execution reverted")
+        )
+        assert isinstance(result, ChainError)
+        assert not isinstance(result, ChainConnectionError)
+        assert "execution reverted" in str(result)
 
 
 class TestABIV2Functions:

@@ -278,7 +278,7 @@ swarm-prov-upload chain merge <hash1> <hash2> [<hash3>...] <new_hash> --descript
 swarm-prov-upload chain get <swarm_hash>
 swarm-prov-upload chain get <swarm_hash> --json
 swarm-prov-upload chain get <swarm_hash> --follow           # walk transformation chain
-swarm-prov-upload chain get <swarm_hash> --follow --depth 3 # limit traversal depth
+swarm-prov-upload chain get <swarm_hash> --follow --depth 3 # limit traversal depth (1-50, default 10)
 
 # Verify a hash is registered on-chain (exit code 0=yes, 1=no); prints its status and owner
 swarm-prov-upload chain verify <swarm_hash>
@@ -312,6 +312,8 @@ swarm-prov-upload chain get <hash> --follow               # full chain
 swarm-prov-upload chain get <hash> --follow --depth 2     # limit depth
 swarm-prov-upload chain get <hash> --follow --json        # JSON output
 ```
+
+> **`chain get --follow` fails closed**: if any read fails during the walk, the command prints an error and exits with code 1 instead of printing a partial chain. In `--json` output, each record has a `parents` list (`null` for records at the depth limit).
 
 > **`chain protect` vs separate commands**: `chain protect` combines verify + anchor + transform + restrict into one command. If the restrict step fails, the command shows a warning (transform already succeeded) and exits 0 with `partial_failure: true` in JSON output. Use `chain transform --restrict-original` for the two-step version without the pre-flight ACTIVE check.
 

@@ -21,6 +21,7 @@ from ..chain.exceptions import (
     ChainConfigurationError,
     ChainConnectionError,
     ChainTransactionError,
+    ChainValidationError,
     InsufficientFundsError,
     TransactionNotRecordedError,
     TransactionNotVerifiedError,
@@ -147,6 +148,54 @@ def _error_reason(error: Exception) -> str:
         return message
     # An exception with no arguments has an empty str(): name its class
     return str(error) or type(error).__name__
+
+
+# Provenance chain walk depth (#170): the default, and the largest accepted
+DEFAULT_CHAIN_DEPTH = 10
+MAX_CHAIN_DEPTH = 50
+
+
+def _traversal_error(data_hash: str, depth: int, error: Exception) -> ChainError:
+    """The error that stops a provenance chain walk at one node (#170).
+
+    The walk fails closed: a partial lineage is never returned. RPC failures
+    become ChainConnectionError and everything else ChainError; both name
+    the node and its depth. Chain errors other than connection and
+    not-registered errors (for example ChainValidationError) keep their
+    class. A linked hash that reads as not registered means an inconsistent
+    read (the contract registers every derived hash), so it is a ChainError
+    and not DataNotRegisteredError, which callers read as "start hash not
+    found". Messages are URL-redacted by ChainError.
+    """
+    if isinstance(error, ChainError) and not isinstance(
+        error, (ChainConnectionError, DataNotRegisteredError)
+    ):
+        return error
+    if isinstance(error, DataNotRegisteredError):
+        reason = "the linked record reads as not registered (inconsistent read)"
+    else:
+        reason = _error_reason(error)
+    message = f"Provenance chain read failed at {data_hash} (depth {depth}): {reason}"
+    if isinstance(error, ChainConnectionError):
+        return ChainConnectionError(message, rpc_url=error.rpc_url)
+    if _is_rpc_failure(error):
+        return ChainConnectionError(message)
+    return ChainError(message)
+
+
+def _traversal_cause(error: Exception) -> Optional[BaseException]:
+    """The cause to chain to the error _traversal_error makes from error.
+
+    A raw failure is the cause itself. A ChainError keeps its own cause,
+    for example the RPC failure that a read method mapped (#187), so the
+    traceback shows where the read failed, and a ChainError that
+    _traversal_error returns unchanged is not made its own cause.
+    ChainClient's public methods redact the chain (redact_exception_chain),
+    so the RPC URL is not repeated through it.
+    """
+    if isinstance(error, ChainError):
+        return error.__cause__
+    return error
 
 
 def _rpc_rejection_message(error: Exception) -> Optional[str]:
@@ -1478,20 +1527,45 @@ class ChainClient:
         On v1 contracts, falls back to the cached event scan path.
         Falls back to per-node event scanning when the deploy block is unknown.
 
+        The walk fails closed: if any read fails, the call raises instead of
+        returning the nodes reached so far (#170).
+
         Args:
             swarm_hash: Starting Swarm reference hash.
-            max_depth: Maximum traversal depth. None means no limit (capped at 50).
+            max_depth: Maximum traversal depth, 0 to 50 (0 returns the start
+                node only). None means the default of 10. Nodes at
+                max_depth are returned but not expanded: their ``parents``
+                is None.
             verbose: Enable debug output.
 
         Returns:
             List of ChainProvenanceRecord forming the provenance chain,
-            starting with the given hash.
+            starting with the given hash, in breadth-first order. Each
+            expanded node carries its parent hashes in ``parents``. An
+            unregistered start hash returns an empty list.
+
+        Raises:
+            ChainValidationError: If max_depth is outside 0 to 50.
+            ChainConnectionError: If an RPC read fails during the walk.
+            ChainError: If another read fails during the walk, or a linked
+                hash reads as not registered.
         """
         logger.debug(
             "Get provenance chain: hash=%s max_depth=%s", swarm_hash, max_depth
         )
 
-        effective_max = max_depth if max_depth is not None else 50
+        if max_depth is None:
+            effective_max = DEFAULT_CHAIN_DEPTH
+        elif (
+            isinstance(max_depth, bool)
+            or not isinstance(max_depth, int)
+            or not 0 <= max_depth <= MAX_CHAIN_DEPTH
+        ):
+            raise ChainValidationError(
+                f"max_depth must be an integer from 0 to {MAX_CHAIN_DEPTH}, got {max_depth!r}"
+            )
+        else:
+            effective_max = max_depth
 
         # Detect contract version — state reads are much faster than event scans
         use_state_reads = False
@@ -1523,122 +1597,102 @@ class ChainClient:
                     redact_urls(str(e)),
                 )
 
+        def _hex(value) -> str:
+            return value.hex() if isinstance(value, bytes) else str(value)
+
+        # Child and parent hashes come back as lower-case hex without 0x.
+        # Key the start hash the same way, or it is visited twice and the
+        # event index misses its edges.
+        start_hash = swarm_hash
+        if isinstance(start_hash, str):
+            start_hash = start_hash.lower()
+            if start_hash.startswith("0x"):
+                start_hash = start_hash[2:]
+
         chain = []
         visited = set()
-        to_visit = [(swarm_hash, 0)]
+        to_visit = [(start_hash, 0)]
 
         while to_visit:
             current_hash, current_depth = to_visit.pop(0)
             if current_hash in visited:
                 continue
-            if current_depth > effective_max:
-                logger.debug("Depth limit reached at %d", current_depth)
-                continue
             visited.add(current_hash)
 
             try:
                 record = self.get(current_hash, verbose=verbose)
-            except DataNotRegisteredError:
-                logger.debug("Hash %s not registered, skipping", current_hash)
-                continue
+            except DataNotRegisteredError as e:
+                if current_depth == 0:
+                    logger.debug("Hash %s not registered", current_hash)
+                    continue
+                raise _traversal_error(current_hash, current_depth, e) from _traversal_cause(e)
+            except Exception as e:
+                logger.debug(
+                    "Record read failed for %s: %s", current_hash, redact_urls(str(e))
+                )
+                raise _traversal_error(current_hash, current_depth, e) from _traversal_cause(e)
 
-            if use_state_reads:
-                # V2 contract: state-based traversal
-                try:
+            # Nodes at the depth limit keep their child edges but are not
+            # expanded: parents are not read and stay None.
+            expand = current_depth < effective_max
+            parents = None
+            try:
+                if use_state_reads:
+                    # V2 contract: state-based traversal
                     links = self._contract.get_transformation_links(current_hash)
                     if links:
                         record.transformations = [
-                            ChainTransformation(
-                                description=desc,
-                                new_data_hash=(
-                                    nh.hex() if isinstance(nh, bytes) else str(nh)
-                                ),
-                            )
+                            ChainTransformation(description=desc, new_data_hash=_hex(nh))
                             for nh, desc in links
                         ]
-                        for nh, _ in links:
-                            nh_hex = nh.hex() if isinstance(nh, bytes) else str(nh)
-                            if nh_hex not in visited:
-                                to_visit.append((nh_hex, current_depth + 1))
-                except Exception as e:
-                    logger.warning(
-                        "State-based forward read failed for %s: %s",
-                        current_hash,
-                        redact_urls(str(e)),
-                    )
-                # Reverse: parents via state
-                try:
-                    parents = self._contract.get_transformation_parents(current_hash)
-                    for p in parents:
-                        p_hex = p.hex() if isinstance(p, bytes) else str(p)
-                        if p_hex not in visited:
-                            to_visit.append((p_hex, current_depth + 1))
-                except Exception as e:
-                    logger.warning(
-                        "State-based reverse read failed for %s: %s",
-                        current_hash,
-                        redact_urls(str(e)),
-                    )
-            elif use_local_index:
-                # V1 contract: use pre-built event cache index
-                fwd = forward.get(current_hash, [])
-                if fwd:
-                    record.transformations = [
-                        ChainTransformation(description=desc, new_data_hash=nh)
-                        for nh, desc in fwd
-                    ]
-                    for nh, _ in fwd:
-                        if nh not in visited:
-                            to_visit.append((nh, current_depth + 1))
-                # Reverse links (parents)
-                for orig_hex, _ in reverse.get(current_hash, []):
-                    if orig_hex not in visited:
-                        to_visit.append((orig_hex, current_depth + 1))
-            else:
-                # Per-node event scanning (fallback when deploy_block unknown)
-                try:
+                    children = [_hex(nh) for nh, _ in links]
+                    if expand:
+                        parents = [
+                            _hex(p)
+                            for p in self._contract.get_transformation_parents(current_hash)
+                        ]
+                elif use_local_index:
+                    # V1 contract: use pre-built event cache index
+                    fwd = forward.get(current_hash, [])
+                    if fwd:
+                        record.transformations = [
+                            ChainTransformation(description=desc, new_data_hash=nh)
+                            for nh, desc in fwd
+                        ]
+                    children = [nh for nh, _ in fwd]
+                    if expand:
+                        parents = [orig for orig, _ in reverse.get(current_hash, [])]
+                else:
+                    # Per-node event scanning (fallback when deploy_block unknown)
                     events = self._contract.get_transformations_from(current_hash)
-                    enriched = []
-                    for orig_bytes, new_bytes, desc in events:
-                        new_hash_hex = (
-                            new_bytes.hex()
-                            if isinstance(new_bytes, bytes)
-                            else str(new_bytes)
-                        )
-                        enriched.append(
-                            ChainTransformation(
-                                description=desc,
-                                new_data_hash=new_hash_hex,
-                            )
-                        )
-                        if new_hash_hex not in visited:
-                            to_visit.append((new_hash_hex, current_depth + 1))
+                    enriched = [
+                        ChainTransformation(description=desc, new_data_hash=_hex(new_bytes))
+                        for _, new_bytes, desc in events
+                    ]
                     if enriched:
                         record.transformations = enriched
-                except Exception as e:
-                    logger.warning("Event query failed for %s: %s", current_hash, redact_urls(str(e)))
-                    for t in record.transformations:
-                        if t.new_data_hash and t.new_data_hash not in visited:
-                            to_visit.append((t.new_data_hash, current_depth + 1))
-
-                try:
-                    reverse_events = self._contract.get_transformations_to(current_hash)
-                    for orig_bytes, new_bytes, desc in reverse_events:
-                        orig_hash = (
-                            orig_bytes.hex()
-                            if isinstance(orig_bytes, bytes)
-                            else str(orig_bytes)
-                        )
-                        if orig_hash not in visited:
-                            to_visit.append((orig_hash, current_depth + 1))
-                except Exception as e:
-                    logger.warning(
-                        "Reverse event query failed for %s: %s",
-                        current_hash,
-                        redact_urls(str(e)),
-                    )
+                    children = [t.new_data_hash for t in enriched]
+                    if expand:
+                        parents = [
+                            _hex(orig_bytes)
+                            for orig_bytes, _, _ in self._contract.get_transformations_to(current_hash)
+                        ]
+            except Exception as e:
+                logger.debug(
+                    "Link read failed for %s: %s", current_hash, redact_urls(str(e))
+                )
+                raise _traversal_error(current_hash, current_depth, e) from _traversal_cause(e)
 
             chain.append(record)
+
+            if not expand:
+                logger.debug("Depth limit reached at %d", current_depth)
+                continue
+
+            record.parents = list(dict.fromkeys(parents))
+            for next_hash in children + record.parents:
+                if next_hash not in visited:
+                    to_visit.append((next_hash, current_depth + 1))
 
         logger.debug("Chain length: %d", len(chain))
 
