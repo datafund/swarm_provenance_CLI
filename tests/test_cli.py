@@ -6762,6 +6762,26 @@ class TestSendOutcomeUnknown:
         assert self.STEP_EXPLORER in result.output
         assert "connection reset" in result.output
 
+    def test_single_command_text_without_explorer(self, mocker):
+        """Without an explorer (a local chain), the check is done with chain get."""
+        error = self._error()
+        error.explorer_url = None
+        mock_client = mocker.MagicMock()
+        mock_client.access.side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1, result.output
+        assert "Outcome unknown" in result.output
+        assert "in the explorer" not in result.output
+        assert "Explorer:" not in result.output
+        assert (
+            "Check whether it was recorded with swarm-prov-upload chain get <data hash> "
+            "before you try again"
+        ) in result.output
+        assert self.STEP_TX in result.output
+
     def test_single_command_json(self, mocker):
         mock_client = mocker.MagicMock()
         mock_client.access.side_effect = self._error()
