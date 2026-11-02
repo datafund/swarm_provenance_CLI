@@ -1579,6 +1579,9 @@ def stamps_extend(
     if amount is not None and duration_hours is not None:
         typer.secho("ERROR: Give --duration-hours or --amount, not both.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+    if amount is not None and amount <= 0:
+        typer.secho(f"ERROR: --amount must be greater than 0, got {amount}.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
     if duration_hours is not None and duration_hours < 24:
         typer.secho(f"ERROR: --duration-hours must be at least 24, got {duration_hours}.",
                     fg=typer.colors.RED, err=True)
@@ -1606,8 +1609,11 @@ def stamps_extend(
             final_note="The batch ID is the stamp ID you gave. Do not pay again.",
         )
     except Exception as e:
-        typer.secho(f"ERROR: Failed to extend stamp: {e}", fg=typer.colors.RED, err=True)
         cause = e.__cause__
+        # extend_stamp's ConnectionError text starts with "Failed to extend
+        # stamp <id>:"; print its cause so the prefix appears once.
+        detail = cause if isinstance(e, ConnectionError) and cause is not None else e
+        typer.secho(f"ERROR: Failed to extend stamp: {detail}", fg=typer.colors.RED, err=True)
         if (isinstance(cause, exceptions.GatewayHTTPError) and cause.code == "STAMP_OWNERSHIP_DENIED"
                 and _backend_config["free_tier"]):
             # --free sends X-Payment-Mode: free, which the gateway serves as unpaid

@@ -1217,14 +1217,17 @@ class GatewayClient:
             The batch ID of the extended stamp.
 
         Raises:
-            ValueError: Bad stamp ID, both amount and duration_hours given, or
-                        duration_hours below 24. Nothing is sent.
+            ValueError: Bad stamp ID, both amount and duration_hours given,
+                        amount not greater than 0, or duration_hours below
+                        24. Nothing is sent.
         """
         from .file_utils import is_stamp_id
         if not is_stamp_id(stamp_id):
             raise ValueError(f"Not a stamp ID (64 hex characters): {stamp_id!r}")
         if amount is not None and duration_hours is not None:
             raise ValueError("Give amount or duration_hours, not both.")
+        if amount is not None and amount <= 0:
+            raise ValueError(f"amount must be greater than 0, got {amount}.")
         if duration_hours is not None and duration_hours < 24:
             raise ValueError(f"duration_hours must be at least 24, got {duration_hours}.")
         url = self._make_url(f"/api/v1/stamps/{stamp_id.lower()}/extend")
