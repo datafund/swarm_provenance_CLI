@@ -2216,6 +2216,10 @@ def _web3_per_url(mock_chain_deps, chain_ids, down=()):
 
     chain_ids maps URL -> the chain ID that node reports. URLs in ``down``
     do not connect and fail every call.
+
+    Each Web3 object answers as the node of its current ``provider``, so a
+    fallback switch that replaces the provider of the existing Web3 object
+    (#200) reaches the fallback's node, as with the real web3.
     """
     nodes = {}
     for url, chain_id in chain_ids.items():
@@ -2231,9 +2235,16 @@ def _web3_per_url(mock_chain_deps, chain_ids, down=()):
             node.eth.block_number = 100 + chain_id
         nodes[url] = node
 
+    class _Web3:
+        def __init__(self, provider):
+            self.provider = provider
+
+        def __getattr__(self, name):
+            return getattr(nodes[self.provider], name)
+
     web3_class = mock_chain_deps["web3_class"]
     web3_class.HTTPProvider.side_effect = lambda url, **kw: url
-    web3_class.side_effect = lambda url: nodes[url]
+    web3_class.side_effect = _Web3
     return nodes
 
 

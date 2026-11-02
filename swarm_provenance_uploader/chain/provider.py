@@ -247,9 +247,14 @@ class ChainProvider:
 
         Iterates through remaining URLs in ``_rpc_urls`` (skipping the
         current ``rpc_url`` and any in ``tried``), attempts
-        ``is_connected()``, and switches ``_web3`` and ``rpc_url`` to the
-        first one that connects and reports the expected chain ID. An
-        endpoint on another chain is skipped.
+        ``is_connected()``, and switches to the first one that connects and
+        reports the expected chain ID. An endpoint on another chain is
+        skipped.
+
+        The switch replaces the provider of the existing Web3 object
+        (``web3.provider``) and updates ``rpc_url``. The Web3 object itself
+        stays the same, so everything built on it, such as the contract
+        object, uses the new endpoint (#200).
 
         Args:
             tried: URLs already tried by the caller in this attempt. Every
@@ -292,7 +297,8 @@ class ChainProvider:
                         redact_url(self.rpc_url),
                         redact_url(url),
                     )
-                    self._web3 = candidate
+                    # Keep the Web3 object: the contract holds a reference to it
+                    self._web3.provider = candidate.provider
                     self.rpc_url = url
                     return True
             except Exception:
