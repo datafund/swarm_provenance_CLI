@@ -2244,6 +2244,12 @@ def notary_verify(
 
 # --- Chain Subcommands ---
 
+# Help for --gas on every chain write command (#180)
+_GAS_HELP = (
+    "Explicit gas limit. Skips gas estimation, so a transaction that would "
+    "revert is still sent and costs gas."
+)
+
 
 def _insufficient_funds_json(e: "exceptions.InsufficientFundsError") -> dict:
     """JSON fields for an InsufficientFundsError."""
@@ -2788,7 +2794,7 @@ def chain_anchor(
     data_type: Annotated[str, typer.Option("--type", "-t", help="Data type/category.")] = "swarm-provenance",
     storage_ref: Annotated[Optional[str], typer.Option("--storage-ref", "-s", help="Storage reference (e.g. Swarm hash) to link bidirectionally.")] = None,
     owner: Annotated[Optional[str], typer.Option("--owner", help="Register on behalf of this owner address (requires delegate authorization).")] = None,
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -2870,7 +2876,7 @@ def chain_anchor(
 def chain_set_storage_ref(
     data_hash: Annotated[str, typer.Argument(help="Registered data hash.")],
     storage_ref: Annotated[str, typer.Argument(help="Storage reference (e.g. Swarm hash) to link.")],
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit.")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -2972,7 +2978,7 @@ def chain_lookup(
 @_chain_command("access")
 def chain_access(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to record access for.")],
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3026,7 +3032,7 @@ def chain_access(
 def chain_status(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to query or update status.")],
     set_status: Annotated[Optional[str], typer.Option("--set", help="Set status: active, restricted, deleted.")] = None,
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3124,7 +3130,7 @@ def chain_status(
 def chain_transfer(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to transfer.")],
     to: Annotated[str, typer.Option("--to", help="New owner address.")],
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3178,7 +3184,7 @@ def chain_delegate(
     address: Annotated[str, typer.Argument(help="Delegate address to authorize or revoke.")],
     authorize: Annotated[bool, typer.Option("--authorize", help="Authorize this delegate.")] = False,
     revoke: Annotated[bool, typer.Option("--revoke", help="Revoke this delegate.")] = False,
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3243,7 +3249,7 @@ def chain_transform(
     new_hash: Annotated[str, typer.Argument(help="Hash of the transformed data.")],
     description: Annotated[str, typer.Option("--description", "-d", help="Description of the transformation.")] = "",
     restrict_original: Annotated[bool, typer.Option("--restrict-original", help="Set original hash status to RESTRICTED after transform.")] = False,
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3337,7 +3343,7 @@ def chain_protect(
     description: Annotated[str, typer.Option("--description", "-d", help="Description of the transformation.")] = "",
     anchor_new: Annotated[bool, typer.Option("--anchor-new", help="Anchor the new hash if not already registered.")] = False,
     data_type: Annotated[str, typer.Option("--type", "-t", help="Data type for anchoring new hash.")] = "swarm-provenance",
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3442,7 +3448,7 @@ def chain_merge(
     hashes: Annotated[List[str], typer.Argument(help="Source hashes followed by the new (merged) hash. Minimum 3 values (2 sources + 1 new).")],
     description: Annotated[str, typer.Option("--description", "-d", help="Description of the merge.")] = "",
     data_type: Annotated[str, typer.Option("--type", "-t", help="Data type for the merged result.")] = "merged",
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):

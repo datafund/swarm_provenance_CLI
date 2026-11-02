@@ -4840,6 +4840,18 @@ class TestChainGasLimitFlag:
         assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
         assert _chain_config["gas_limit"] == 300000
 
+    @pytest.mark.parametrize("command", [
+        "anchor", "set-storage-ref", "access", "status", "transfer",
+        "delegate", "transform", "protect", "merge",
+    ])
+    def test_gas_help_says_what_it_does(self, command):
+        """--gas help says estimation is skipped and what that costs (#180)."""
+        chain = typer.main.get_command(app).commands["chain"]
+        option = next(p for p in chain.commands[command].params if p.name == "gas")
+        help_text = " ".join(option.help.split())
+        assert "Skips gas estimation" in help_text
+        assert "a transaction that would revert is still sent and costs gas" in help_text
+
 
 class TestChainMergeCommand:
     """Tests for chain merge command."""

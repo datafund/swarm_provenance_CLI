@@ -331,7 +331,7 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 | `CHAIN_RPC_URL` | Custom RPC URL (optional). With `base` or `base-sepolia`, it must report the preset chain ID | Uses preset |
 | `CHAIN_CONTRACT` | Custom contract address (optional) | Uses preset |
 | `CHAIN_EXPLORER_URL` | Custom block explorer URL (optional) | Uses preset |
-| `CHAIN_GAS_LIMIT` | Explicit gas limit (optional, skips RPC estimation) | Auto-estimated |
+| `CHAIN_GAS_LIMIT` | Explicit gas limit (optional, skips RPC estimation, so a transaction that would revert is still sent and costs gas) | Auto-estimated |
 | `CHAIN_RPC_URLS` | Comma-separated fallback RPC URLs, tried in order after the main RPC (optional, replaces the preset fallbacks). Like `CHAIN_RPC_URL`, applies whatever chain is selected | Uses preset fallbacks |
 
 ### Testnet setup
