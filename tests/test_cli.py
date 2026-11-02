@@ -7230,6 +7230,157 @@ class TestShortTokenEcho:
         assert SHORT_TOKEN not in result.output
 
 
+# --- Paid stamp extension (#137) ---
+
+class TestStampsExtendPaid:
+    PAYMENT = dict(
+        payer="0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00",
+        nonce="0x" + "ab" * 32,
+        amount_usd="$0.050000",
+        network="base-sepolia",
+        idempotency_key="key-137",
+    )
+
+    def _extend(self, mocker, *args, global_args=(), effect=None):
+        mock_client = mocker.MagicMock()
+        mock_client.extend_stamp.return_value = DUMMY_STAMP
+        if effect is not None:
+            mock_client.extend_stamp.side_effect = effect
+        constructor = mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        result = runner.invoke(app, [*global_args, "stamps", "extend", DUMMY_STAMP, *args])
+        return result, mock_client, constructor
+
+    @pytest.mark.parametrize("flag", ["--duration-hours", "--duration", "-d"])
+    def test_duration_hours_sent(self, mocker, flag):
+        result, client, _ = self._extend(mocker, flag, "48")
+        assert result.exit_code == 0, result.output
+        assert client.extend_stamp.call_args.kwargs["duration_hours"] == 48
+        assert client.extend_stamp.call_args.kwargs.get("amount") is None
+        assert "SUCCESS: Stamp extended" in result.output
+        assert f"Batch ID: {DUMMY_STAMP}" in result.output
+
+    def test_neither_option_leaves_the_gateway_default(self, mocker):
+        result, client, _ = self._extend(mocker)
+        assert result.exit_code == 0, result.output
+        kwargs = client.extend_stamp.call_args.kwargs
+        assert kwargs.get("duration_hours") is None and kwargs.get("amount") is None
+
+    def test_x402_client_used(self, mocker):
+        result, _, constructor = self._extend(mocker, "--duration-hours", "48", global_args=["--x402"])
+        assert result.exit_code == 0, result.output
+        kwargs = constructor.call_args.kwargs
+        assert kwargs["x402_enabled"] is True
+        assert kwargs["idempotency_key"]
+        assert kwargs["x402_on_payment_sent"] is not None
+
+    def test_amount_and_duration_together_refused(self, mocker):
+        result, client, _ = self._extend(mocker, "--amount", "5000000000", "--duration-hours", "48")
+        assert result.exit_code == 1
+        assert "not both" in result.output
+        client.extend_stamp.assert_not_called()
+
+    def test_duration_below_24_refused(self, mocker):
+        result, client, _ = self._extend(mocker, "--duration-hours", "10")
+        assert result.exit_code == 1
+        assert "at least 24" in result.output
+        client.extend_stamp.assert_not_called()
+
+    @pytest.mark.parametrize("amount", ["0", "-5"])
+    def test_amount_not_positive_refused(self, mocker, amount):
+        result, client, constructor = self._extend(mocker, "--amount", amount, global_args=["--x402"])
+        assert result.exit_code == 1
+        assert "greater than 0" in result.output
+        client.extend_stamp.assert_not_called()
+        constructor.assert_not_called()
+
+    def test_help_describes_amount_as_plur(self):
+        result = runner.invoke(app, ["stamps", "extend", "--help"])
+        text = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        assert "--duration-hours" in text
+        assert "PLUR" in text
+        assert "Amount of BZZ" not in text
+
+    def test_unknown_outcome_reported(self, mocker):
+        err = exceptions.PaymentOutcomeUnknownError("The paid request failed with HTTP 502.", **self.PAYMENT)
+        result, _, _ = self._extend(mocker, "--duration-hours", "48", global_args=["--x402"], effect=err)
+        assert result.exit_code == 1
+        assert "the stamp extension did not complete" in result.output
+        assert self.PAYMENT["nonce"] in result.output
+        assert "key-137" in result.output
+        assert "Failed to extend stamp" not in result.output
+
+    def test_settled_not_delivered_reported(self, mocker):
+        err = exceptions.PaymentSettledNotDeliveredError("Collected, failed.", transaction="0x" + "cd" * 32,
+                                                         **self.PAYMENT)
+        result, _, _ = self._extend(mocker, "--duration-hours", "48", global_args=["--x402"], effect=err)
+        assert result.exit_code == 1
+        assert "Payment was taken, but the stamp extension failed" in result.output
+
+    def test_delivered_not_stored_is_success(self, mocker):
+        err = exceptions.PaymentDeliveredNotStoredError("Paid once.", transaction="0x" + "cd" * 32,
+                                                        **self.PAYMENT)
+        mock_client = mocker.MagicMock()
+        mock_client.extend_stamp.side_effect = err
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        result = CliRunner(mix_stderr=False).invoke(
+            app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
+        assert result.exit_code == 0, result.output
+        # A script reading stdout sees the same lines as on a normal success
+        assert "SUCCESS: Stamp extended." in result.stdout
+        assert f"Batch ID: {DUMMY_STAMP}" in result.stdout
+        assert "The stamp extension succeeded and was paid once" in result.stderr
+        assert "Do not pay again" in result.stderr
+        assert "Swarm reference" not in result.stdout + result.stderr
+        assert "--stamp-id" not in result.stdout + result.stderr
+
+    def test_payment_required_reported(self, mocker):
+        err = exceptions.PaymentRequiredError("Payment required")
+        result, _, _ = self._extend(mocker, "--duration-hours", "48", effect=err)
+        assert result.exit_code == 1
+        assert "Use --x402" in result.output
+        assert "Failed to extend stamp" not in result.output
+
+    def _denied(self):
+        import requests
+        response = requests.Response()
+        response.status_code = 403
+        cause = exceptions.GatewayHTTPError(
+            "HTTP 403 STAMP_OWNERSHIP_DENIED: Cannot extend this stamp: owned by a payer.",
+            response=response, code="STAMP_OWNERSHIP_DENIED",
+            gateway_message="Cannot extend this stamp: owned by a payer.")
+        err = ConnectionError(f"Failed to extend stamp {DUMMY_STAMP}: {cause}")
+        err.__cause__ = cause
+        return err
+
+    def test_ownership_denied_on_free_tier_hints_x402(self, mocker):
+        result, _, _ = self._extend(mocker, "--duration-hours", "48", global_args=["--free"],
+                                    effect=self._denied())
+        assert result.exit_code == 1
+        assert "ERROR: Failed to extend stamp: HTTP 403 STAMP_OWNERSHIP_DENIED: Cannot extend this stamp" \
+            in result.output
+        assert result.output.count("Failed to extend stamp") == 1
+        assert "only with a paid request" in result.output
+        assert "--x402" in result.output
+
+    def test_ownership_denied_without_free_tier_has_no_hint(self, mocker):
+        result, _, _ = self._extend(mocker, "--duration-hours", "48", global_args=["--x402"],
+                                    effect=self._denied())
+        assert result.exit_code == 1
+        assert "ERROR: Failed to extend stamp: HTTP 403 STAMP_OWNERSHIP_DENIED" in result.output
+        assert result.output.count("Failed to extend stamp") == 1
+        assert "only with a paid request" not in result.output
+
+    def test_connection_failure_reads_once(self, mocker):
+        import requests
+        cause = requests.exceptions.ConnectionError("Connection refused")
+        err = ConnectionError(f"Failed to extend stamp {DUMMY_STAMP}: {cause}")
+        err.__cause__ = cause
+        result, _, _ = self._extend(mocker, "--duration-hours", "48", effect=err)
+        assert result.exit_code == 1
+        assert "ERROR: Failed to extend stamp: Connection refused" in result.output
+        assert result.output.count("Failed to extend stamp") == 1
+
+
 class TestSendOutcomeUnknown:
     """A transport failure after the send is not reported as "Transaction failed" (#181)."""
 

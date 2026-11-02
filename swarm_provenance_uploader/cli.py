@@ -299,7 +299,8 @@ _X402_EXPLORERS = {
 
 
 def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: str,
-                            final_step: bool = False):
+                            final_step: bool = False, final_note: Optional[str] = None,
+                            final_stdout: Optional[List[str]] = None):
     """
     Explain a paid request whose payment may have been taken, then exit.
 
@@ -312,13 +313,17 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
         action: What was being paid for, e.g. "the stamp purchase".
         final_step: The paid request is the command's last step, so its
             success (IDEMPOTENCY_KEY_DELIVERED_NOT_STORED) is the command's.
+        final_note: For a final step that is not an upload: what to print
+            when it succeeded but its result cannot be returned.
+        final_stdout: With final_note: the command's normal success lines,
+            printed to stdout in that case, so a script sees them with exit 0.
 
     Raises:
         typer.Exit: Always; code 0 when the final step is known to have
             succeeded, 1 otherwise.
     """
     if isinstance(e, exceptions.PaymentDeliveredNotStoredError):
-        _report_delivered_not_stored(e, action, final_step)
+        _report_delivered_not_stored(e, action, final_step, final_note, final_stdout)
     if isinstance(e, exceptions.StampPurchasePendingError):
         headline = f"Payment received, but {action} is not confirmed yet."
     elif e.settled:
@@ -466,7 +471,8 @@ def _report_payment_required(e: exceptions.PaymentRequiredError):
 
 
 def _report_delivered_not_stored(e: exceptions.PaymentDeliveredNotStoredError, action: str,
-                                 final_step: bool):
+                                 final_step: bool, final_note: Optional[str] = None,
+                                 final_stdout: Optional[List[str]] = None):
     """
     The paid request succeeded and was paid once, but its result cannot be returned.
 
@@ -479,6 +485,11 @@ def _report_delivered_not_stored(e: exceptions.PaymentDeliveredNotStoredError, a
                         ("Idempotency-Key", e.idempotency_key)):
         if value:
             typer.echo(f"  {name + ':':<17}{value}", err=True)
+    if final_step and final_note:
+        typer.echo(final_note, err=True)
+        for line in final_stdout or ():
+            typer.echo(line)
+        raise typer.Exit(code=0)
     if final_step:
         _unused_stamp.update(id=None, how=None)  # the upload used it
         typer.echo("No Swarm reference is printed: the gateway could not return it. Ask the "
@@ -1619,27 +1630,69 @@ def stamps_info(
 @stamps_app.command("extend")
 def stamps_extend(
     stamp_id: Annotated[str, typer.Argument(help="Stamp batch ID to extend.")],
-    amount: Annotated[int, typer.Option("--amount", "-a", help="Amount of BZZ to add to the stamp.")],
+    duration_hours: Annotated[Optional[int], typer.Option(
+        "--duration-hours", "--duration", "-d",
+        help="Hours to add to the stamp (min 24). Default: the gateway's default, 25 hours.")] = None,
+    amount: Annotated[Optional[int], typer.Option(
+        "--amount", "-a",
+        help="Legacy: PLUR per chunk to add, instead of --duration-hours. "
+             "The gateway refuses an amount worth less than 24 hours.")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
 ):
     """
-    Extend an existing stamp by adding funds. (Gateway only)
+    Extend an existing stamp. (Gateway only)
+
+    The gateway charges for an extension like a purchase. A stamp you bought
+    can be extended only with a paid request from the same wallet (--x402);
+    the free tier (--free) can extend only shared stamps.
     """
     if _backend_config["backend"] != "gateway":
         typer.secho("ERROR: 'stamps extend' requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+    if amount is not None and duration_hours is not None:
+        typer.secho("ERROR: Give --duration-hours or --amount, not both.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    if amount is not None and amount <= 0:
+        typer.secho(f"ERROR: --amount must be greater than 0, got {amount}.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    if duration_hours is not None and duration_hours < 24:
+        typer.secho(f"ERROR: --duration-hours must be at least 24, got {duration_hours}.",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
 
     gateway_url = _backend_config["gateway_url"]
     if verbose:
-        typer.echo(f"Extending stamp {stamp_id} with amount {amount}...")
+        if amount is not None:
+            what = f"amount {amount} PLUR per chunk"
+        else:
+            what = f"{duration_hours or 'the default'} hours"
+        typer.echo(f"Extending stamp {stamp_id} by {what}...")
 
     try:
-        gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
-        result_id = gw_client.extend_stamp(stamp_id, amount, verbose=verbose)
+        gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
+        result_id = gw_client.extend_stamp(stamp_id, amount=amount, duration_hours=duration_hours,
+                                           verbose=verbose)
         typer.secho(f"SUCCESS: Stamp extended.", fg=typer.colors.GREEN)
         typer.echo(f"Batch ID: {result_id}")
+    except exceptions.PaymentRequiredError as e:
+        _report_payment_required(e)
+    except exceptions.PaymentOutcomeUnknownError as e:
+        _report_payment_outcome(
+            e, "the stamp extension", final_step=True,
+            final_note="The batch ID is the stamp ID you gave. Do not pay again.",
+            final_stdout=["SUCCESS: Stamp extended.", f"Batch ID: {stamp_id}"],
+        )
     except Exception as e:
-        typer.secho(f"ERROR: Failed to extend stamp: {e}", fg=typer.colors.RED, err=True)
+        cause = e.__cause__
+        # extend_stamp's ConnectionError text starts with "Failed to extend
+        # stamp <id>:"; print its cause so the prefix appears once.
+        detail = cause if isinstance(e, ConnectionError) and cause is not None else e
+        typer.secho(f"ERROR: Failed to extend stamp: {detail}", fg=typer.colors.RED, err=True)
+        if (isinstance(cause, exceptions.GatewayHTTPError) and cause.code == "STAMP_OWNERSHIP_DENIED"
+                and _backend_config["free_tier"]):
+            # --free sends X-Payment-Mode: free, which the gateway serves as unpaid
+            typer.echo("A stamp you bought can be extended only with a paid request from the same "
+                       "wallet: use --x402 instead of --free.", err=True)
         raise typer.Exit(code=1)
 
 

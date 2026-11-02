@@ -2903,6 +2903,97 @@ class TestGatewayMessageLimit:
         assert "rather than seconds." in str(exc.value)
 
 
+# --- Paid stamp extension (#137) ---
+
+EXTEND_URL = f"{GW}/api/v1/stamps/{DUMMY_STAMP}/extend"
+
+
+class TestExtendStampPaid:
+    """PATCH /stamps/{id}/extend is a paid, owner-only route on the gateway."""
+
+    def test_402_is_paid_with_idempotency_key(self, paying_client, requests_mock):
+        requests_mock.patch(EXTEND_URL, [PAYMENT_REQUIRED, {
+            "status_code": 200,
+            "json": {"batchID": DUMMY_STAMP, "message": "Postage stamp extended successfully"},
+        }])
+
+        assert paying_client.extend_stamp(DUMMY_STAMP, duration_hours=48) == DUMMY_STAMP
+
+        first, paid = requests_mock.request_history
+        assert first.method == paid.method == "PATCH"
+        assert "X-PAYMENT" not in first.headers
+        assert paid.headers["X-PAYMENT"] == _signed_header()
+        assert paid.headers["Idempotency-Key"]
+        assert paid.json() == {"duration_hours": 48}
+
+    def test_402_without_x402_is_payment_required(self, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        requests_mock.patch(EXTEND_URL, status_code=402, json={"accepts": []})
+        with pytest.raises(PaymentRequiredError):
+            GatewayClient(base_url=GW).extend_stamp(DUMMY_STAMP, duration_hours=48)
+
+    @pytest.mark.parametrize("kwargs,body", [
+        ({}, {}),
+        ({"duration_hours": 24}, {"duration_hours": 24}),
+        ({"amount": 5_000_000_000}, {"amount": 5_000_000_000}),
+    ])
+    def test_body_has_only_the_given_field(self, requests_mock, kwargs, body):
+        requests_mock.patch(EXTEND_URL, json={"batchID": DUMMY_STAMP, "message": "ok"})
+        GatewayClient(base_url=GW).extend_stamp(DUMMY_STAMP, **kwargs)
+        assert requests_mock.last_request.json() == body
+
+    def test_amount_stays_the_second_positional_argument(self, requests_mock):
+        requests_mock.patch(EXTEND_URL, json={"batchID": DUMMY_STAMP, "message": "ok"})
+        GatewayClient(base_url=GW).extend_stamp(DUMMY_STAMP, 7)
+        assert requests_mock.last_request.json() == {"amount": 7}
+
+    def test_amount_and_duration_together_refused_before_sending(self, requests_mock):
+        with pytest.raises(ValueError, match="not both"):
+            GatewayClient(base_url=GW).extend_stamp(DUMMY_STAMP, amount=1, duration_hours=48)
+        assert requests_mock.call_count == 0
+
+    def test_duration_below_24_refused_before_sending(self, requests_mock):
+        with pytest.raises(ValueError, match="at least 24"):
+            GatewayClient(base_url=GW).extend_stamp(DUMMY_STAMP, duration_hours=23)
+        assert requests_mock.call_count == 0
+
+    @pytest.mark.parametrize("amount", [0, -1])
+    def test_amount_not_positive_refused_before_sending(self, requests_mock, amount):
+        with pytest.raises(ValueError, match="greater than 0"):
+            GatewayClient(base_url=GW).extend_stamp(DUMMY_STAMP, amount=amount)
+        assert requests_mock.call_count == 0
+
+    def test_free_tier_header_sent(self, requests_mock):
+        requests_mock.patch(EXTEND_URL, json={"batchID": DUMMY_STAMP, "message": "ok"})
+        GatewayClient(base_url=GW, free_tier=True).extend_stamp(DUMMY_STAMP)
+        assert requests_mock.last_request.headers["X-Payment-Mode"] == "free"
+
+    def test_5xx_after_payment_is_outcome_unknown(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.patch(EXTEND_URL, [PAYMENT_REQUIRED, {"status_code": 502, "text": "Bad gateway"}])
+        with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+            paying_client.extend_stamp(DUMMY_STAMP, duration_hours=48)
+        assert exc_info.value.nonce == NONCE
+        assert exc_info.value.idempotency_key
+
+    def test_paid_success_with_unreadable_body_is_settled_not_delivered(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        requests_mock.patch(EXTEND_URL, [PAYMENT_REQUIRED, {"status_code": 200, "text": "<html>proxy</html>"}])
+        with pytest.raises(PaymentSettledNotDeliveredError):
+            paying_client.extend_stamp(DUMMY_STAMP, duration_hours=48)
+
+    def test_ownership_denied_shows_gateway_message(self, paying_client, requests_mock):
+        requests_mock.patch(EXTEND_URL, [PAYMENT_REQUIRED, {"status_code": 403, "json": _envelope(
+            "STAMP_OWNERSHIP_DENIED", "Cannot extend this stamp: it belongs to another wallet.",
+            stamp_id=DUMMY_STAMP)}])
+        with pytest.raises(ConnectionError,
+                           match="HTTP 403 STAMP_OWNERSHIP_DENIED: Cannot extend this stamp: it belongs"):
+            paying_client.extend_stamp(DUMMY_STAMP, duration_hours=48)
+
+
 # --- Gateway contract hygiene (#143) ---
 
 # A stamp as the gateway serves it (swarm_connect app/api/models/stamp.py):
