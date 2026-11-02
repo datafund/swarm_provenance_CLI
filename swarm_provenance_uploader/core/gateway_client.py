@@ -71,12 +71,19 @@ def is_valid_idempotency_key(key: str) -> bool:
     return 0 < len(key) <= 255 and key.isascii() and key.isprintable()
 
 
+# A plain decimal or scientific number in ASCII digits. Decimal() also accepts
+# underscores (0_30 is 30) and non-ASCII digits, so a typo could raise the limit.
+_AUTO_PAY_LIMIT_RE = re.compile(r"\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\s*", re.ASCII)
+
+
 def parse_auto_pay_limit(limit) -> Decimal:
     """
     The auto-pay limit (USD) as an exact Decimal.
 
     A float is converted through its shortest decimal form, so 0.30 becomes
     Decimal("0.30") and a payment of exactly 0.30 USDC is within the limit.
+    Text must be a plain decimal or scientific number in ASCII digits
+    (surrounding whitespace allowed): no underscores, no other digits.
 
     Raises:
         ValueError: If the limit is not a number, or is NaN, infinite or negative.
@@ -84,7 +91,10 @@ def parse_auto_pay_limit(limit) -> Decimal:
     try:
         if isinstance(limit, bool) or limit is None:  # True would read as 1
             raise TypeError
-        value = Decimal(str(limit))
+        text = str(limit)
+        if not _AUTO_PAY_LIMIT_RE.fullmatch(text):
+            raise ValueError
+        value = Decimal(text)
     except (InvalidOperation, ValueError, TypeError):
         raise ValueError(f"x402_max_auto_pay_usd must be a number, got {limit!r}") from None
     if not value.is_finite() or value < 0:
@@ -97,13 +107,15 @@ def format_auto_pay_limit(limit: Decimal, places: int = 6) -> str:
     """
     The auto-pay limit as text, without the Decimal context's rounding.
 
-    `places` decimals below 1e15; above that, every digit in scientific
-    notation (1E+30), so a huge limit neither fails nor prints hundreds
-    of digits.
+    `places` decimals below 1e15, or every decimal digit when `places` would
+    round the limit (0.2999999 is not shown as 0.300000); from 1e15, every
+    digit in scientific notation (1E+30), so a huge limit neither fails nor
+    prints hundreds of digits.
     """
     if limit and limit.adjusted() >= 15:
         return f"{limit:E}"
-    return f"{limit:.{places}f}"
+    text = f"{limit:.{places}f}"
+    return text if Decimal(text) == limit else f"{limit:f}"
 
 
 def _is_loopback_host(host: str) -> bool:

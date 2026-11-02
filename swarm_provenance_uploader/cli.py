@@ -1882,10 +1882,11 @@ def x402_status(
         from decimal import Decimal
         from .core.gateway_client import format_auto_pay_limit
 
-        # Two decimals when they are exact, else six (no round(): it fails above 28 digits)
-        max_pay_str = format_auto_pay_limit(max_pay, 2)
-        if Decimal(max_pay_str) != max_pay:
-            max_pay_str = format_auto_pay_limit(max_pay)
+        # Two decimals when they are exact, else as the refusal message shows it
+        # (no round(): it fails above 28 digits)
+        max_pay_str = format_auto_pay_limit(max_pay)
+        if max_pay.adjusted() < 15 and Decimal(f"{max_pay:.2f}") == max_pay:
+            max_pay_str = f"{max_pay:.2f}"
         typer.echo(f"  Max auto-pay: ${max_pay_str}")
     expected_pay_to = _x402_config.get("expected_pay_to")
     typer.echo(f"  Pay-to pin:   {expected_pay_to or 'none (any recipient the gateway names)'}")
