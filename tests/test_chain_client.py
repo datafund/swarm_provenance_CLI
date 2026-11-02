@@ -3658,6 +3658,34 @@ class TestSendTransactionTransportFailures:
         assert not isinstance(exc_info.value, TransactionUnconfirmedError)
         assert str(exc_info.value) == "nonce too low"
 
+    def test_rejection_by_send_carries_signed_hash(self, mock_chain_deps):
+        """A rejection raised by send_raw_transaction shows the hash of the signed transaction."""
+        from swarm_provenance_uploader.exceptions import TransactionUnconfirmedError
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
+        web3.eth.send_raw_transaction.side_effect = Web3RPCError("nonce too low")
+
+        with pytest.raises(ChainTransactionError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert type(exc_info.value) is ChainTransactionError
+        assert not isinstance(exc_info.value, TransactionUnconfirmedError)
+        assert exc_info.value.tx_hash == self._signed_hash()
+        web3.eth.send_raw_transaction.assert_called_once()
+
+    def test_failure_before_send_has_no_hash(self, mock_chain_deps):
+        """Nothing was signed and sent: an error before the send carries no hash."""
+        web3 = mock_chain_deps["web3_instance"]
+        client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
+        web3.eth.estimate_gas.side_effect = Web3RPCError("execution reverted")
+
+        with pytest.raises(ChainTransactionError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert exc_info.value.tx_hash is None
+        web3.eth.send_raw_transaction.assert_not_called()
+
     def test_receipt_timeout_unchanged(self, mock_chain_deps):
         """A receipt-wait timeout is left to #167: still a ChainTransactionError with the hash."""
         from swarm_provenance_uploader.exceptions import TransactionUnconfirmedError
