@@ -9,6 +9,7 @@ Requires optional dependencies (the `blockchain` extra): web3 and eth-account.
 """
 
 import ast
+import functools
 import json
 import logging
 from typing import List, Optional
@@ -37,6 +38,7 @@ from ..models import (
     MergeTransformResult,
     TransformResult,
 )
+from ..chain.exceptions import redact_exception_chain
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +131,58 @@ def _rpc_rejection_message(error: Exception) -> Optional[str]:
     if not _is_rpc_rejection(error):
         return None
     return _error_reason(error)
+
+
+def _read_error(error: Exception, rpc_url: Optional[str]) -> Optional[ChainError]:
+    """The chain error for an RPC failure in a read, or None if it is not one (#187).
+
+    A JSON-RPC error answer becomes ChainConfigurationError, like the
+    contract code check; a transport failure, a timeout or an answer that
+    is not JSON-RPC becomes ChainConnectionError. ChainError redacts the
+    message, and ChainConnectionError the URL.
+    """
+    rejection = _rpc_rejection_message(error)
+    if rejection is not None:
+        return ChainConfigurationError(f"The RPC rejected the request: {rejection}")
+    if _is_rpc_failure(error):
+        return ChainConnectionError(_error_reason(error), rpc_url=rpc_url)
+    return None
+
+
+def _redacted_errors(map_rpc_failures: bool):
+    """Decorate a public ChainClient method so its errors do not repeat the RPC URL (#187).
+
+    A ChainError the method raises gets a redacted exception chain
+    (redact_exception_chain), because library callers can print
+    ``__cause__`` and ``__context__``. With map_rpc_failures (read
+    methods), a raw RPC failure becomes a chain error (_read_error), raised
+    from None; its suppressed ``__context__`` is redacted too. Other
+    exceptions pass through unchanged.
+    """
+    def decorator(method):
+        @functools.wraps(method)
+        def wrapper(self, *args, **kwargs):
+            try:
+                try:
+                    return method(self, *args, **kwargs)
+                except ChainError:
+                    raise
+                except Exception as e:
+                    if not map_rpc_failures:
+                        raise
+                    error = _read_error(e, self._provider.rpc_url)
+                    if error is None:
+                        raise
+                    raise error from None
+            except ChainError as e:
+                redact_exception_chain(e)
+                raise
+        return wrapper
+    return decorator
+
+
+_read_method = _redacted_errors(map_rpc_failures=True)
+_write_method = _redacted_errors(map_rpc_failures=False)
 
 
 class ChainClient:
@@ -488,6 +542,7 @@ class ChainClient:
 
     # --- Write operations ---
 
+    @_write_method
     def anchor(
         self,
         swarm_hash: str,
@@ -566,6 +621,7 @@ class ChainClient:
             storage_ref=storage_ref,
         )
 
+    @_write_method
     def anchor_for(
         self,
         swarm_hash: str,
@@ -629,6 +685,7 @@ class ChainClient:
             storage_ref=storage_ref,
         )
 
+    @_write_method
     def batch_anchor(
         self,
         swarm_hashes: List[str],
@@ -671,6 +728,7 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    @_write_method
     def set_storage_ref(
         self,
         data_hash: str,
@@ -711,6 +769,7 @@ class ChainClient:
             storage_ref=storage_ref,
         )
 
+    @_read_method
     def get_by_storage_ref(
         self,
         storage_ref: str,
@@ -739,6 +798,7 @@ class ChainClient:
         data_hash = data_hash_bytes.hex()
         return self.get(data_hash, verbose=verbose)
 
+    @_write_method
     def transform(
         self,
         original_hash: str,
@@ -832,6 +892,7 @@ class ChainClient:
             description=description,
         )
 
+    @_write_method
     def access(
         self,
         swarm_hash: str,
@@ -865,6 +926,7 @@ class ChainClient:
             accessor=self._wallet.address,
         )
 
+    @_write_method
     def batch_access(
         self,
         swarm_hashes: List[str],
@@ -900,6 +962,7 @@ class ChainClient:
             accessor=self._wallet.address,
         )
 
+    @_write_method
     def set_status(
         self,
         swarm_hash: str,
@@ -939,6 +1002,7 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    @_write_method
     def batch_set_status(
         self,
         swarm_hashes: List[str],
@@ -978,6 +1042,7 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    @_write_method
     def transfer_ownership(
         self,
         swarm_hash: str,
@@ -1015,6 +1080,7 @@ class ChainClient:
             owner=new_owner,
         )
 
+    @_write_method
     def set_delegate(
         self,
         delegate: str,
@@ -1053,6 +1119,7 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    @_write_method
     def merge_transform(
         self,
         source_hashes: List[str],
@@ -1107,6 +1174,7 @@ class ChainClient:
 
     # --- Read operations ---
 
+    @_read_method
     def get(
         self,
         swarm_hash: str,
@@ -1201,6 +1269,7 @@ class ChainClient:
             transformations=chain_transformations,
         )
 
+    @_read_method
     def verify(
         self,
         swarm_hash: str,
@@ -1222,6 +1291,7 @@ class ChainClient:
         except DataNotRegisteredError:
             return False
 
+    @_read_method
     def balance(self, verbose: bool = False) -> ChainWalletInfo:
         """
         Get wallet balance and chain info.
@@ -1251,6 +1321,7 @@ class ChainClient:
             contract_address=self._provider.contract_address,
         )
 
+    @_read_method
     def health_check(self, verbose: bool = False) -> bool:
         """
         Check if the chain provider is connected and healthy.
@@ -1280,6 +1351,7 @@ class ChainClient:
 
         return result
 
+    @_read_method
     def get_provenance_chain(
         self,
         swarm_hash: str,
