@@ -1110,6 +1110,30 @@ class TestUploadWithPool:
         assert "not enabled" in result.stdout.lower()
         assert "without --usePool" in result.stdout
 
+    def test_usepool_pool_empty_no_second_error(self, mocker, tmp_path):
+        """The pool-empty exit must not be re-caught and re-printed as an empty
+        "Failed acquiring stamp from pool:" line (#164)."""
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("test content")
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_pool_available_count.return_value = 0
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli._get_gateway_client_with_x402",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(
+            app,
+            ["upload", "--file", str(test_file), "--usePool"]
+        )
+
+        assert result.exit_code == 1
+        assert "No stamps available in pool" in result.stdout
+        assert "Failed acquiring stamp from pool" not in result.stdout
+        assert result.stdout.count("ERROR:") == 1
+
 
 # =============================================================================
 # NOTARY COMMANDS TESTS
