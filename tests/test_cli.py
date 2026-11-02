@@ -5853,6 +5853,133 @@ class TestPaymentPromptReviewCases:
         assert "Max auto-pay: $0.004000" in runner.invoke(app, ["x402", "status"]).output
 
 
+class TestAutoPayLimitValidation:
+    """A non-numeric, NaN, infinite or negative auto-pay limit is a configuration error (#152)."""
+
+    BAD_LIMITS = ["nan", "inf", "-1", "-0.01", "abc", "0,30", "0_30", "1_0.0_0", "\u0663"]
+
+    @pytest.mark.parametrize("value", BAD_LIMITS)
+    def test_invalid_max_pay_flag_rejected(self, mocker, value):
+        gateway = mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        result = runner.invoke(app, ["--max-pay", value, "x402", "status"])
+        assert result.exit_code == 1
+        assert "ERROR: Invalid auto-pay limit" in result.output
+        assert "--max-pay" in result.output
+        gateway.assert_not_called()
+
+    @staticmethod
+    def _upload(mocker, tmp_path):
+        data_file = tmp_path / "d.txt"
+        data_file.write_text("x")
+        gateway = mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        mocker.patch("swarm_provenance_uploader.cli.time.sleep")
+        result = runner.invoke(app, ["upload", "--file", str(data_file), "--stamp-id", DUMMY_STAMP])
+        return result, gateway
+
+    @pytest.mark.parametrize("value", BAD_LIMITS + [float("nan"), float("inf"), -1.0])
+    def test_invalid_env_limit_refuses_paying_client(self, mocker, tmp_path, value):
+        _x402_config.update(enabled=True, max_auto_pay_usd=value)
+        result, gateway = self._upload(mocker, tmp_path)
+        assert result.exit_code == 1
+        assert "ERROR: Invalid auto-pay limit" in result.output
+        assert "X402_MAX_AUTO_PAY_USD" in result.output
+        gateway.assert_not_called()
+
+    @pytest.mark.parametrize("args", [
+        ["upload", "--file", "d.txt"],                              # stamp purchase
+        ["upload", "--file", "d.txt", "--stamp-id", DUMMY_STAMP],  # usability poll
+        ["upload", "--file", "d.txt", "--usePool"],                 # pool acquire
+        ["upload", "--file", "d.txt", "--stamp-id", DUMMY_STAMP, "--sign", "notary"],
+        ["upload-collection", "mydir"],
+        ["upload-collection", "mydir", "--stamp-id", DUMMY_STAMP],
+        ["upload-collection", "mydir", "--usePool"],
+        ["stamps", "extend", DUMMY_STAMP],                         # paid extension (#214)
+    ])
+    def test_invalid_env_limit_stops_each_paying_path_at_once(self, mocker, args):
+        """The error is not retried, sleeps nothing, and is not wrapped in a second ERROR line."""
+        _x402_config.update(enabled=True, max_auto_pay_usd="nan")
+        gateway = mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        sleep = mocker.patch("swarm_provenance_uploader.cli.time.sleep")
+        with runner.isolated_filesystem():
+            import os
+            os.makedirs("mydir")
+            for name in ("d.txt", "mydir/a.txt"):
+                with open(name, "w") as f:
+                    f.write("x")
+            result = runner.invoke(app, args)
+        assert result.exit_code == 1
+        assert result.output.count("ERROR") == 1, result.output
+        assert "ERROR: Invalid auto-pay limit 'nan' from X402_MAX_AUTO_PAY_USD" in result.output
+        assert "retrying" not in result.output
+        gateway.assert_not_called()
+        sleep.assert_not_called()
+
+    def test_invalid_env_limit_does_not_block_help(self):
+        _x402_config.update(enabled=True, max_auto_pay_usd="nan")
+        result = runner.invoke(app, ["upload", "--help"])
+        assert result.exit_code == 0
+        assert "Invalid auto-pay limit" not in result.output
+
+    @pytest.mark.parametrize("value", ["nan", "abc", "inf", "-1"])
+    def test_x402_status_warns_on_invalid_env_limit(self, value):
+        _x402_config.update(enabled=True, max_auto_pay_usd=value)
+        result = runner.invoke(app, ["x402", "status"])
+        assert result.exit_code == 0
+        assert f"Max auto-pay: {value!r}" in result.output
+        assert "WARNING: X402_MAX_AUTO_PAY_USD" in result.output
+
+    def test_invalid_env_limit_ignored_without_x402(self, mocker, tmp_path):
+        _x402_config["max_auto_pay_usd"] = "nan"
+        result, gateway = self._upload(mocker, tmp_path)
+        assert result.exit_code == 0, result.output
+        assert "Invalid auto-pay limit" not in result.output
+        assert gateway.called
+
+    @pytest.mark.parametrize("value", ["0", "-0", "-0.0"])
+    def test_zero_max_pay_accepted(self, value):
+        result = runner.invoke(app, ["--max-pay", value, "x402", "status"])
+        assert result.exit_code == 0
+        assert "Max auto-pay: $0.00" in result.output
+
+    @pytest.mark.parametrize("value, shown", [("1e30", "$1E+30"), ("1e400", "$1E+400"),
+                                              ("1000000000000000.5", "$1.0000000000000005E+15"),
+                                              ("999999999999999.25", "$999999999999999.25"), ("0.004", "$0.004000"),
+                                              ("0.2999999", "$0.2999999"), ("0.30000000", "$0.30"),
+                                              ("1.0000001", "$1.0000001")])
+    @pytest.mark.parametrize("via", ["env", "flag"])
+    def test_x402_status_shows_huge_limit(self, value, shown, via):
+        args = ["x402", "status"]
+        if via == "env":
+            _x402_config.update(enabled=True, max_auto_pay_usd=value)
+        else:
+            args = ["--max-pay", value] + args
+        result = runner.invoke(app, args)
+        assert result.exit_code == 0, result.output
+        assert f"Max auto-pay: {shown}\n" in result.output
+        assert "WARNING: X402_MAX_AUTO_PAY_USD" not in result.output
+
+    def test_env_limit_string_shown_parsed(self):
+        _x402_config["max_auto_pay_usd"] = "-0"
+        assert "Max auto-pay: $0.00" in runner.invoke(app, ["x402", "status"]).output
+
+    def test_max_pay_flag_kept_exact(self, mocker, tmp_path):
+        """--max-pay is not rounded through a float (0.300000000000000001 is not 0.3)."""
+        from decimal import Decimal
+
+        data_file = tmp_path / "d.txt"
+        data_file.write_text("x")
+        gateway = mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        runner.invoke(app, ["--x402", "--max-pay", "0.300000000000000001",
+                            "upload", "--file", str(data_file), "--stamp-id", DUMMY_STAMP])
+        limit = gateway.call_args.kwargs["x402_max_auto_pay_usd"]
+        assert Decimal(str(limit)) == Decimal("0.300000000000000001")
+
+    def test_max_pay_help_still_says_float(self):
+        result = runner.invoke(app, ["--help"])
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        assert re.search(r"--max-pay\s+FLOAT", plain)
+
+
 class TestPayToPinStatus:
     def test_status_warns_on_invalid_pin(self):
         _x402_config["expected_pay_to"] = "operator.eth"

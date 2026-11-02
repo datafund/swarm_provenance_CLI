@@ -59,11 +59,12 @@ X402_NETWORK = os.getenv("X402_NETWORK", "base-sepolia")
 # Auto-pay without prompting (disabled by default for safety)
 X402_AUTO_PAY = os.getenv("X402_AUTO_PAY", "false").lower() == "true"
 
-# Maximum auto-pay amount per request in USD (default: $1.00)
-try:
-    X402_MAX_AUTO_PAY_USD = float(os.getenv("X402_MAX_AUTO_PAY_USD", "1.00"))
-except (ValueError, TypeError):
-    X402_MAX_AUTO_PAY_USD = 1.00
+# Maximum auto-pay amount per request in USD (default: $1.00). Kept as the
+# string written: GatewayClient parses it exactly, and the CLI reports a value
+# that is not a finite number of 0 or more (#152). A blank value counts as not set.
+X402_MAX_AUTO_PAY_USD = os.getenv("X402_MAX_AUTO_PAY_USD", "")
+if not X402_MAX_AUTO_PAY_USD.strip():
+    X402_MAX_AUTO_PAY_USD = "1.00"
 
 # Only sign payments to this address (optional). Pin it to the gateway
 # operator's published pay-to address so a misconfigured or hostile gateway

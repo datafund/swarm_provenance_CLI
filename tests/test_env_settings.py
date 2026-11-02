@@ -493,3 +493,20 @@ def test_config_imports_in_deleted_working_directory(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "Traceback" not in result.stderr
     assert result.stdout.strip() == "https://provenance-gateway.datafund.io"
+
+
+# --- Auto-pay limit (#152) ---------------------------------------------------
+
+@pytest.mark.parametrize("raw, kept", [("0.30", "0.30"), ("abc", "abc"), ("0,30", "0,30"),
+                                       ("nan", "nan"), ("", "1.00"), (None, "1.00")])
+def test_max_auto_pay_kept_as_written(tmp_path, raw, kept):
+    """The limit is kept as the string written, not rounded or replaced by 1.00 (#152)."""
+    tmp_path = tmp_path / "work"
+    tmp_path.mkdir()
+    env = _clean_env(PYTHONPATH=str(ROOT))  # this checkout, not another installed copy
+    env.pop("X402_MAX_AUTO_PAY_USD", None)
+    if raw is not None:
+        env["X402_MAX_AUTO_PAY_USD"] = raw
+    out = _run("import swarm_provenance_uploader.config as c; print(repr(c.X402_MAX_AUTO_PAY_USD))",
+               tmp_path, env)
+    assert out == [repr(kept)]

@@ -19,8 +19,8 @@ import unicodedata
 import uuid
 import warnings
 from contextlib import contextmanager
-from decimal import Decimal
-from typing import Callable, List, Optional, Tuple
+from decimal import Decimal, InvalidOperation
+from typing import Callable, List, Optional, Tuple, Union
 from urllib.parse import urljoin, urlparse
 
 from ..exceptions import (
@@ -68,6 +68,53 @@ IDEMPOTENCY_HEADER = "Idempotency-Key"
 def is_valid_idempotency_key(key: str) -> bool:
     """The gateway's rule: 1-255 printable ASCII characters."""
     return 0 < len(key) <= 255 and key.isascii() and key.isprintable()
+
+
+# A plain decimal or scientific number in ASCII digits. Decimal() also accepts
+# underscores (0_30 is 30) and non-ASCII digits, so a typo could raise the limit.
+_AUTO_PAY_LIMIT_RE = re.compile(r"\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\s*", re.ASCII)
+
+
+def parse_auto_pay_limit(limit) -> Decimal:
+    """
+    The auto-pay limit (USD) as an exact Decimal.
+
+    A float is converted through its shortest decimal form, so 0.30 becomes
+    Decimal("0.30") and a payment of exactly 0.30 USDC is within the limit.
+    Text must be a plain decimal or scientific number in ASCII digits
+    (surrounding whitespace allowed): no underscores, no other digits.
+
+    Raises:
+        ValueError: If the limit is not a number, or is NaN, infinite or negative.
+    """
+    try:
+        if isinstance(limit, bool) or limit is None:  # True would read as 1
+            raise TypeError
+        text = str(limit)
+        if not _AUTO_PAY_LIMIT_RE.fullmatch(text):
+            raise ValueError
+        value = Decimal(text)
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValueError(f"x402_max_auto_pay_usd must be a number, got {limit!r}") from None
+    if not value.is_finite() or value < 0:
+        raise ValueError(
+            f"x402_max_auto_pay_usd must be a finite number of 0 or more, got {limit!r}")
+    return value.copy_abs()  # exact (abs() rounds to 28 digits); -0.0 becomes 0
+
+
+def format_auto_pay_limit(limit: Decimal, places: int = 6) -> str:
+    """
+    The auto-pay limit as text, without the Decimal context's rounding.
+
+    `places` decimals below 1e15, or every decimal digit when `places` would
+    round the limit (0.2999999 is not shown as 0.300000); from 1e15, every
+    digit in scientific notation (1E+30), so a huge limit neither fails nor
+    prints hundreds of digits.
+    """
+    if limit and limit.adjusted() >= 15:
+        return f"{limit:E}"
+    text = f"{limit:.{places}f}"
+    return text if Decimal(text) == limit else f"{limit:f}"
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -150,7 +197,7 @@ class GatewayClient:
         x402_private_key: Optional[str] = None,
         x402_network: str = "base-sepolia",
         x402_auto_pay: bool = False,
-        x402_max_auto_pay_usd: float = 1.00,
+        x402_max_auto_pay_usd: Union[float, int, str, Decimal] = 1.00,
         x402_payment_callback: Optional[Callable[..., bool]] = None,
         free_tier: bool = False,
         x402_on_payment_sent: Optional[Callable[[dict], None]] = None,
@@ -171,6 +218,9 @@ class GatewayClient:
             x402_max_auto_pay_usd: Maximum auto-pay amount in USD. With auto-pay
                                    and no callback this is a hard cap: a larger
                                    amount is refused before anything is signed.
+                                   Compared exactly, as the decimal value
+                                   written (0.30 allows 0.30 USDC). Must be
+                                   finite and not negative.
             x402_payment_callback: Optional callback for payment confirmation,
                                    asked for any amount not auto-paid.
                                    Called with (amount_usd, description) -> bool;
@@ -196,6 +246,10 @@ class GatewayClient:
                                    mistake, not a bug). Defaults to whether
                                    idempotency_key was passed.
 
+        Raises:
+            ValueError: If x402_max_auto_pay_usd is not a number, or is NaN,
+                        infinite or negative.
+
         Warns:
             InsecureGatewayWarning: If x402 is enabled and the gateway URL is
                                     plain http on a non-loopback host.
@@ -209,7 +263,7 @@ class GatewayClient:
         self._x402_private_key = x402_private_key  # gitleaks:allow (a variable name, not a key)
         self._x402_network = x402_network
         self._x402_auto_pay = x402_auto_pay
-        self._x402_max_auto_pay_usd = x402_max_auto_pay_usd
+        self._x402_max_auto_pay_usd = parse_auto_pay_limit(x402_max_auto_pay_usd)
         self._x402_payment_callback = x402_payment_callback
         self._x402_on_payment_sent = x402_on_payment_sent
         self._x402_expected_pay_to = x402_expected_pay_to
@@ -254,7 +308,7 @@ class GatewayClient:
         return urljoin(self.base_url + "/", path.lstrip("/"))
 
     def _should_auto_pay(self, amount_usd) -> bool:
-        """Check if amount (USD, float or Decimal) is within auto-pay limit."""
+        """Check if amount (USD, float or Decimal) is within the exact auto-pay limit."""
         return bool(self._x402_auto_pay and amount_usd <= self._x402_max_auto_pay_usd)
 
     def _handle_402_response(
@@ -360,8 +414,9 @@ class GatewayClient:
         requirements = x402_client.parse_402_response(body)
         option = x402_client.select_payment_option(requirements)
         amount_usd = x402_client.format_amount_usd(option.maxAmountRequired)
-        # Exact, and no float overflow for an absurdly long amount
-        amount_float = Decimal(int(option.maxAmountRequired)).scaleb(-6)
+        # Exact, and no float overflow for an absurdly long amount. Built from
+        # a string: scaleb() would round to the 28-digit Decimal context (#152).
+        amount_float = Decimal(f"{int(option.maxAmountRequired)}E-6")
 
         if verbose:
             print(f"DEBUG: Selected payment option: {amount_usd} on {option.network}")
@@ -379,7 +434,7 @@ class GatewayClient:
                 # hard cap, so refuse before anything is signed.
                 raise PaymentRequiredError(
                     f"Payment of {amount_usd} exceeds the auto-pay limit of "
-                    f"${self._x402_max_auto_pay_usd:.6f}; nothing was signed. "
+                    f"${format_auto_pay_limit(self._x402_max_auto_pay_usd)}; nothing was signed. "
                     "Raise the limit or confirm the payment interactively.",
                     payment_options=[option.model_dump()],
                 )
