@@ -2934,7 +2934,7 @@ class TestTraversalErrorWithWeb3:
         from swarm_provenance_uploader.core.chain_client import _traversal_error
 
         for error in (
-            web3_exceptions.Web3RPCError("boom"),
+            web3_exceptions.RequestTimedOut("timed out"),
             web3_exceptions.ProviderConnectionError("down"),
             web3_exceptions.TimeExhausted("slow"),
             web3_exceptions.BadResponseFormat("not JSON-RPC"),
@@ -2943,6 +2943,18 @@ class TestTraversalErrorWithWeb3:
             assert isinstance(result, ChainConnectionError), type(error)
             assert DUMMY_HASH in str(result)
             assert "depth 2" in str(result)
+
+    def test_json_rpc_rejection_becomes_configuration_error(self):
+        """The node answered and refused: not a connection failure, so no fallback (#168 review 4)."""
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        from swarm_provenance_uploader.core.chain_client import _traversal_error
+
+        result = _traversal_error(DUMMY_HASH, 2, web3_exceptions.Web3RPCError("limit exceeded"))
+        assert isinstance(result, ChainConfigurationError)
+        assert not isinstance(result, ChainConnectionError)
+        assert DUMMY_HASH in str(result)
+        assert "depth 2" in str(result)
+        assert "limit exceeded" in str(result)
 
     def test_revert_becomes_chain_error(self):
         web3_exceptions = pytest.importorskip("web3.exceptions")
@@ -5477,3 +5489,126 @@ class TestNestedFallbackGuard:
 
         assert seen == [True]
         assert provider._fallback_active is False
+
+
+@pytest.fixture
+def real_web3_exceptions():
+    """The real web3.exceptions module, imported before mock_chain_deps replaces web3.
+
+    List it before mock_chain_deps in a test's arguments. Set it as
+    ``sys.modules["web3"].exceptions`` inside the test, so _is_rpc_failure
+    sees the real classes while the rest of web3 stays mocked.
+    """
+    return pytest.importorskip("web3.exceptions")
+
+
+def _inject_real_exceptions(real_web3_exceptions):
+    import sys
+
+    assert not isinstance(real_web3_exceptions, MagicMock)
+    sys.modules["web3"].exceptions = real_web3_exceptions
+
+
+class TestProvenanceChainRejectionDoesNotFallBack:
+    """A JSON-RPC error answer during the walk is not a connection failure (#168 review 4).
+
+    With the real web3.exceptions classes: a Web3RPCError from a link,
+    parent or event read became ChainConnectionError in _traversal_error,
+    so the walk moved to a fallback, and a rejection on every endpoint was
+    reported as "Cannot connect to chain".
+    """
+
+    def _client(self, mock_chain_deps):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, OTHER_ADDRESS, 1, "t", b"\x00" * 32, [], [], 0,
+        )
+        client = ChainClient(chain="base-sepolia", require_wallet=False)
+        client._provider._try_fallback = MagicMock(side_effect=[True, False, False])
+        return client
+
+    def test_state_path(self, real_web3_exceptions, mock_chain_deps):
+        _inject_real_exceptions(real_web3_exceptions)
+        client = self._client(mock_chain_deps)
+        client._contract.supports_transformation_links = MagicMock(return_value=True)
+        client._contract.get_transformation_links = MagicMock(
+            side_effect=real_web3_exceptions.Web3RPCError("limit exceeded")
+        )
+
+        with pytest.raises(ChainConfigurationError) as exc_info:
+            client.get_provenance_chain(DUMMY_HASH)
+
+        assert not isinstance(exc_info.value, ChainConnectionError)
+        assert "limit exceeded" in str(exc_info.value)
+        client._provider._try_fallback.assert_not_called()
+
+    def test_parents_read(self, real_web3_exceptions, mock_chain_deps):
+        _inject_real_exceptions(real_web3_exceptions)
+        client = self._client(mock_chain_deps)
+        client._contract.supports_transformation_links = MagicMock(return_value=True)
+        client._contract.get_transformation_links = MagicMock(return_value=[])
+        client._contract.get_transformation_parents = MagicMock(
+            side_effect=real_web3_exceptions.Web3RPCError("invalid params")
+        )
+
+        with pytest.raises(ChainConfigurationError):
+            client.get_provenance_chain(DUMMY_HASH)
+
+        client._provider._try_fallback.assert_not_called()
+
+    def test_per_node_event_path(self, real_web3_exceptions, mock_chain_deps):
+        _inject_real_exceptions(real_web3_exceptions)
+        client = self._client(mock_chain_deps)
+        client._contract.supports_transformation_links = MagicMock(return_value=False)
+        client._provider.deploy_block = None  # no event index: per-node queries
+        client._contract.get_transformations_from = MagicMock(
+            side_effect=real_web3_exceptions.Web3RPCError("invalid params")
+        )
+
+        with pytest.raises(ChainConfigurationError) as exc_info:
+            client.get_provenance_chain(DUMMY_HASH)
+
+        assert not isinstance(exc_info.value, ChainConnectionError)
+        client._provider._try_fallback.assert_not_called()
+
+    def test_transport_failure_in_the_walk_still_falls_back(self, real_web3_exceptions, mock_chain_deps):
+        _inject_real_exceptions(real_web3_exceptions)
+        client = self._client(mock_chain_deps)
+        client._contract.supports_transformation_links = MagicMock(return_value=True)
+        client._contract.get_transformation_links = MagicMock(side_effect=[
+            real_web3_exceptions.ProviderConnectionError("down"), [],
+        ])
+        client._contract.get_transformation_parents = MagicMock(return_value=[])
+
+        chain = client.get_provenance_chain(DUMMY_HASH)
+
+        assert [r.data_hash for r in chain] == [DUMMY_HASH]
+        client._provider._try_fallback.assert_called_once()
+
+
+class TestWriteChainIdCheckFallsBack:
+    """The chain ID check before a write moves to a fallback when eth_chainId fails (#168 review 4)."""
+
+    @pytest.mark.parametrize("kind", ["connection_error", "json_rpc_error"])
+    def test_write_proceeds_on_the_fallback(self, real_web3_exceptions, mock_chain_deps, kind):
+        import requests
+
+        error = {
+            "connection_error": requests.exceptions.ConnectionError("refused"),
+            # Documented exception: a JSON-RPC error answer to eth_chainId
+            # falls back too (nothing is sent; the fallback is chain-checked)
+            "json_rpc_error": real_web3_exceptions.Web3RPCError("rate limited"),
+        }[kind]
+        web3 = mock_chain_deps["web3_instance"]
+        client = _fallback_client(mock_chain_deps, [_log("DataStatusChanged")])
+        type(web3.eth).chain_id = PropertyMock(side_effect=[error, 84532, 84532, 84532])
+        try:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+        finally:
+            del type(web3.eth).chain_id
+
+        client._provider._try_fallback.assert_called_once()
+        assert client._provider._chain_id_confirmed is True
+        web3.eth.send_raw_transaction.assert_called_once()
+        mock_chain_deps["account"].sign_transaction.assert_called_once()
