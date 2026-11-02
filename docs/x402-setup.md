@@ -148,7 +148,7 @@ X402_NETWORK=base-sepolia
 # Optional: Auto-pay without prompts
 X402_AUTO_PAY=false
 
-# Optional: Maximum auto-pay amount per request in USD
+# Optional: Maximum auto-pay amount per request in USD (a finite number of 0 or more)
 X402_MAX_AUTO_PAY_USD=1.00
 
 # Optional: Only pay this recipient (the gateway operator's published pay-to address)

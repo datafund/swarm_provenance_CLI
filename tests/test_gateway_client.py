@@ -1663,6 +1663,10 @@ class TestAutoPayLimitValidation:
         client = GatewayClient(base_url=GW, x402_enabled=True, x402_max_auto_pay_usd=limit)
         assert client._x402_max_auto_pay_usd == Decimal(str(limit))
 
+    def test_negative_zero_limit_is_zero(self):
+        client = GatewayClient(base_url=GW, x402_enabled=True, x402_max_auto_pay_usd=-0.0)
+        assert str(client._x402_max_auto_pay_usd) == "0.0"
+
     def test_zero_limit_auto_pays_nothing(self):
         client = GatewayClient(base_url=GW, x402_enabled=True, x402_auto_pay=True,
                                x402_max_auto_pay_usd=0)

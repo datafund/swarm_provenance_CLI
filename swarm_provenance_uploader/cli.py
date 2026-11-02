@@ -419,6 +419,20 @@ def _report_delivered_not_stored(e: exceptions.PaymentDeliveredNotStoredError, a
     raise typer.Exit(code=1)
 
 
+def _check_auto_pay_limit(source: str) -> None:
+    """Exit 1 if the auto-pay limit is not a finite number of 0 or more (#152)."""
+    from .core.gateway_client import parse_auto_pay_limit
+
+    limit = _x402_config["max_auto_pay_usd"]
+    try:
+        parse_auto_pay_limit(limit)
+    except ValueError:
+        typer.secho(f"ERROR: Invalid auto-pay limit {limit!r} from {source}. "
+                    "Use a finite number of 0 or more, such as 1.00.",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
 def _get_gateway_client_with_x402(gateway_url: str, verbose: bool = False) -> GatewayClient:
     """
     Create a GatewayClient with x402 configuration if enabled.
@@ -3495,6 +3509,13 @@ def main(
     # Free tier configuration
     if free is not None:
         _backend_config["free_tier"] = free
+
+    # A NaN, infinite or negative auto-pay limit is a configuration error.
+    # The environment value is checked only when x402 is on.
+    if max_pay is not None:
+        _check_auto_pay_limit("--max-pay")
+    elif _x402_config["enabled"]:
+        _check_auto_pay_limit("X402_MAX_AUTO_PAY_USD")
 
     # Chain configuration
     if chain:
