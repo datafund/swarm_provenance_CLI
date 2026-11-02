@@ -5111,6 +5111,39 @@ class TestPaymentPromptReviewCases:
         assert "Max auto-pay: $0.004000" in runner.invoke(app, ["x402", "status"]).output
 
 
+class TestAutoPayLimitValidation:
+    """A NaN, infinite or negative auto-pay limit is a configuration error (#152)."""
+
+    @pytest.mark.parametrize("value", ["nan", "inf", "-1", "-0.01"])
+    def test_invalid_max_pay_flag_rejected(self, mocker, value):
+        gateway = mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        result = runner.invoke(app, ["--max-pay", value, "x402", "status"])
+        assert result.exit_code == 1
+        assert "ERROR: Invalid auto-pay limit" in result.output
+        assert "--max-pay" in result.output
+        gateway.assert_not_called()
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), -1.0])
+    def test_invalid_env_limit_rejected_with_x402(self, mocker, value):
+        gateway = mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        _x402_config["max_auto_pay_usd"] = value
+        result = runner.invoke(app, ["--x402", "x402", "status"])
+        assert result.exit_code == 1
+        assert "ERROR: Invalid auto-pay limit" in result.output
+        assert "X402_MAX_AUTO_PAY_USD" in result.output
+        gateway.assert_not_called()
+
+    def test_invalid_env_limit_ignored_without_x402(self):
+        _x402_config["max_auto_pay_usd"] = float("nan")
+        result = runner.invoke(app, ["x402", "status"])
+        assert "Invalid auto-pay limit" not in result.output
+
+    def test_zero_max_pay_accepted(self):
+        result = runner.invoke(app, ["--max-pay", "0", "x402", "status"])
+        assert result.exit_code == 0
+        assert "Max auto-pay: $0.00" in result.output
+
+
 class TestPayToPinStatus:
     def test_status_warns_on_invalid_pin(self):
         _x402_config["expected_pay_to"] = "operator.eth"

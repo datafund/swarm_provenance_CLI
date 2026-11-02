@@ -1,5 +1,6 @@
 """Tests for the GatewayClient module."""
 
+from decimal import Decimal
 import pytest
 import requests
 from swarm_provenance_uploader.core.gateway_client import GatewayClient
@@ -1620,6 +1621,52 @@ class TestAutoPayHardCap:
         finally:
             patcher.stop()
         callback.assert_called_once()
+
+    @pytest.mark.parametrize("limit, amount", [(0.30, "300000"), (0.29, "290000"), (0.1, "100000")])
+    def test_at_inexact_float_cap_auto_pays(self, mock_x402, requests_mock, limit, amount):
+        """A limit binary floating point cannot hold exactly still pays that amount (#152)."""
+        mock_x402.select_payment_option.return_value = _option(amount=amount)
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_max_auto_pay_usd=limit)
+        try:
+            assert client.purchase_stamp() == DUMMY_STAMP
+        finally:
+            patcher.stop()
+        mock_x402.sign_payment.assert_called_once()
+
+    def test_one_unit_above_inexact_float_cap_refused(self, mock_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        mock_x402.select_payment_option.return_value = _option(amount="290001")  # $0.290001
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_max_auto_pay_usd=0.29)
+        try:
+            with pytest.raises(PaymentRequiredError, match="exceeds the auto-pay limit"):
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+        mock_x402.sign_payment.assert_not_called()
+
+
+class TestAutoPayLimitValidation:
+    """The auto-pay limit must be a finite, non-negative number (#152)."""
+
+    @pytest.mark.parametrize("limit", [float("nan"), float("inf"), float("-inf"), -0.01, -1,
+                                       "nan", "abc", None])
+    def test_invalid_limit_rejected_at_init(self, limit):
+        with pytest.raises(ValueError, match="x402_max_auto_pay_usd"):
+            GatewayClient(base_url=GW, x402_enabled=True, x402_auto_pay=True,
+                          x402_max_auto_pay_usd=limit)
+
+    @pytest.mark.parametrize("limit", [0, 0.0, 1, "0.30", Decimal("0.30")])
+    def test_valid_limit_accepted(self, limit):
+        client = GatewayClient(base_url=GW, x402_enabled=True, x402_max_auto_pay_usd=limit)
+        assert client._x402_max_auto_pay_usd == Decimal(str(limit))
+
+    def test_zero_limit_auto_pays_nothing(self):
+        client = GatewayClient(base_url=GW, x402_enabled=True, x402_auto_pay=True,
+                               x402_max_auto_pay_usd=0)
+        assert client._should_auto_pay(Decimal("0.000001")) is False
 
 
 class TestPaymentCallbackOption:
