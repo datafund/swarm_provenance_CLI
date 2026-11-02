@@ -409,7 +409,10 @@ class ChainClient:
                 transaction is sent. Nothing was sent.
             TransactionOutcomeUnknownError: If the connection to the RPC
                 fails after send_raw_transaction was called. The
-                transaction may have been sent; it is never sent again.
+                transaction may have been sent. The client does not sign
+                or send a new transaction (web3's HTTP provider may repeat
+                the eth_sendRawTransaction request with the same signed
+                bytes, which has the same hash and nonce).
             ChainTransactionError: If transaction fails.
         """
         web3 = self._provider.web3
@@ -523,6 +526,10 @@ class ChainClient:
             tx_hash_str = None
             if "tx_hash" in dir():
                 tx_hash_str = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
+            elif send_called:
+                # The send raised before it returned the hash: the hash of
+                # the signed bytes is the same value
+                tx_hash_str = _signed_tx_hash(raw_tx)
             # Transport only: connection, timeout, or an answer that is not
             # JSON-RPC. A JSON-RPC error answer means the node answered. A
             # receipt-wait timeout keeps its own handling.
@@ -532,10 +539,8 @@ class ChainClient:
                         f"The RPC endpoint failed before the transaction was sent: {reason}",
                         rpc_url=self._provider.rpc_url,
                     ) from e
-                # The transaction may have been broadcast: never send it
-                # again, and never report it as failed
-                if tx_hash_str is None:
-                    tx_hash_str = _signed_tx_hash(raw_tx)
+                # The transaction may have been broadcast: do not sign or
+                # send a new one, and do not report it as failed
                 raise TransactionOutcomeUnknownError(
                     f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} was "
                     f"sent, but the connection to the RPC failed, so its outcome is "
