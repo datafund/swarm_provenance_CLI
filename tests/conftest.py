@@ -26,7 +26,9 @@ def failing_rpc_server():
     "html" answers HTTP 200 with an HTML page (not JSON) that quotes the path;
     "drop" closes the connection without an answer. Methods in
     ``server.answers`` ({method: result}) get that result instead.
-    ``server.requests`` records (path, method) for each request.
+    ``server.path_answers`` ({path: {method: result}}) adds answers for one
+    request path only. ``server.requests`` records (path, method) for each
+    request.
     """
     import http.server
     import json
@@ -42,9 +44,10 @@ def failing_rpc_server():
             method = request.get("method") if isinstance(request, dict) else None
             self.server.methods.append(method)
             self.server.requests.append((self.path, method))
-            if method in self.server.answers:
+            answers = {**self.server.answers, **self.server.path_answers.get(self.path, {})}
+            if method in answers:
                 body = json.dumps({
-                    "jsonrpc": "2.0", "id": request.get("id"), "result": self.server.answers[method],
+                    "jsonrpc": "2.0", "id": request.get("id"), "result": answers[method],
                 }).encode()
                 status, content_type = 200, "application/json"
             elif self.server.mode == "drop":
@@ -77,6 +80,8 @@ def failing_rpc_server():
     server.mode = "http401"
     # JSON-RPC methods that get a result instead of the failure: {method: result}
     server.answers = {}
+    # The same per request path, on top of answers: {path: {method: result}}
+    server.path_answers = {}
     # The JSON-RPC method of every request received
     server.methods = []
     # (path, JSON-RPC method) of every request received
