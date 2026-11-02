@@ -453,6 +453,8 @@ swarm-prov-upload upload-collection /path/to/directory --std "PROV-STD-V1" --dur
 swarm-prov-upload upload-collection /path/to/directory --usePool
 
 # JSON output with provenance metadata
+# (if the gateway uploaded and charged but could not return the result, swarm_reference is null,
+#  status is "delivered_not_stored", and transaction identifies the payment)
 swarm-prov-upload upload-collection /path/to/directory --json
 
 # With existing stamp, deferred upload, and redundancy level 3

@@ -1387,6 +1387,7 @@ def upload_collection(
 
         # Upload manifest
         typer.echo("Uploading collection to Swarm...")
+        not_returned = None  # with --json: the upload worked but its result cannot be returned
         try:
             result = gw_client.upload_manifest(
                 tar_path=str(tar_path),
@@ -1399,7 +1400,10 @@ def upload_collection(
         except exceptions.PaymentRequiredError as e:
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
-            _report_payment_outcome(e, "the collection upload", final_step=True)
+            if output_json and isinstance(e, exceptions.PaymentDeliveredNotStoredError):
+                not_returned = e
+            else:
+                _report_payment_outcome(e, "the collection upload", final_step=True)
         except Exception as e:
             typer.secho(f"ERROR: Failed uploading collection: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -1414,15 +1418,24 @@ def upload_collection(
     # Output
     if output_json:
         from .models import CollectionFileInfo, CollectionProvenanceMetadata
-        metadata = CollectionProvenanceMetadata(
+        metadata_fields = dict(
             collection_hash=collection_hash,
             files=[CollectionFileInfo(**fi) for fi in file_infos],
             total_size=total_size,
             file_count=len(file_infos),
             stamp_id=stamp_id,
-            swarm_reference=result.reference,
             provenance_standard=provenance_standard,
         )
+        if not_returned is not None:
+            # Still a JSON document for scripts (#153): the same fields with no reference
+            # (model_construct, because the model requires one), plus what identifies the payment
+            document = CollectionProvenanceMetadata.model_construct(
+                **metadata_fields, swarm_reference=None).model_dump(mode="json")
+            document.update(status="delivered_not_stored", transaction=not_returned.transaction,
+                            payer=not_returned.payer, idempotency_key=not_returned.idempotency_key)
+            typer.echo(json.dumps(document, indent=2))
+            _report_delivered_not_stored(not_returned, "the collection upload", final_step=True)
+        metadata = CollectionProvenanceMetadata(**metadata_fields, swarm_reference=result.reference)
         typer.echo(metadata.model_dump_json(indent=2))
     else:
         typer.secho(f"\nSUCCESS! Collection uploaded.", fg=typer.colors.GREEN, bold=True)
