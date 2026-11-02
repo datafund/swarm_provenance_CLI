@@ -297,6 +297,10 @@ class ChainClient:
         or an RPC failure can happen here, before _send_transaction. Nothing
         has been sent at this point, so no error carries a tx_hash.
 
+        With an explicit gas limit, it is passed to the build method as
+        ``gas``, so web3 does not run eth_estimateGas. A transaction that
+        would revert is then not caught here: it is sent and costs gas.
+
         Raises:
             InsufficientFundsError: If the RPC reports insufficient funds.
             ChainTransactionError: If the contract reverts, the RPC answers
@@ -304,6 +308,8 @@ class ChainClient:
             ChainConnectionError: If the RPC cannot be reached or its answer
                 is not JSON-RPC.
         """
+        if self._gas_limit is not None:
+            kwargs["gas"] = self._gas_limit
         try:
             return build(*args, **kwargs)
         except ChainError:

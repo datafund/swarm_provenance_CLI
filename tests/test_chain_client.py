@@ -3180,7 +3180,7 @@ def test_build_tx_revert_reason_with_web3_class():
         )
 
     with pytest.raises(ChainTransactionError) as exc_info:
-        ChainClient._build_tx(MagicMock(), build)
+        ChainClient._build_tx(MagicMock(_gas_limit=None), build)
 
     assert "Not owner" in str(exc_info.value)
     assert "0x08c379a0" not in str(exc_info.value)
@@ -3200,7 +3200,7 @@ def test_build_tx_rpc_errors_with_web3_classes():
         "nonce too low", rpc_response={"error": {"code": -32000, "message": "nonce too low"}}
     )
     with pytest.raises(ChainTransactionError) as exc_info:
-        ChainClient._build_tx(MagicMock(), failing(rejection))
+        ChainClient._build_tx(MagicMock(_gas_limit=None), failing(rejection))
     assert type(exc_info.value) is ChainTransactionError
     assert "The RPC rejected the transaction: nonce too low" in str(exc_info.value)
 
@@ -3211,7 +3211,7 @@ def test_build_tx_rpc_errors_with_web3_classes():
         json.JSONDecodeError("Expecting value", "<html>", 0),
     ):
         with pytest.raises(ChainConnectionError):
-            ChainClient._build_tx(MagicMock(), failing(transport))
+            ChainClient._build_tx(MagicMock(_gas_limit=None), failing(transport))
 
 
 class TestSendTransactionRevertReason:
@@ -3344,12 +3344,12 @@ def test_build_tx_rejection_text_and_timeout_with_web3_classes():
     error = {"code": -32000, "message": "nonce too low"}
     rejection = web3_exceptions.Web3RPCError(str(error), rpc_response={"error": error})
     with pytest.raises(ChainTransactionError) as exc_info:
-        ChainClient._build_tx(MagicMock(), failing(rejection))
+        ChainClient._build_tx(MagicMock(_gas_limit=None), failing(rejection))
     assert str(exc_info.value) == "The RPC rejected the transaction: nonce too low"
 
     timeout = web3_exceptions.RequestTimedOut("request timed out")
     with pytest.raises(ChainConnectionError):
-        ChainClient._build_tx(MagicMock(), failing(timeout))
+        ChainClient._build_tx(MagicMock(_gas_limit=None), failing(timeout))
 
 
 class _WithMessage(Exception):
@@ -3386,7 +3386,7 @@ def test_build_tx_timeout_reason_with_web3_classes():
         raise timeout
 
     with pytest.raises(ChainConnectionError) as exc_info:
-        ChainClient._build_tx(MagicMock(), build)
+        ChainClient._build_tx(MagicMock(_gas_limit=None), build)
     assert str(exc_info.value).endswith(": request timed out")
     assert "{" not in str(exc_info.value)
 
