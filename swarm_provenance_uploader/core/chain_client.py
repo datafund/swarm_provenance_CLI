@@ -1401,9 +1401,18 @@ class ChainClient:
         def _hex(value) -> str:
             return value.hex() if isinstance(value, bytes) else str(value)
 
+        # Child and parent hashes come back as lower-case hex without 0x.
+        # Key the start hash the same way, or it is visited twice and the
+        # event index misses its edges.
+        start_hash = swarm_hash
+        if isinstance(start_hash, str):
+            start_hash = start_hash.lower()
+            if start_hash.startswith("0x"):
+                start_hash = start_hash[2:]
+
         chain = []
         visited = set()
-        to_visit = [(swarm_hash, 0)]
+        to_visit = [(start_hash, 0)]
 
         while to_visit:
             current_hash, current_depth = to_visit.pop(0)
