@@ -351,13 +351,16 @@ def _command_idempotency_key() -> str:
     return _x402_session["idempotency_key"]
 
 
-def _validated_stamp_id(stamp_id: Optional[str]) -> Optional[str]:
-    """--stamp-id as 64 hex characters (a 0x prefix is dropped), or exit 1."""
+def _validated_stamp_id(stamp_id: Optional[str], name: str = "--stamp-id") -> Optional[str]:
+    """A stamp ID as 64 hex characters (a 0x prefix is dropped), or exit 1.
+
+    name is the option or argument the error message names.
+    """
     if stamp_id is None:
         return None
     stamp_id = file_utils.strip_hex_prefix(stamp_id)
     if not file_utils.is_stamp_id(stamp_id):
-        typer.secho(f"ERROR: --stamp-id is not a stamp ID (64 hex characters): {stamp_id!r}",
+        typer.secho(f"ERROR: {name} is not a stamp ID (64 hex characters): {stamp_id!r}",
                     fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     return stamp_id
@@ -1497,6 +1500,7 @@ def stamps_info(
     """
     Get detailed information about a specific stamp.
     """
+    stamp_id = _validated_stamp_id(stamp_id, "STAMP_ID")
     use_gateway = _backend_config["backend"] == "gateway"
     gateway_url = _backend_config["gateway_url"]
     bee_url = _backend_config["bee_url"]
@@ -1558,6 +1562,7 @@ def stamps_extend(
     """
     Extend an existing stamp by adding funds. (Gateway only)
     """
+    stamp_id = _validated_stamp_id(stamp_id, "STAMP_ID")
     if _backend_config["backend"] != "gateway":
         typer.secho("ERROR: 'stamps extend' requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -1652,6 +1657,7 @@ def stamps_check(
 
     Returns detailed health check including errors and warnings.
     """
+    stamp_id = _validated_stamp_id(stamp_id, "STAMP_ID")
     if _backend_config["backend"] != "gateway":
         typer.secho("ERROR: 'stamps check' requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)

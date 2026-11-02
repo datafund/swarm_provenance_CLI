@@ -37,6 +37,9 @@ def purchase_postage_stamp(gateway_url: str, amount: int, depth: int, verbose: b
 
 
 def get_stamp_info(gateway_url: str, stamp_id: str, verbose: bool = False) -> Optional[dict]: # Added verbose
+    from .file_utils import is_stamp_id
+    if not is_stamp_id(stamp_id):
+        raise ValueError(f"Not a stamp ID (64 hex characters): {stamp_id!r}")
     api_path = f"/stamps/{stamp_id.lower()}"
     url = urljoin(gateway_url, api_path)
 
