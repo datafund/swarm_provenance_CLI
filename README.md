@@ -196,7 +196,7 @@ swarm-prov-upload x402 info
 | `X402_ENABLED` | Enable x402 payments | `false` |
 | `X402_PRIVATE_KEY` | Wallet private key (keep secret!) | - |
 | `X402_PRIVATE_KEY_ENV` | Name of the variable that holds the key. When set to another name, only that variable is read. A value that is not a valid variable name, or that looks like a key, is rejected and not printed | `X402_PRIVATE_KEY` |
-| `X402_NETWORK` | `base-sepolia` (testnet) or `base` (mainnet) | `base-sepolia` |
+| `X402_NETWORK` | `base-sepolia` (testnet) or `base` (mainnet). The CAIP-2 ids `eip155:84532` and `eip155:8453` also work | `base-sepolia` |
 | `X402_AUTO_PAY` | Auto-pay without prompts | `false` |
 | `X402_MAX_AUTO_PAY_USD` | Maximum auto-pay amount per request | `1.00` |
 | `X402_EXPECTED_PAY_TO` | Only pay this recipient address (optional) | not set |
@@ -212,7 +212,7 @@ The signing key and `x402 status` use the same lookup: the variable named by `X4
 | `--x402` / `--no-x402` | Enable/disable x402 for this command |
 | `--auto-pay` / `--no-auto-pay` | Enable/disable auto-pay |
 | `--max-pay FLOAT` | Maximum auto-pay amount in USD |
-| `--x402-network TEXT` | Network: `base-sepolia` or `base` |
+| `--x402-network TEXT` | Network: `base-sepolia` or `base` (or the CAIP-2 ids `eip155:84532` and `eip155:8453`) |
 | `--idempotency-key TEXT` | Idempotency-Key for this command's paid requests; pass the key printed by a failed run to repeat it without paying twice (on a gateway that supports it) |
 
 ### Testnet setup
@@ -280,8 +280,10 @@ swarm-prov-upload chain get <swarm_hash> --json
 swarm-prov-upload chain get <swarm_hash> --follow           # walk transformation chain
 swarm-prov-upload chain get <swarm_hash> --follow --depth 3 # limit traversal depth
 
-# Verify a hash is registered on-chain (exit code 0=yes, 1=no)
+# Verify a hash is registered on-chain (exit code 0=yes, 1=no); prints its status and owner
 swarm-prov-upload chain verify <swarm_hash>
+swarm-prov-upload chain verify <swarm_hash> --require-active   # exit 1 if RESTRICTED or DELETED
+swarm-prov-upload chain verify <swarm_hash> --owner <address>  # exit 1 if another address owns it
 
 # Query or set data status
 swarm-prov-upload chain status <swarm_hash>                 # show current status
@@ -324,9 +326,9 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
-| `CHAIN_NAME` | `base-sepolia` (testnet) or `base` (mainnet) | `base-sepolia` |
+| `CHAIN_NAME` | `base-sepolia` (testnet), `base` (mainnet), or `localhost` (local development node; takes the chain ID the node reports) | `base-sepolia` |
 | `PROVENANCE_WALLET_KEY` | Wallet private key (keep secret!) | - |
-| `CHAIN_RPC_URL` | Custom RPC URL (optional) | Uses preset |
+| `CHAIN_RPC_URL` | Custom RPC URL (optional). With `base` or `base-sepolia`, it must report the preset chain ID | Uses preset |
 | `CHAIN_CONTRACT` | Custom contract address (optional) | Uses preset |
 | `CHAIN_EXPLORER_URL` | Custom block explorer URL (optional) | Uses preset |
 | `CHAIN_GAS_LIMIT` | Explicit gas limit (optional, skips RPC estimation, so a transaction that would revert is still sent and costs gas) | Auto-estimated |
@@ -451,10 +453,12 @@ swarm-prov-upload upload-collection /path/to/directory --std "PROV-STD-V1" --dur
 swarm-prov-upload upload-collection /path/to/directory --usePool
 
 # JSON output with provenance metadata
+# (if the gateway uploaded and charged but could not return the result, swarm_reference is null,
+#  status is "delivered_not_stored", and transaction identifies the payment)
 swarm-prov-upload upload-collection /path/to/directory --json
 
-# With existing stamp, deferred upload, and redundancy
-swarm-prov-upload upload-collection /path/to/directory --stamp-id <id> --deferred --redundancy
+# With existing stamp, deferred upload, and redundancy level 3
+swarm-prov-upload upload-collection /path/to/directory --stamp-id <id> --deferred --redundancy 3
 ```
 
 **Collection Options:**
@@ -466,7 +470,9 @@ swarm-prov-upload upload-collection /path/to/directory --stamp-id <id> --deferre
 | `--stamp-id`, `-s` | Use existing stamp (skip purchase) |
 | `--usePool` | Acquire stamp from pool (faster) |
 | `--deferred` | Deferred upload — the gateway returns immediately and processes the upload in the background. Useful for large collections. |
-| `--redundancy` | Stores data on multiple nodes for higher availability. Increases upload cost. |
+| `--redundancy` | Erasure coding level from 0 to 4: `0` none, `1` medium, `2` strong, `3` insane, `4` paranoid. A higher level keeps the data retrievable when more chunks are lost, and uses more of the stamp. Without this option, the gateway uses level 2. |
+| `--stamp-retries` | Number of times to check that the stamp is usable before the upload (default: 12) |
+| `--stamp-interval` | Seconds between stamp usability checks (default: 20) |
 | `--json` | Output result as JSON (see example below) |
 
 **Example Output (text):**
