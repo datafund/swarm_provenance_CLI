@@ -3290,6 +3290,89 @@ class TestChainGetFollow:
         assert "Not found" in result.stdout or "not registered" in result.stdout.lower()
 
 
+class TestChainGetFollowFailClosed:
+    """chain get --follow never prints a partial lineage (#170)."""
+
+    @staticmethod
+    def _record(data_hash, parents=None):
+        from swarm_provenance_uploader.models import ChainProvenanceRecord, DataStatusEnum
+
+        return ChainProvenanceRecord(
+            data_hash=data_hash,
+            owner=DUMMY_ADDRESS,
+            timestamp=1700000000,
+            data_type="swarm-provenance",
+            status=DataStatusEnum.ACTIVE,
+            parents=parents,
+        )
+
+    @pytest.mark.parametrize("depth", ["-1", "51"])
+    def test_depth_out_of_range_rejected(self, mocker, depth):
+        mock_client = mocker.MagicMock()
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "get", DUMMY_SWARM_REF, "--follow", "--depth", depth])
+
+        assert result.exit_code == 2, f"CLI output: {result.output}"
+        mock_client.get_provenance_chain.assert_not_called()
+
+    @pytest.mark.parametrize("depth", [1, 50])
+    def test_depth_bounds_accepted(self, mocker, depth):
+        mock_client = mocker.MagicMock()
+        mock_client.get_provenance_chain.return_value = [self._record(DUMMY_SWARM_REF, parents=[])]
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(
+            app, ["chain", "get", DUMMY_SWARM_REF, "--follow", "--depth", str(depth)]
+        )
+
+        assert result.exit_code == 0, f"CLI Failed: {result.output}"
+        mock_client.get_provenance_chain.assert_called_once_with(
+            DUMMY_SWARM_REF, max_depth=depth, verbose=False
+        )
+
+    def test_help_shows_depth_range(self):
+        result = runner.invoke(app, ["chain", "get", "--help"])
+        output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        assert result.exit_code == 0
+        assert "1-50" in output
+        assert "default 10" in output
+
+    @pytest.mark.parametrize("extra", [[], ["--json"]])
+    def test_traversal_error_exits_1_without_chain(self, mocker, extra):
+        """A read error during the walk exits 1 and prints no chain."""
+        mock_client = mocker.MagicMock()
+        mock_client.get_provenance_chain.side_effect = exceptions.ChainError(
+            "Provenance chain read failed at abc (depth 1): could not decode"
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "get", DUMMY_SWARM_REF, "--follow", *extra])
+
+        assert result.exit_code == 1
+        assert "Provenance chain read failed" in result.output
+        assert "Provenance Chain (" not in result.output
+        assert '"chain"' not in result.output
+
+    def test_json_includes_parents(self, mocker):
+        """Each node in --follow --json output carries parents (null if not expanded)."""
+        hash_b = "c" * 64
+        mock_client = mocker.MagicMock()
+        mock_client.get_provenance_chain.return_value = [
+            self._record(DUMMY_SWARM_REF, parents=[]),
+            self._record(hash_b, parents=None),
+        ]
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "get", DUMMY_SWARM_REF, "--follow", "--json"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.output}"
+        output = json.loads(result.stdout)
+        assert output["chain"][0]["parents"] == []
+        assert "parents" in output["chain"][1]
+        assert output["chain"][1]["parents"] is None
+
+
 # =============================================================================
 # CHAIN TRANSFORM --RESTRICT-ORIGINAL TESTS (Issue #64)
 # =============================================================================
@@ -3978,28 +4061,14 @@ class TestChainGetAdditional:
         assert "no effect" in result.stdout.lower() or "WARNING" in result.stdout
 
     def test_follow_depth_zero(self, mocker):
-        """Tests --follow --depth 0 returns only root."""
-        from swarm_provenance_uploader.models import ChainProvenanceRecord, DataStatusEnum
-
+        """Tests --follow --depth 0 is rejected: --depth is 1 to 50 (#170)."""
         mock_client = mocker.MagicMock()
-        mock_client.get_provenance_chain.return_value = [
-            ChainProvenanceRecord(
-                data_hash=DUMMY_SWARM_REF,
-                owner=DUMMY_ADDRESS,
-                timestamp=1700000000,
-                data_type="swarm-provenance",
-                status=DataStatusEnum.ACTIVE,
-            ),
-        ]
-
         mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
 
         result = runner.invoke(app, ["chain", "get", DUMMY_SWARM_REF, "--follow", "--depth", "0"])
 
-        assert result.exit_code == 0, f"CLI Failed: {result.stdout}"
-        mock_client.get_provenance_chain.assert_called_once_with(
-            DUMMY_SWARM_REF, max_depth=0, verbose=False
-        )
+        assert result.exit_code == 2, f"CLI output: {result.output}"
+        mock_client.get_provenance_chain.assert_not_called()
 
     def test_follow_connection_error(self, mocker):
         """Tests --follow handles connection errors."""
