@@ -208,6 +208,29 @@ class TestMalformedRpcUrls:
         assert redact_urls(text) == text
 
 
+class TestUrlAfterWordCharacter:
+    """A URL is redacted when a word character comes directly before it (#190).
+
+    No secrets are registered here, so only the URL pattern can remove the key.
+    """
+
+    @pytest.mark.parametrize(
+        "prefix",
+        ["1", "rpc_", "%22"],
+        ids=["digit", "underscore", "percent-encoded-quote"],
+    )
+    def test_prefix_before_url(self, prefix):
+        out = redact_urls(f"failed: {prefix}{PATH_KEY_URL}")
+        assert KEY not in out
+        assert out == f"failed: {prefix}https://base-sepolia.g.alchemy.com/{PLACEHOLDER}"
+
+    def test_long_run_of_scheme_characters_before_url(self):
+        """More than 31 scheme characters before "://" still let the URL match."""
+        out = redact_urls("failed: " + "x" * 40 + PATH_KEY_URL)
+        assert KEY not in out
+        assert out.endswith(f"https://base-sepolia.g.alchemy.com/{PLACEHOLDER}")
+
+
 class TestRedactUrlsSpeed:
     def test_long_run_of_trailing_punctuation(self):
         """Trailing punctuation is stripped in linear time: a quadratic loop took 24 s here."""
@@ -227,8 +250,9 @@ class TestRedactUrlsSpeed:
         [
             "a." * 100_000,
             "Could not decode '<html><body>" + "a-" * 50_000 + "</body></html>'",
+            "a" * 1_000_000,
         ],
-        ids=["dotted-run", "hyphenated-html-body"],
+        ids=["dotted-run", "hyphenated-html-body", "letter-run"],
     )
     def test_long_run_of_scheme_characters(self, text):
         """A long run of letters joined by dots or hyphens is scanned in linear time.
