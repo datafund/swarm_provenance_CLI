@@ -1879,7 +1879,13 @@ def x402_status(
         typer.secho("  WARNING: X402_MAX_AUTO_PAY_USD is not a finite number of 0 or more; "
                     "commands that pay will exit with an error.", fg=typer.colors.YELLOW)
     else:
-        max_pay_str = f"{max_pay:.2f}" if round(max_pay, 2) == max_pay else f"{max_pay:.6f}"
+        from decimal import Decimal
+        from .core.gateway_client import format_auto_pay_limit
+
+        # Two decimals when they are exact, else six (no round(): it fails above 28 digits)
+        max_pay_str = format_auto_pay_limit(max_pay, 2)
+        if Decimal(max_pay_str) != max_pay:
+            max_pay_str = format_auto_pay_limit(max_pay)
         typer.echo(f"  Max auto-pay: ${max_pay_str}")
     expected_pay_to = _x402_config.get("expected_pay_to")
     typer.echo(f"  Pay-to pin:   {expected_pay_to or 'none (any recipient the gateway names)'}")

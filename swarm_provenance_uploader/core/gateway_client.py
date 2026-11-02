@@ -90,7 +90,20 @@ def parse_auto_pay_limit(limit) -> Decimal:
     if not value.is_finite() or value < 0:
         raise ValueError(
             f"x402_max_auto_pay_usd must be a finite number of 0 or more, got {limit!r}")
-    return abs(value)  # -0.0 is shown as 0
+    return value.copy_abs()  # exact (abs() rounds to 28 digits); -0.0 becomes 0
+
+
+def format_auto_pay_limit(limit: Decimal, places: int = 6) -> str:
+    """
+    The auto-pay limit as text, without the Decimal context's rounding.
+
+    `places` decimals below 1e15; above that, every digit in scientific
+    notation (1E+30), so a huge limit neither fails nor prints hundreds
+    of digits.
+    """
+    if limit and limit.adjusted() >= 15:
+        return f"{limit:E}"
+    return f"{limit:.{places}f}"
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -401,7 +414,7 @@ class GatewayClient:
                 # hard cap, so refuse before anything is signed.
                 raise PaymentRequiredError(
                     f"Payment of {amount_usd} exceeds the auto-pay limit of "
-                    f"${self._x402_max_auto_pay_usd:.6f}; nothing was signed. "
+                    f"${format_auto_pay_limit(self._x402_max_auto_pay_usd)}; nothing was signed. "
                     "Raise the limit or confirm the payment interactively.",
                     payment_options=[option.model_dump()],
                 )
