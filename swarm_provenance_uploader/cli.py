@@ -555,8 +555,8 @@ def upload(
     size: Annotated[Optional[str], typer.Option("--size", help="Stamp size preset: 'small', 'medium', 'large' (gateway only).")] = None,
     stamp_depth: Annotated[Optional[int], typer.Option("--depth", help="Postage stamp depth (16-32).")] = None,
     stamp_amount: Annotated[Optional[int], typer.Option("--amount", help="Legacy: PLUR amount (local backend or deprecated).")] = None,
-    stamp_check_retries: Annotated[int, typer.Option("--stamp-retries", help="Number of times to check for stamp usability.")] = 12,
-    stamp_check_interval: Annotated[int, typer.Option("--stamp-interval", help="Seconds to wait between stamp usability checks.")] = 20,
+    stamp_check_retries: Annotated[int, typer.Option("--stamp-retries", min=1, help="Number of times to check for stamp usability.")] = 12,
+    stamp_check_interval: Annotated[int, typer.Option("--stamp-interval", min=0, help="Seconds to wait between stamp usability checks.")] = 20,
     use_pool: Annotated[bool, typer.Option("--usePool", help="Acquire stamp from pool instead of purchasing (gateway only, faster ~5s vs >1min).")] = False,
     sign: Annotated[Optional[str], typer.Option("--sign", help="Sign document with notary service. Value: 'notary' (gateway only).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False
@@ -1253,8 +1253,8 @@ def upload_collection(
     use_pool: Annotated[bool, typer.Option("--usePool", help="Acquire stamp from pool instead of purchasing (faster ~5s vs >1min).")] = False,
     deferred: Annotated[bool, typer.Option("--deferred", help="Use deferred upload mode.")] = False,
     redundancy: Annotated[Optional[int], typer.Option("--redundancy", min=0, max=4, help="Erasure coding level 0-4 (0 none, 1 medium, 2 strong, 3 insane, 4 paranoid). Default: the gateway's default, level 2.")] = None,
-    stamp_check_retries: Annotated[int, typer.Option("--stamp-retries", help="Number of times to check for stamp usability.")] = 12,
-    stamp_check_interval: Annotated[int, typer.Option("--stamp-interval", help="Seconds to wait between stamp usability checks.")] = 20,
+    stamp_check_retries: Annotated[int, typer.Option("--stamp-retries", min=1, help="Number of times to check for stamp usability.")] = 12,
+    stamp_check_interval: Annotated[int, typer.Option("--stamp-interval", min=0, help="Seconds to wait between stamp usability checks.")] = 20,
     output_json: Annotated[bool, typer.Option("--json", help="Output result as JSON.")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False,
 ):
@@ -1325,93 +1325,88 @@ def upload_collection(
             typer.echo(f"    File: {fi['path']} ({fi['size']} bytes) hash={fi['content_hash'][:16]}...")
 
     # Create TAR in temp directory
+    tmp_dir = None
     try:
-        tmp_dir = tempfile.mkdtemp()
-        tar_path = Path(tmp_dir) / "collection.tar"
-        file_utils.create_tar_from_directory(dir_path, tar_path)
-        tar_size = tar_path.stat().st_size
-        if verbose:
-            typer.echo(f"    TAR archive created: {tar_size} bytes")
-    except (ValueError, OSError) as e:
-        typer.secho(f"ERROR: Failed creating TAR archive: {e}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+        try:
+            tmp_dir = tempfile.mkdtemp()
+            tar_path = Path(tmp_dir) / "collection.tar"
+            file_utils.create_tar_from_directory(dir_path, tar_path)
+            tar_size = tar_path.stat().st_size
+            if verbose:
+                typer.echo(f"    TAR archive created: {tar_size} bytes")
+        except (ValueError, OSError) as e:
+            typer.secho(f"ERROR: Failed creating TAR archive: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
 
-    # Acquire stamp
-    stamp_source = "existing" if stamp_id else ("pool" if use_pool else "bought")
-    try:
-        gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
+        # Acquire stamp
+        stamp_source = "existing" if stamp_id else ("pool" if use_pool else "bought")
+        try:
+            gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
 
-        if stamp_id:
-            ignored = [flag for flag, value in (("--usePool", use_pool), ("--size", size),
-                                                ("--duration", duration)) if value]
-            if ignored:
-                typer.secho(f"Note: {', '.join(ignored)} ignored with --stamp-id (no stamp is bought).",
-                            fg=typer.colors.YELLOW, err=True)
-            typer.echo(f"Using existing stamp: {stamp_id}")
-        elif use_pool:
-            typer.echo("Acquiring stamp from pool...")
-            acquire_result = gw_client.acquire_stamp_from_pool(size=size, verbose=verbose)
-            stamp_id = acquire_result.batch_id
-            _hold_unused_stamp(stamp_id, "acquired from the pool")
-            msg = f"Stamp acquired from pool (ID: {stamp_id})"
-            if acquire_result.fallback_used:
-                msg += " [fallback size]"
-            typer.echo(msg)
-        else:
-            typer.echo("Purchasing postage stamp...")
-            stamp_id = gw_client.purchase_stamp(
-                duration_hours=duration,
-                size=size,
-                verbose=verbose,
-            )
-            _hold_unused_stamp(stamp_id, "bought")
-            typer.echo(f"Postage stamp purchased (ID: {stamp_id})")
+            if stamp_id:
+                ignored = [flag for flag, value in (("--usePool", use_pool), ("--size", size),
+                                                    ("--duration", duration)) if value]
+                if ignored:
+                    typer.secho(f"Note: {', '.join(ignored)} ignored with --stamp-id (no stamp is bought).",
+                                fg=typer.colors.YELLOW, err=True)
+                typer.echo(f"Using existing stamp: {stamp_id}")
+            elif use_pool:
+                typer.echo("Acquiring stamp from pool...")
+                acquire_result = gw_client.acquire_stamp_from_pool(size=size, verbose=verbose)
+                stamp_id = acquire_result.batch_id
+                _hold_unused_stamp(stamp_id, "acquired from the pool")
+                msg = f"Stamp acquired from pool (ID: {stamp_id})"
+                if acquire_result.fallback_used:
+                    msg += " [fallback size]"
+                typer.echo(msg)
+            else:
+                typer.echo("Purchasing postage stamp...")
+                stamp_id = gw_client.purchase_stamp(
+                    duration_hours=duration,
+                    size=size,
+                    verbose=verbose,
+                )
+                _hold_unused_stamp(stamp_id, "bought")
+                typer.echo(f"Postage stamp purchased (ID: {stamp_id})")
 
-    except exceptions.PoolNotEnabledError:
-        typer.secho("ERROR: Stamp pool is not enabled on this gateway.", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-    except exceptions.PaymentRequiredError as e:
-        _report_payment_required(e)
-    except exceptions.PaymentOutcomeUnknownError as e:
-        _report_payment_outcome(e, "getting the stamp")
-    except Exception as e:
-        typer.secho(f"ERROR: Failed acquiring stamp: {e}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+        except exceptions.PoolNotEnabledError:
+            typer.secho("ERROR: Stamp pool is not enabled on this gateway.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        except exceptions.PaymentRequiredError as e:
+            _report_payment_required(e)
+        except exceptions.PaymentOutcomeUnknownError as e:
+            _report_payment_outcome(e, "getting the stamp")
+        except Exception as e:
+            typer.secho(f"ERROR: Failed acquiring stamp: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
 
-    # Wait until the stamp is usable: the gateway cannot upload to it before that
-    try:
+        # Wait until the stamp is usable: the gateway cannot upload to it before that
         _wait_for_stamp_usable(stamp_id, lambda: _gateway_stamp_info(gw_client, stamp_id, verbose),
                                stamp_source, stamp_check_retries, stamp_check_interval, verbose)
-    except typer.Exit:
-        import shutil
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise
 
-    # Upload manifest
-    typer.echo("Uploading collection to Swarm...")
-    try:
-        result = gw_client.upload_manifest(
-            tar_path=str(tar_path),
-            stamp_id=stamp_id,
-            deferred=deferred,
-            include_timing=verbose,
-            redundancy=redundancy,
-            verbose=verbose,
-        )
-    except exceptions.PaymentRequiredError as e:
-        _report_payment_required(e)
-    except exceptions.PaymentOutcomeUnknownError as e:
-        _report_payment_outcome(e, "the collection upload", final_step=True)
-    except Exception as e:
-        typer.secho(f"ERROR: Failed uploading collection: {e}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-    finally:
-        # Cleanup temp TAR
+        # Upload manifest
+        typer.echo("Uploading collection to Swarm...")
         try:
+            result = gw_client.upload_manifest(
+                tar_path=str(tar_path),
+                stamp_id=stamp_id,
+                deferred=deferred,
+                include_timing=verbose,
+                redundancy=redundancy,
+                verbose=verbose,
+            )
+        except exceptions.PaymentRequiredError as e:
+            _report_payment_required(e)
+        except exceptions.PaymentOutcomeUnknownError as e:
+            _report_payment_outcome(e, "the collection upload", final_step=True)
+        except Exception as e:
+            typer.secho(f"ERROR: Failed uploading collection: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+    finally:
+        # Remove the temp folder with the TAR on every exit
+        if tmp_dir:
             import shutil
             shutil.rmtree(tmp_dir, ignore_errors=True)
-        except Exception:
-            pass
 
     _unused_stamp.update(id=None, how=None)  # used: nothing to reuse
 
