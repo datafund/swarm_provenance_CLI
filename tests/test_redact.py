@@ -208,6 +208,29 @@ class TestMalformedRpcUrls:
         assert redact_urls(text) == text
 
 
+class TestUrlAfterWordCharacter:
+    """A URL is redacted when a word character comes directly before it (#190).
+
+    No secrets are registered here, so only the URL pattern can remove the key.
+    """
+
+    @pytest.mark.parametrize(
+        "prefix",
+        ["1", "rpc_", "%22"],
+        ids=["digit", "underscore", "percent-encoded-quote"],
+    )
+    def test_prefix_before_url(self, prefix):
+        out = redact_urls(f"failed: {prefix}{PATH_KEY_URL}")
+        assert KEY not in out
+        assert out == f"failed: {prefix}https://base-sepolia.g.alchemy.com/{PLACEHOLDER}"
+
+    def test_long_run_of_scheme_characters_before_url(self):
+        """More than 31 scheme characters before "://" still let the URL match."""
+        out = redact_urls("failed: " + "x" * 40 + PATH_KEY_URL)
+        assert KEY not in out
+        assert out.endswith(f"https://base-sepolia.g.alchemy.com/{PLACEHOLDER}")
+
+
 class TestRedactUrlsSpeed:
     def test_long_run_of_trailing_punctuation(self):
         """Trailing punctuation is stripped in linear time: a quadratic loop took 24 s here."""
@@ -227,8 +250,9 @@ class TestRedactUrlsSpeed:
         [
             "a." * 100_000,
             "Could not decode '<html><body>" + "a-" * 50_000 + "</body></html>'",
+            "a" * 1_000_000,
         ],
-        ids=["dotted-run", "hyphenated-html-body"],
+        ids=["dotted-run", "hyphenated-html-body", "letter-run"],
     )
     def test_long_run_of_scheme_characters(self, text):
         """A long run of letters joined by dots or hyphens is scanned in linear time.
@@ -393,3 +417,173 @@ class TestCodeCheckRejection:
         with pytest.raises(ChainConnectionError) as exc_info:
             client._check_contract_code()
         assert KEY not in str(exc_info.value)
+
+
+def _linked(error):
+    """Every exception reachable from error through __cause__ and __context__, error first."""
+    seen, found, todo = set(), [], [error]
+    while todo:
+        exc = todo.pop(0)
+        if exc is None or id(exc) in seen:
+            continue
+        seen.add(id(exc))
+        found.append(exc)
+        todo.extend([exc.__cause__, exc.__context__])
+    return found
+
+
+def _raise(exc):
+    raise exc
+
+
+class TestRedactExceptionChain:
+    """redact_exception_chain replaces the raw exceptions linked to a ChainError (#187)."""
+
+    def test_cause_is_replaced_with_a_redacted_copy(self):
+        import traceback
+
+        from swarm_provenance_uploader.chain.exceptions import (
+            RedactedException,
+            redact_exception_chain,
+        )
+
+        original = ConnectionError(f"401 Client Error: Unauthorized for url: {PATH_KEY_URL}")
+        try:
+            try:
+                _raise(original)
+            except ConnectionError as e:
+                raise ChainConnectionError("The RPC endpoint failed") from e
+        except ChainConnectionError as e:
+            error = e
+
+        assert redact_exception_chain(error) is error
+        cause = error.__cause__
+        assert isinstance(cause, RedactedException)
+        assert cause.original_type == "builtins.ConnectionError"
+        assert str(cause) == (
+            "builtins.ConnectionError: 401 Client Error: Unauthorized for url: "
+            f"https://base-sepolia.g.alchemy.com/{PLACEHOLDER}"
+        )
+        # The original frames are kept, so the traceback still shows where it failed
+        assert cause.__traceback__ is original.__traceback__
+        text = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+        assert KEY not in text
+        assert "_raise" in text
+        assert error.__suppress_context__ is True
+        # The original object is not changed
+        assert KEY in str(original)
+
+    def test_context_and_nested_links(self):
+        from swarm_provenance_uploader.chain.exceptions import (
+            RedactedException,
+            redact_exception_chain,
+        )
+
+        register_url_secrets([PATH_KEY_URL])
+        inner = OSError(f"refused: /v2/{KEY}")
+        middle = ValueError(f"decode failed for {QUERY_KEY_URL}")
+        middle.__context__ = inner
+        error = ChainConnectionError("failed")
+        error.__context__ = middle
+
+        redact_exception_chain(error)
+
+        linked = _linked(error)
+        assert len(linked) == 3
+        assert all(isinstance(exc, RedactedException) for exc in linked[1:])
+        assert [exc.original_type for exc in linked[1:]] == ["builtins.ValueError", "builtins.OSError"]
+        for exc in linked:
+            assert KEY not in str(exc)
+            assert KEY not in repr(exc.args)
+        # An implicit context stays shown as a context, not as a cause
+        assert error.__suppress_context__ is False
+        assert error.__cause__ is None
+
+    def test_suppressed_context_stays_suppressed(self):
+        from swarm_provenance_uploader.chain.exceptions import (
+            RedactedException,
+            redact_exception_chain,
+        )
+
+        try:
+            try:
+                raise ConnectionError(f"for url: {PATH_KEY_URL}")
+            except ConnectionError:
+                raise ChainConnectionError("failed") from None
+        except ChainConnectionError as e:
+            error = e
+
+        redact_exception_chain(error)
+
+        assert error.__cause__ is None
+        assert error.__suppress_context__ is True
+        assert isinstance(error.__context__, RedactedException)
+        assert KEY not in str(error.__context__)
+
+    def test_chain_error_link_is_kept_and_its_chain_redacted(self):
+        from swarm_provenance_uploader.chain.exceptions import (
+            RedactedException,
+            redact_exception_chain,
+        )
+
+        raw = ConnectionError(f"for url: {PATH_KEY_URL}")
+        inner = ChainConnectionError(f"failed: {PATH_KEY_URL}")
+        inner.__cause__ = raw
+        error = ChainConfigurationError("outer")
+        error.__cause__ = inner
+
+        redact_exception_chain(error)
+
+        assert error.__cause__ is inner
+        assert isinstance(inner.__cause__, RedactedException)
+        assert all(KEY not in str(exc) for exc in _linked(error))
+
+    def test_cycle_and_second_pass(self):
+        from swarm_provenance_uploader.chain.exceptions import (
+            RedactedException,
+            redact_exception_chain,
+        )
+
+        first = ValueError(f"a {PATH_KEY_URL}")
+        second = ValueError(f"b {PATH_KEY_URL}")
+        first.__context__ = second
+        second.__context__ = first
+        error = ChainConnectionError("failed")
+        error.__cause__ = first
+
+        redact_exception_chain(error)
+        copy = error.__cause__
+        redact_exception_chain(error)
+
+        assert error.__cause__ is copy
+        linked = _linked(error)
+        assert len(linked) == 3
+        assert all(isinstance(exc, RedactedException) for exc in linked[1:])
+        assert all(KEY not in str(exc) for exc in linked)
+
+    def test_error_without_chain_is_unchanged(self):
+        from swarm_provenance_uploader.chain.exceptions import redact_exception_chain
+
+        error = ChainConnectionError("failed")
+        assert redact_exception_chain(error) is error
+        assert error.__cause__ is None
+        assert error.__context__ is None
+        assert error.__suppress_context__ is False
+
+    def test_exception_whose_str_fails(self):
+        from swarm_provenance_uploader.chain.exceptions import (
+            RedactedException,
+            redact_exception_chain,
+        )
+
+        class Broken(Exception):
+            def __str__(self):
+                raise RuntimeError("no text")
+
+        error = ChainConnectionError("failed")
+        error.__cause__ = Broken()
+
+        redact_exception_chain(error)
+
+        assert isinstance(error.__cause__, RedactedException)
+        assert error.__cause__.original_type.endswith("Broken")

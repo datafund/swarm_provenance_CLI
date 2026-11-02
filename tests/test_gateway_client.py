@@ -861,7 +861,7 @@ class TestGatewayClientPool:
             "count": 2,
         }
         requests_mock.get(
-            "https://test.gateway.io/api/v1/pool/stamps",
+            "https://test.gateway.io/api/v1/pool/available",
             json=stamps_response,
         )
 
@@ -1205,25 +1205,55 @@ class TestGatewayClientManifest:
         assert mock.called
         assert "deferred=true" in mock.last_request.url.lower()
 
-    def test_upload_manifest_redundancy_param(self, requests_mock, tmp_path):
-        """Tests that redundancy=True is sent as query parameter."""
-        mock = requests_mock.post(
-            "https://test.gateway.io/api/v1/data/manifest",
-            json={"reference": DUMMY_SWARM_REF},
-        )
-
+    @staticmethod
+    def _tar(tmp_path):
         import tarfile
         tar_path = tmp_path / "test.tar"
         file1 = tmp_path / "f.txt"
         file1.write_text("data")
         with tarfile.open(tar_path, "w") as tar:
             tar.add(str(file1), arcname="f.txt")
+        return tar_path
+
+    @pytest.mark.parametrize("level", [0, 3, 4])
+    def test_upload_manifest_redundancy_param(self, requests_mock, tmp_path, level):
+        """Tests that the redundancy level is sent as an integer 0-4 (#138), including 0."""
+        mock = requests_mock.post(
+            "https://test.gateway.io/api/v1/data/manifest",
+            json={"reference": DUMMY_SWARM_REF},
+        )
 
         client = GatewayClient(base_url="https://test.gateway.io")
-        client.upload_manifest(str(tar_path), DUMMY_STAMP, redundancy=True)
+        client.upload_manifest(str(self._tar(tmp_path)), DUMMY_STAMP, redundancy=level)
 
         assert mock.called
-        assert "redundancy=true" in mock.last_request.url.lower()
+        assert mock.last_request.qs["redundancy"] == [str(level)]
+
+    def test_upload_manifest_no_redundancy_param_by_default(self, requests_mock, tmp_path):
+        """Tests that no redundancy is sent when none is given, so the gateway default applies."""
+        mock = requests_mock.post(
+            "https://test.gateway.io/api/v1/data/manifest",
+            json={"reference": DUMMY_SWARM_REF},
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        client.upload_manifest(str(self._tar(tmp_path)), DUMMY_STAMP)
+
+        assert "redundancy" not in mock.last_request.qs
+
+    @pytest.mark.parametrize("level", [True, False, 5, -1, "2"])
+    def test_upload_manifest_rejects_invalid_redundancy(self, requests_mock, tmp_path, level):
+        """Tests that a bool, a string or a level outside 0-4 is refused before any request (#138)."""
+        mock = requests_mock.post(
+            "https://test.gateway.io/api/v1/data/manifest",
+            json={"reference": DUMMY_SWARM_REF},
+        )
+
+        client = GatewayClient(base_url="https://test.gateway.io")
+        with pytest.raises(ValueError, match="redundancy"):
+            client.upload_manifest(str(self._tar(tmp_path)), DUMMY_STAMP, redundancy=level)
+
+        assert not mock.called
 
     def test_upload_manifest_deferred_and_redundancy(self, requests_mock, tmp_path):
         """Tests both deferred and redundancy params sent together."""
@@ -1232,22 +1262,14 @@ class TestGatewayClientManifest:
             json={"reference": DUMMY_SWARM_REF},
         )
 
-        import tarfile
-        tar_path = tmp_path / "test.tar"
-        file1 = tmp_path / "f.txt"
-        file1.write_text("data")
-        with tarfile.open(tar_path, "w") as tar:
-            tar.add(str(file1), arcname="f.txt")
-
         client = GatewayClient(base_url="https://test.gateway.io")
         client.upload_manifest(
-            str(tar_path), DUMMY_STAMP, deferred=True, redundancy=True
+            str(self._tar(tmp_path)), DUMMY_STAMP, deferred=True, redundancy=2
         )
 
         assert mock.called
-        url = mock.last_request.url.lower()
-        assert "deferred=true" in url
-        assert "redundancy=true" in url
+        assert mock.last_request.qs["deferred"] == ["true"]
+        assert mock.last_request.qs["redundancy"] == ["2"]
 
 
 class TestGatewayClientFreeTier:
@@ -1489,6 +1511,64 @@ class TestPurchasePending:
         assert "wallet=" in err.lookup
         assert err.nonce == NONCE
         assert err.amount == "50000"  # the USDC payment, not the BZZ batch amount
+
+    def test_gateway_text_is_sanitized(self, paying_client, requests_mock):
+        """The pending report is printed in full: gateway text must not redraw it (#151)."""
+        from swarm_provenance_uploader.exceptions import StampPurchasePendingError
+
+        body = dict(self.PENDING, message="Pending\x1b[2K\x1b[1A\u202e" + "m" * 500,
+                    label="x402\x1b[8m-abc", transaction=TX_HASH + "\x1b[2J")
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 202, "json": body}])
+        with pytest.raises(StampPurchasePendingError) as exc_info:
+            paying_client.purchase_stamp()
+        err = exc_info.value
+        for text in (str(err), err.label, err.transaction):
+            assert "\x1b" not in text and "\u202e" not in text
+        assert str(err).startswith("Pending")
+        assert len(str(err)) <= 300
+        assert err.label == "x402 [8m-abc"
+        assert err.transaction == TX_HASH + " [2J"
+
+    def test_control_only_message_falls_back_to_default(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import StampPurchasePendingError
+
+        body = dict(self.PENDING, message="\x1b\r\n\u200b")
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 202, "json": body}])
+        with pytest.raises(StampPurchasePendingError, match="not confirmed yet"):
+            paying_client.purchase_stamp()
+
+    def test_non_string_transaction_is_ignored(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import StampPurchasePendingError
+
+        body = dict(self.PENDING, transaction={"hash": "0x" + "ee" * 32})
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 202, "json": body, "headers": {"X-Payment-Transaction": TX_HASH}}])
+        with pytest.raises(StampPurchasePendingError) as exc_info:
+            paying_client.purchase_stamp()
+        assert exc_info.value.transaction == TX_HASH  # the client's own, from the header
+
+    def test_header_transaction_is_sanitized(self, paying_client, requests_mock):
+        """Without a body transaction, the header's is the one the report prints (#151)."""
+        from swarm_provenance_uploader.exceptions import StampPurchasePendingError
+
+        body = {k: v for k, v in self.PENDING.items() if k != "transaction"}
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 202, "json": body,
+            "headers": {"X-Payment-Transaction": TX_HASH + "\x1b[2K\x1b[1A"}}])
+        with pytest.raises(StampPurchasePendingError) as exc_info:
+            paying_client.purchase_stamp()
+        assert exc_info.value.transaction == TX_HASH + " [2K [1A"
+
+    @pytest.mark.parametrize("depth", ["17\x1b[8m", True, 17.5, [17]])
+    def test_depth_other_than_int_is_dropped(self, paying_client, requests_mock, depth):
+        """The report prints Depth just before the warning: only an int is kept (#151)."""
+        from swarm_provenance_uploader.exceptions import StampPurchasePendingError
+
+        body = dict(self.PENDING, depth=depth)
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 202, "json": body}])
+        with pytest.raises(StampPurchasePendingError) as exc_info:
+            paying_client.purchase_stamp()
+        assert exc_info.value.depth is None
 
 
 class TestPaidRequestTimeouts:
@@ -2168,6 +2248,31 @@ class TestIdempotencyStopCodes:
         assert err.transaction == TX_HASH
         assert err.settled
 
+    def test_settlement_unknown_nonce_is_sanitized(self, idem_x402, requests_mock):
+        """Gateway identifiers are printed in the do-not-re-run report (#151)."""
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        original = "0x" + "f" * 64
+        err = self._stop(idem_x402, requests_mock,
+                         _idem("IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN", nonce=original + "\x1b[8m\u202e"),
+                         PaymentOutcomeUnknownError)
+        assert err.nonce == original + " [8m"
+
+    def test_settled_pending_transaction_is_sanitized(self, idem_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        answer = _idem("IDEMPOTENCY_KEY_SETTLED_PENDING", transaction=TX_HASH + "\x1b[2J\u200b")
+        answer["headers"].pop("X-Payment-Transaction")  # the body value is the one read first
+        err = self._stop(idem_x402, requests_mock, answer, PaymentSettledNotDeliveredError)
+        assert err.transaction == TX_HASH + " [2J"
+
+    def test_non_string_nonce_falls_back_to_ours(self, idem_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        err = self._stop(idem_x402, requests_mock,
+                         _idem("IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN", nonce=["0x1"]), PaymentOutcomeUnknownError)
+        assert err.nonce == NONCES[0]
+
     def test_delivered_not_stored_is_its_own_error(self, idem_x402, requests_mock):
         from swarm_provenance_uploader.exceptions import PaymentDeliveredNotStoredError
 
@@ -2615,6 +2720,35 @@ class TestPaidFailureMessages:
         assert "Gateway: lost" in text
         assert "\x1b" not in text and "\u202e" not in text
 
+    def test_outcome_unknown_header_transaction_is_sanitized(self, paying_client, requests_mock):
+        """The settlement transaction is printed in the do-not-re-run report (#151)."""
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 502, "json": {"code": "X", "message": "boom"},
+            "headers": {"X-Payment-Transaction": TX_HASH + "\x1b[2K\x1b[1A"}}])
+        with pytest.raises(PaymentOutcomeUnknownError) as exc:
+            paying_client.purchase_stamp()
+
+        assert exc.value.transaction == TX_HASH + " [2K [1A"
+
+    def test_settled_not_delivered_receipt_transaction_is_sanitized(self, paying_client, requests_mock):
+        import base64
+        import json
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        receipt = base64.b64encode(json.dumps({
+            "success": True, "transaction": TX_HASH + "\x1b[2K\u202e",
+            "network": "base-sepolia", "payer": PAYER}).encode()).decode()
+        requests_mock.post(f"{GW}/api/v1/data/", [PAYMENT_REQUIRED, {
+            "status_code": 500,
+            "json": {"code": "DELIVERY_FAILED_AFTER_PAYMENT", "message": "lost"},
+            "headers": {"X-PAYMENT-RESPONSE": receipt}}])
+        with pytest.raises(PaymentSettledNotDeliveredError) as exc:
+            paying_client.upload_data(b"x", DUMMY_STAMP)
+
+        assert exc.value.transaction == TX_HASH + " [2K"
+
 
 def _allowance_402(code="DAILY_STAMP_ALLOWANCE_EXHAUSTED", resets_at="2026-10-23T00:00:00Z"):
     """The 402 swarm_connect's pool.py _refuse_allowance sends where paying bypasses the
@@ -2858,3 +2992,203 @@ class TestExtendStampPaid:
         with pytest.raises(ConnectionError,
                            match="HTTP 403 STAMP_OWNERSHIP_DENIED: Cannot extend this stamp: it belongs"):
             paying_client.extend_stamp(DUMMY_STAMP, duration_hours=48)
+
+
+# --- Gateway contract hygiene (#143) ---
+
+# A stamp as the gateway serves it (swarm_connect app/api/models/stamp.py):
+# usable and immutableFlag can be null.
+GATEWAY_STAMP_WITH_NULLS = {
+    "batchID": DUMMY_STAMP, "amount": "303440675840", "depth": 20, "bucketDepth": 16,
+    "batchTTL": 16971999, "immutableFlag": None, "usable": None, "utilization": None,
+    "label": None, "expectedExpiration": "2026-10-30-10-30", "local": False,
+}
+
+
+def _receipt(success, error_reason=None):
+    import base64
+    import json
+
+    body = {"success": success, "errorReason": error_reason, "transaction": None,
+            "network": "base-sepolia", "payer": PAYER}
+    return base64.b64encode(json.dumps(body).encode()).decode()
+
+
+def _tar(tmp_path):
+    import tarfile
+
+    tar_path = tmp_path / "c.tar"
+    f = tmp_path / "f.txt"
+    f.write_text("data")
+    with tarfile.open(tar_path, "w") as tar:
+        tar.add(str(f), arcname="f.txt")
+    return str(tar_path)
+
+
+class TestNullableGatewayFields:
+    """Fields the gateway can send as null must not fail validation (#143)."""
+
+    def test_list_stamps_accepts_null_usable_and_immutable(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/stamps/", json={"stamps": [GATEWAY_STAMP_WITH_NULLS], "total_count": 1})
+        result = GatewayClient(base_url=GW).list_stamps()
+        assert result.stamps[0].usable is None
+        assert result.stamps[0].immutableFlag is None
+
+    def test_get_stamp_accepts_null_usable_and_immutable(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/stamps/{DUMMY_STAMP}", json=GATEWAY_STAMP_WITH_NULLS)
+        stamp = GatewayClient(base_url=GW).get_stamp(DUMMY_STAMP)
+        assert stamp.usable is None
+
+    def test_wallet_accepts_null_balance(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/wallet", json={"walletAddress": PAYER, "bzzBalance": None})
+        assert GatewayClient(base_url=GW).get_wallet().bzzBalance is None
+
+    def test_chequebook_accepts_null_balances(self, requests_mock):
+        requests_mock.get(f"{GW}/api/v1/chequebook", json={
+            "chequebookAddress": PAY_TO, "availableBalance": None, "totalBalance": None})
+        cheque = GatewayClient(base_url=GW).get_chequebook()
+        assert cheque.availableBalance is None
+        assert cheque.totalBalance is None
+
+    def test_download_response_accepts_null_content_type(self):
+        from swarm_provenance_uploader.models import DataDownloadResponse
+
+        resp = DataDownloadResponse.model_validate(
+            {"data": "eA==", "content_type": None, "size": 1, "reference": DUMMY_SWARM_REF})
+        assert resp.content_type is None
+
+    def test_manifest_accepts_gateway_timing(self, requests_mock, tmp_path):
+        """The gateway's timing object has float milliseconds and its own field names."""
+        requests_mock.post(f"{GW}/api/v1/data/manifest", json={
+            "reference": DUMMY_SWARM_REF, "file_count": 1, "message": "ok",
+            "timing": {"stamp_validate_ms": None, "file_read_ms": 1.25, "bee_upload_ms": 1200.5,
+                       "total_ms": 1250.75, "tar_validate_ms": 0.4, "tar_count_ms": 0.1,
+                       "file_count": 1, "ms_per_file": 1250.75, "files_per_second": 0.8}})
+        result = GatewayClient(base_url=GW).upload_manifest(_tar(tmp_path), DUMMY_STAMP, include_timing=True)
+        assert result.timing.total_ms == 1250.75
+        assert result.timing.bee_upload_ms == 1200.5
+        assert result.timing.file_count == 1
+
+
+class TestMissingReference:
+    """A success without a Swarm reference is an error, paid or not (#143)."""
+
+    @pytest.mark.parametrize("body", [{}, {"reference": ""}, {"reference": "   "}, {"reference": None}])
+    def test_upload_data_without_reference_fails(self, requests_mock, body):
+        requests_mock.post(f"{GW}/api/v1/data/", json=body)
+        with pytest.raises(ConnectionError, match="no Swarm reference"):
+            GatewayClient(base_url=GW).upload_data(b"x", DUMMY_STAMP)
+
+    @pytest.mark.parametrize("body", [{}, {"reference": ""}, {"reference": "  "}])
+    def test_signed_upload_without_reference_fails(self, requests_mock, body):
+        requests_mock.post(f"{GW}/api/v1/data/", json=body)
+        with pytest.raises(ConnectionError, match="no Swarm reference"):
+            GatewayClient(base_url=GW).upload_data_with_signing(b'{"data": "x"}', DUMMY_STAMP)
+
+    @pytest.mark.parametrize("body", [{"file_count": 1}, {"reference": "", "file_count": 1}])
+    def test_manifest_without_reference_fails(self, requests_mock, tmp_path, body):
+        requests_mock.post(f"{GW}/api/v1/data/manifest", json=body)
+        with pytest.raises(ConnectionError, match="no Swarm reference"):
+            GatewayClient(base_url=GW).upload_manifest(_tar(tmp_path), DUMMY_STAMP)
+
+    def test_paid_upload_without_reference_is_settled_not_delivered(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        requests_mock.post(f"{GW}/api/v1/data/", [PAYMENT_REQUIRED, {"status_code": 200, "json": {"reference": ""}}])
+        with pytest.raises(PaymentSettledNotDeliveredError) as exc_info:
+            paying_client.upload_data(b"x", DUMMY_STAMP)
+        assert exc_info.value.nonce == NONCE
+
+    def test_reference_is_returned_when_present(self, requests_mock):
+        requests_mock.post(f"{GW}/api/v1/data/", json={"reference": DUMMY_SWARM_REF})
+        assert GatewayClient(base_url=GW).upload_data(b"x", DUMMY_STAMP) == DUMMY_SWARM_REF
+
+
+class TestFailedReceipt:
+    def test_failed_receipt_on_first_attempt_is_outcome_unknown(self, paying_client, requests_mock):
+        """A 2xx whose X-PAYMENT-RESPONSE says success:false contradicts itself (#143).
+
+        The gateway sets the header only after a successful settlement and never
+        falls back to the free tier, so the old "may have used free tier" text is gone.
+        """
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 201, "json": {"batchID": DUMMY_STAMP},
+            "headers": {"X-PAYMENT-RESPONSE": _receipt(False, "insufficient_funds")}}])
+        with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+            paying_client.purchase_stamp()
+        assert exc_info.value.nonce == NONCE
+        assert "free tier" not in str(exc_info.value)
+
+    def test_successful_receipt_passes(self, paying_client, requests_mock):
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 201, "json": {"batchID": DUMMY_STAMP},
+            "headers": {"X-PAYMENT-RESPONSE": _receipt(True)}}])
+        assert paying_client.purchase_stamp() == DUMMY_STAMP
+
+
+class TestPoolAvailable:
+    def test_list_pool_stamps_uses_available_endpoint(self, requests_mock):
+        """The gateway route is GET /api/v1/pool/available, a bare list (#143)."""
+        requests_mock.get(f"{GW}/api/v1/pool/available", json=[{
+            "batch_id": DUMMY_STAMP, "depth": 17, "size_name": "small",
+            "created_at": "2026-10-22T08:00:00+00:00", "ttl_at_creation": 86400}])
+        stamps = GatewayClient(base_url=GW).list_pool_stamps()
+        assert [s.batch_id for s in stamps] == [DUMMY_STAMP]
+
+
+class TestNotaryErrors:
+    """Notary refusals are shown as text, in every gateway body shape (#143, #194)."""
+
+    @staticmethod
+    def _bodies(code, message):
+        detail = {"code": code, "message": message, "suggestion": "Do the thing."}
+        return [
+            {"detail": detail, "code": code, "message": message},  # current gateway (#381 envelope)
+            {"detail": detail},                                     # older gateway
+        ]
+
+    @pytest.mark.parametrize("shape", [0, 1])
+    def test_invalid_document_format_is_text(self, requests_mock, shape):
+        from swarm_provenance_uploader.exceptions import InvalidDocumentFormatError
+
+        body = self._bodies("INVALID_DOCUMENT_FORMAT", "Document must contain a 'data' field")[shape]
+        requests_mock.post(f"{GW}/api/v1/data/", status_code=400, json=body)
+        with pytest.raises(InvalidDocumentFormatError) as exc_info:
+            GatewayClient(base_url=GW).upload_data_with_signing(b'{"x": 1}', DUMMY_STAMP)
+        text = str(exc_info.value)
+        assert "Document must contain a 'data' field" in text
+        assert "{" not in text
+
+    @pytest.mark.parametrize("shape", [0, 1])
+    def test_invalid_sign_option_is_raised(self, requests_mock, shape):
+        body = self._bodies("INVALID_SIGN_OPTION", "Invalid sign option: bogus")[shape]
+        requests_mock.post(f"{GW}/api/v1/data/", status_code=400, json=body)
+        with pytest.raises(ValueError, match="Invalid sign option: bogus") as exc_info:
+            GatewayClient(base_url=GW).upload_data_with_signing(b'{"data": 1}', DUMMY_STAMP, sign="bogus")
+        assert not isinstance(exc_info.value, ConnectionError)
+
+    @pytest.mark.parametrize("code,exc_name", [
+        ("NOTARY_NOT_ENABLED", "NotaryNotEnabledError"),
+        ("NOTARY_NOT_CONFIGURED", "NotaryNotConfiguredError"),
+    ])
+    def test_older_gateway_shape_is_mapped(self, requests_mock, code, exc_name):
+        from swarm_provenance_uploader import exceptions
+
+        requests_mock.post(f"{GW}/api/v1/data/", status_code=400, json=self._bodies(code, "Off.")[1])
+        with pytest.raises(getattr(exceptions, exc_name)):
+            GatewayClient(base_url=GW).upload_data_with_signing(b'{"data": 1}', DUMMY_STAMP)
+
+
+class TestValidationFieldMessages:
+    def test_long_field_message_is_shown_in_full(self, requests_mock):
+        """Each 422 field message is shown whole, not cut at 60 characters (#193)."""
+        msg = "Value error, label must not be 'recovered' or start with paid-, pool-, synced-"
+        assert len(msg) > 60
+        requests_mock.post(f"{GW}/api/v1/stamps/", status_code=422, json={
+            "detail": [{"loc": ["body", "label"], "msg": msg}], "code": "VALIDATION_ERROR",
+            "message": "The request is invalid; see detail for the fields."})
+        with pytest.raises(ConnectionError) as exc:
+            GatewayClient(base_url=GW).purchase_stamp(duration_hours=24)
+        assert f"body.label: {msg}" in str(exc.value)
