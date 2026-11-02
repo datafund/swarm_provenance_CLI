@@ -23,7 +23,9 @@ def failing_rpc_server():
 
     Set ``server.mode``: "http401" answers HTTP 401 with the path in the
     body; "jsonrpc" answers a JSON-RPC error whose message holds the path;
-    "html" answers HTTP 200 with an HTML page (not JSON) that quotes the path.
+    "html" answers HTTP 200 with an HTML page (not JSON) that quotes the path;
+    "drop" closes the connection without an answer. Methods in
+    ``server.answers`` ({method: result}) get that result instead.
     """
     import http.server
     import json
@@ -32,14 +34,28 @@ def failing_rpc_server():
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
             raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            if self.server.mode == "http401":
+            try:
+                request = json.loads(raw)
+            except ValueError:
+                request = {}
+            method = request.get("method") if isinstance(request, dict) else None
+            self.server.methods.append(method)
+            if method in self.server.answers:
+                body = json.dumps({
+                    "jsonrpc": "2.0", "id": request.get("id"), "result": self.server.answers[method],
+                }).encode()
+                status, content_type = 200, "application/json"
+            elif self.server.mode == "drop":
+                # Close the connection without an answer
+                self.close_connection = True
+                return
+            elif self.server.mode == "http401":
                 body = f"Unauthorized: {self.path}".encode()
                 status, content_type = 401, "text/plain"
             elif self.server.mode == "html":
                 body = f"<html><body>The requested URL {self.path} was not found</body></html>".encode()
                 status, content_type = 200, "text/html"
             else:
-                request = json.loads(raw)
                 body = json.dumps({
                     "jsonrpc": "2.0",
                     "id": request.get("id"),
@@ -57,6 +73,10 @@ def failing_rpc_server():
 
     server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
     server.mode = "http401"
+    # JSON-RPC methods that get a result instead of the failure: {method: result}
+    server.answers = {}
+    # The JSON-RPC method of every request received
+    server.methods = []
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     yield server
