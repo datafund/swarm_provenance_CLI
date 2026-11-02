@@ -6803,11 +6803,19 @@ class TestStampsExtendPaid:
     def test_delivered_not_stored_is_success(self, mocker):
         err = exceptions.PaymentDeliveredNotStoredError("Paid once.", transaction="0x" + "cd" * 32,
                                                         **self.PAYMENT)
-        result, _, _ = self._extend(mocker, "--duration-hours", "48", global_args=["--x402"], effect=err)
+        mock_client = mocker.MagicMock()
+        mock_client.extend_stamp.side_effect = err
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        result = CliRunner(mix_stderr=False).invoke(
+            app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
         assert result.exit_code == 0, result.output
-        assert "The stamp extension succeeded and was paid once" in result.output
-        assert "Swarm reference" not in result.output
-        assert "--stamp-id" not in result.output
+        # A script reading stdout sees the same lines as on a normal success
+        assert "SUCCESS: Stamp extended." in result.stdout
+        assert f"Batch ID: {DUMMY_STAMP}" in result.stdout
+        assert "The stamp extension succeeded and was paid once" in result.stderr
+        assert "Do not pay again" in result.stderr
+        assert "Swarm reference" not in result.stdout + result.stderr
+        assert "--stamp-id" not in result.stdout + result.stderr
 
     def test_payment_required_reported(self, mocker):
         err = exceptions.PaymentRequiredError("Payment required")
