@@ -167,6 +167,23 @@ CHAIN_IDS = {
     "base": 8453,
 }
 
+# CAIP-2 chain ids (x402 v2 style, "eip155:<chain id>") for the same networks.
+CAIP2_NETWORKS = {f"eip155:{chain_id}": name for name, chain_id in CHAIN_IDS.items()}
+
+
+def normalize_network(network: Optional[str]) -> Optional[str]:
+    """
+    The x402 v1 name for a network given as a v1 name or a CAIP-2 chain id.
+
+    "eip155:84532" becomes "base-sepolia" and "eip155:8453" becomes "base".
+    Any other value is returned unchanged (stripped), so an unsupported
+    network is still refused where it is checked.
+    """
+    if network is None:
+        return None
+    network = str(network).strip()
+    return CAIP2_NETWORKS.get(network, network)
+
 
 def compute_domain_separator(name: str, version: str, chain_id: int, contract_address: str) -> bytes:
     """
@@ -332,7 +349,8 @@ class X402Client:
         Args:
             private_key: Ethereum private key for signing payments.
                          If None, uses resolve_x402_private_key().
-            network: Network to use ('base-sepolia' or 'base').
+            network: Network to use: 'base-sepolia' or 'base', or the CAIP-2
+                     ids 'eip155:84532' and 'eip155:8453'.
             rpc_url: Custom RPC URL. If None, reads the X402_RPC_URL env var,
                      then uses the default for the network.
             skip_domain_validation: Skip runtime domain validation (for testing only).
@@ -350,6 +368,7 @@ class X402Client:
         Account, Web3 = _import_x402_deps()
 
         # Validate network
+        network = normalize_network(network)
         if network not in self.SUPPORTED_NETWORKS:
             raise X402NetworkError(
                 f"Unsupported network: {network}. Supported: {self.SUPPORTED_NETWORKS}",
@@ -491,7 +510,7 @@ class X402Client:
         # Filter for matching network
         compatible = [
             opt for opt in requirements.accepts
-            if opt.network == self.network
+            if normalize_network(opt.network) == self.network
         ]
 
         if not compatible:
@@ -526,7 +545,7 @@ class X402Client:
         """
         # Gateway values in these messages are repr()'d: the CLI prints them, and
         # repr escapes control and formatting characters (terminal escapes).
-        if option.network != self.network:
+        if normalize_network(option.network) != self.network:
             return f"network {option.network!r} is not the configured '{self.network}'"
         if option.scheme != "exact":
             return f"scheme {option.scheme!r} is not supported (only 'exact')"
@@ -706,10 +725,12 @@ class X402Client:
             signature = "0x" + signed.signature.hex()
 
             # Build the payment payload with string values for timestamps
+            # The option's own network name (v1 or CAIP-2): the gateway
+            # matches the payload against the requirements it sent.
             payload = X402PaymentPayload(
                 x402Version=1,
                 scheme=payment_option.scheme,
-                network=self.network,
+                network=payment_option.network,
                 payload={
                     "signature": signature,
                     "authorization": {

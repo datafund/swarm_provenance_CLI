@@ -32,7 +32,6 @@ from ..exceptions import (
     PaymentRejectedError,
     PaymentRequiredError,
     PaymentSettledNotDeliveredError,
-    PaymentTransactionFailedError,
     StampPurchasePendingError,
     PoolNotEnabledError,
     PoolEmptyError,
@@ -490,7 +489,9 @@ class GatewayClient:
 
         Raises:
             PaymentRequiredError: If payment required but not configured/confirmed
-            PaymentTransactionFailedError: If payment was signed but on-chain tx failed
+            PaymentOutcomeUnknownError: If the payment may have been taken but the
+                result is not known, including a success whose payment receipt
+                says the payment failed
         """
         response = requests.request(method, url, **kwargs)
         response.x402_payment = None
@@ -569,31 +570,25 @@ class GatewayClient:
             if verbose:
                 print(f"DEBUG: Paid request status: {response.status_code}")
 
-            # Check x-payment-response header to verify payment actually succeeded
+            # The payment receipt (X-PAYMENT-RESPONSE). The gateway sends it only
+            # after a successful settlement and never falls back to the free
+            # tier, so a receipt that says success:false contradicts the answer
+            # it came with: what happened to the payment is unknown (#143).
             payment_result = self._parse_payment_response(response, verbose)
-            if payment_result:
-                if not payment_result.success and outstanding is not None:
-                    # This attempt failed on-chain; an earlier one may not have.
+            if payment_result and not payment_result.success:
+                if outstanding is not None:
+                    # This attempt failed; an earlier one may not have.
                     raise unknown("A retry's payment failed, which does not say what happened "
                                   "to an earlier attempt.")
-                if not payment_result.success:
-                    # Payment was signed but the on-chain transaction failed
-                    # Gateway may have fallen back to free tier
-                    error_msg = (
-                        f"Payment transaction failed: {payment_result.errorReason or 'unknown error'}. "
-                        "The gateway may have used free tier instead."
-                    )
-                    if verbose:
-                        print(f"WARNING: {error_msg}")
-                    raise PaymentTransactionFailedError(
-                        error_msg,
-                        error_reason=payment_result.errorReason,
-                        payer=payment_result.payer,
-                    )
-                else:
-                    if verbose:
-                        tx_hash = payment_result.transaction or "pending"
-                        print(f"DEBUG: Payment successful, tx: {tx_hash}")
+                outstanding = payment
+                reason = _sanitize_gateway_text(payment_result.errorReason, limit=100) or "no reason given"
+                raise unknown(
+                    f"The gateway answered HTTP {response.status_code}, but its payment receipt "
+                    f"says the payment failed ({reason}). The two contradict each other."
+                )
+            if payment_result and verbose:
+                tx_hash = payment_result.transaction or "pending"
+                print(f"DEBUG: Payment successful, tx: {tx_hash}")
 
             payment["transaction"] = self._payment_transaction(response, payment_result)
             response.x402_payment = payment
@@ -703,17 +698,17 @@ class GatewayClient:
                 if isinstance(item, dict):
                     loc = ".".join(str(part) for part in item.get("loc") or [])
                     msg = str(item.get("msg") or "invalid")
-                    # Each field bounded, so "and N more" survives the limit below
-                    fields.append(_sanitize_gateway_text(f"{loc}: {msg}" if loc else msg, limit=60))
+                    # Each field message in full (#193); only the list as a whole is cut.
+                    fields.append(_sanitize_gateway_text(f"{loc}: {msg}" if loc else msg,
+                                                         limit=cls._GATEWAY_MESSAGE_LIMIT))
             if fields:
-                listed = "; ".join(fields)
                 more = len(detail) - cls._MAX_VALIDATION_ERRORS_SHOWN
-                if more > 0:
-                    listed += f"; and {more} more"
-                if message:
-                    message = f"{_sanitize_gateway_text(message, limit=100)} ({listed})"
-                else:
-                    message = listed
+                suffix = f"; and {more} more" if more > 0 else ""
+                head = _sanitize_gateway_text(message, limit=100) if message else None
+                # Leave room for the head and "; and N more" within the limit below.
+                room = cls._GATEWAY_MESSAGE_LIMIT - len(suffix) - (len(head) + 3 if head else 0)
+                listed = _sanitize_gateway_text("; ".join(fields), limit=max(room, 20)) + suffix
+                message = f"{head} ({listed})" if head else listed
 
         return (_sanitize_gateway_text(code, limit=64),
                 _sanitize_gateway_text(message, limit=cls._GATEWAY_MESSAGE_LIMIT))
@@ -832,6 +827,23 @@ class GatewayClient:
         if not tx and payment_result:
             tx = payment_result.transaction
         return tx if tx and tx != "unknown" else None
+
+    @staticmethod
+    def _require_reference(data, response: requests.Response, what: str) -> str:
+        """
+        The Swarm reference of a 2xx upload answer (#143).
+
+        A success without a reference stored nothing the caller can find, so
+        it is an error: a ConnectionError here, which `_reading_paid_result`
+        turns into PaymentSettledNotDeliveredError when a payment was sent.
+        """
+        reference = data.get("reference") if isinstance(data, dict) else None
+        if not isinstance(reference, str) or not reference.strip():
+            raise ConnectionError(
+                f"Failed to {what}: the gateway answered HTTP {response.status_code} "
+                "but sent no Swarm reference."
+            )
+        return reference.strip()
 
     @staticmethod
     def _error_body(response: requests.Response) -> dict:
@@ -1282,10 +1294,12 @@ class GatewayClient:
                 print(f"DEBUG: Upload status: {response.status_code}")
             self._raise_for_gateway_error(response)
             with self._reading_paid_result(response):
-                result = DataUploadResponse.model_validate(response.json())
+                data = response.json()
+                reference = self._require_reference(data, response, "upload data")
+                DataUploadResponse.model_validate(data)
             if verbose:
-                print(f"DEBUG: Upload reference: {result.reference}")
-            return result.reference
+                print(f"DEBUG: Upload reference: {reference}")
+            return reference
         except requests.exceptions.RequestException as e:
             if verbose:
                 print(f"ERROR: Upload failed: {e}")
@@ -1468,7 +1482,7 @@ class GatewayClient:
         Raises:
             PoolNotEnabledError: If pool is not enabled on this gateway
         """
-        url = self._make_url("/api/v1/pool/stamps")
+        url = self._make_url("/api/v1/pool/available")
         if verbose:
             print(f"--- DEBUG: List Pool Stamps ---")
             print(f"URL: GET {url}")
@@ -1483,8 +1497,9 @@ class GatewayClient:
 
             self._raise_for_gateway_error(response)
             data = response.json()
-            # Response contains {"stamps": [...], "count": n}
-            stamps_data = data.get("stamps", data)
+            # The gateway answers with a bare list; older shapes wrapped it
+            # as {"stamps": [...], "count": n}.
+            stamps_data = data.get("stamps", data) if isinstance(data, dict) else data
             if isinstance(stamps_data, list):
                 return [PoolStampInfo.model_validate(item) for item in stamps_data]
             return []
@@ -1718,6 +1733,8 @@ class GatewayClient:
             NotaryNotEnabledError: If notary is not enabled
             NotaryNotConfiguredError: If notary is enabled but not configured
             InvalidDocumentFormatError: If document is not valid JSON or missing 'data' field
+            ValueError: If the gateway does not accept the `sign` option
+            ConnectionError: If the request fails, or the gateway sends no reference
         """
         url = self._make_url("/api/v1/data/")
         params = {
@@ -1755,40 +1772,34 @@ class GatewayClient:
             if verbose:
                 print(f"DEBUG: Upload with signing status: {response.status_code}")
 
-            # Handle specific error codes
+            # Notary refusals. The code and message are read the same way as
+            # for any gateway error: top level (current gateways) or under
+            # `detail` (older ones), so the message is text, never a dict (#194).
             if response.status_code == 400:
-                try:
-                    error_data = response.json()
-                    error_code = error_data.get("code", "")
-                    error_message = error_data.get("detail", str(error_data))
-
-                    if error_code == "NOTARY_NOT_ENABLED":
-                        raise NotaryNotEnabledError(
-                            "Notary signing is not enabled on this gateway."
-                        )
-                    elif error_code == "NOTARY_NOT_CONFIGURED":
-                        raise NotaryNotConfiguredError(
-                            "Notary is enabled but not fully configured on this gateway."
-                        )
-                    elif error_code == "INVALID_DOCUMENT_FORMAT":
-                        raise InvalidDocumentFormatError(
-                            f"Invalid document format: {error_message}"
-                        )
-                    elif error_code == "INVALID_SIGN_OPTION":
-                        raise ValueError(f"Invalid sign option: {error_message}")
-                except (ValueError, KeyError):
-                    pass  # Fall through to _raise_for_gateway_error
+                error_code, error_message = self._gateway_error(response)
+                if error_code == "NOTARY_NOT_ENABLED":
+                    raise NotaryNotEnabledError(
+                        "Notary signing is not enabled on this gateway."
+                    )
+                if error_code == "NOTARY_NOT_CONFIGURED":
+                    raise NotaryNotConfiguredError(
+                        "Notary is enabled but not fully configured on this gateway."
+                    )
+                if error_code == "INVALID_DOCUMENT_FORMAT":
+                    raise InvalidDocumentFormatError(
+                        f"Invalid document format: {error_message or 'no reason given'}"
+                    )
+                if error_code == "INVALID_SIGN_OPTION":
+                    raise ValueError(error_message or f"Invalid sign option: {sign}")
 
             self._raise_for_gateway_error(response)
             with self._reading_paid_result(response):
                 data_response = response.json()
 
                 # Build response - gateway may return signed_document or just reference
-                reference = data_response.get("reference", "")
+                reference = self._require_reference(data_response, response, "upload data with signing")
                 signed_doc = data_response.get("signed_document")
                 message = data_response.get("message")
-                if response.x402_payment and not reference:
-                    raise ValueError("no reference in the response")
 
             if verbose:
                 print(f"DEBUG: Upload reference: {reference}")
@@ -1889,13 +1900,11 @@ class GatewayClient:
                     timing = ManifestUploadTiming.model_validate(data["timing"])
 
                 result = ManifestUploadResponse(
-                    reference=data.get("reference", ""),
+                    reference=self._require_reference(data, response, "upload manifest"),
                     file_count=data.get("file_count"),
                     message=data.get("message"),
                     timing=timing,
                 )
-                if response.x402_payment and not result.reference:
-                    raise ValueError("no reference in the response")
 
             if verbose:
                 print(f"DEBUG: Manifest reference: {result.reference}")
