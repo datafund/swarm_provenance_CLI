@@ -125,9 +125,11 @@ class InsufficientFundsError(ChainTransactionError):
 
 
 class TransactionUnconfirmedError(ChainTransactionError):
-    """Transaction was mined (status 1), but the write is not confirmed as recorded.
+    """Transaction was sent, but the write is not confirmed as recorded.
 
-    Base class for TransactionNotRecordedError and TransactionNotVerifiedError.
+    Base class for TransactionNotRecordedError and TransactionNotVerifiedError
+    (the transaction was mined with status 1) and
+    TransactionOutcomeUnknownError (it is not known whether it was mined).
     Catch the subclass to decide whether a retry is safe.
     """
 
@@ -187,6 +189,38 @@ class TransactionNotVerifiedError(TransactionUnconfirmedError):
 
     Retry: NOT safe without checking first. The write may have happened, so
     sending it again may record it twice. Check the transaction in the block
+    explorer, or read the record back, before you send it again.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        tx_hash: str = None,
+        event_name: str = None,
+        expected_count: int = None,
+        contract_address: str = None,
+        explorer_url: str = None,
+        reason: str = None,
+    ):
+        super().__init__(
+            message,
+            tx_hash=tx_hash,
+            event_name=event_name,
+            expected_count=expected_count,
+            contract_address=contract_address,
+            explorer_url=explorer_url,
+        )
+        self.reason = redact_urls(reason)
+
+
+class TransactionOutcomeUnknownError(TransactionUnconfirmedError):
+    """The connection to the RPC failed after the transaction was sent.
+
+    The transaction may have been broadcast, and may be mined later, so it is
+    not known whether the write happened. ``tx_hash`` is the hash of the
+    signed transaction. ``reason`` is the transport error.
+
+    Retry: NOT safe without checking first. Look up ``tx_hash`` in the block
     explorer, or read the record back, before you send it again.
     """
 

@@ -369,6 +369,7 @@ _CHAIN_EXCEPTIONS = frozenset({
     "TransactionUnconfirmedError",
     "TransactionNotRecordedError",
     "TransactionNotVerifiedError",
+    "TransactionOutcomeUnknownError",
     "DataNotRegisteredError",
     "DataAlreadyRegisteredError",
     "TransformationAlreadyExistsError",
