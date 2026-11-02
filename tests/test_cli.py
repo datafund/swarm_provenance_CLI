@@ -480,6 +480,41 @@ class TestInfoCommands:
         assert result.exit_code == 1
         assert "Unhealthy" in result.stdout
 
+    def test_health_gateway_unhealthy_no_second_error(self, mocker):
+        """The unhealthy exit must not be re-caught and reported again as
+        "Unreachable" (#192)."""
+        mock_client = mocker.MagicMock()
+        mock_client.health_check.return_value = False
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(app, ["health"])
+
+        assert result.exit_code == 1
+        assert result.output.count("✗ Backend:") == 1
+        assert result.output.count("✗ Status: Unhealthy") == 1
+        assert "Unreachable" not in result.output
+
+    def test_health_gateway_unreachable(self, mocker):
+        """Tests health command when the gateway cannot be reached."""
+        mock_client = mocker.MagicMock()
+        mock_client.health_check.side_effect = ConnectionError("connection refused")
+
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(app, ["health"])
+
+        assert result.exit_code == 1
+        assert result.output.count("✗ Backend:") == 1
+        assert result.output.count("✗ Status: Unreachable") == 1
+        assert "Unhealthy" not in result.output
+
     def test_health_local_success(self, mocker):
         """Tests health command with local backend."""
         mock_response = mocker.MagicMock()
@@ -1350,6 +1385,67 @@ class TestNotaryVerifyCommand:
         assert result.exit_code == 1
         # Should fail because no --address and local backend can't fetch
         assert "address" in result.stdout.lower() or "gateway" in result.stdout.lower()
+
+    def _write_signed_doc(self, tmp_path):
+        signed_doc = {
+            "data": {"content": "test"},
+            "signatures": [
+                {
+                    "type": "notary",
+                    "signer": "0x1234567890abcdef1234567890abcdef12345678",
+                    "timestamp": "2026-01-21T16:30:00+00:00",
+                    "data_hash": "abc",
+                    "signature": "0x" + "ab" * 65,
+                    "hashed_fields": ["data"],
+                    "signed_message_format": "{data_hash}|{timestamp}",
+                }
+            ],
+        }
+        test_file = tmp_path / "signed.json"
+        test_file.write_text(json.dumps(signed_doc))
+        return test_file
+
+    def test_notary_verify_gateway_no_address_no_second_error(self, mocker, monkeypatch, tmp_path):
+        """The no-address exit must not be re-caught and printed again as an
+        empty "Failed to get notary address:" line (#192)."""
+        from swarm_provenance_uploader.models import NotaryInfoResponse
+
+        monkeypatch.delenv("NOTARY_ADDRESS", raising=False)
+        test_file = self._write_signed_doc(tmp_path)
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_notary_info.return_value = NotaryInfoResponse(
+            enabled=True, available=True, address=None, message=None,
+        )
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(app, ["notary", "verify", "--file", str(test_file)])
+
+        assert result.exit_code == 1
+        assert result.output.count("Gateway notary has no address configured") == 1
+        assert "Failed to get notary address" not in result.output
+        assert result.output.count("ERROR:") == 1
+
+    def test_notary_verify_gateway_lookup_error(self, mocker, monkeypatch, tmp_path):
+        """An unexpected error while fetching the notary address is still reported."""
+        monkeypatch.delenv("NOTARY_ADDRESS", raising=False)
+        test_file = self._write_signed_doc(tmp_path)
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_notary_info.side_effect = ConnectionError("connection refused")
+        mocker.patch(
+            "swarm_provenance_uploader.cli.GatewayClient",
+            return_value=mock_client
+        )
+
+        result = runner.invoke(app, ["notary", "verify", "--file", str(test_file)])
+
+        assert result.exit_code == 1
+        assert result.output.count("ERROR: Failed to get notary address: connection refused") == 1
+        assert result.output.count("ERROR:") == 1
 
     def test_notary_verify_file_not_found(self):
         """Tests notary verify fails with non-existent file."""
