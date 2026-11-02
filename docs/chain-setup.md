@@ -355,9 +355,9 @@ The CLI moves to the next fallback RPC when the RPC in use cannot be reached, ti
 - **Reads** use the fallbacks: `chain get` (also with `--follow`), `chain verify`, `chain lookup`, `chain status` without `--set`, `chain balance`, and the "already registered" check before an anchor.
 - **Writes** use the fallbacks only for the steps before the transaction is sent: the chain ID and contract code checks, the gas estimate, the nonce, the gas price and the balance check. These steps send nothing, so running them again on another RPC is safe.
 - **Sending the transaction** never moves to a fallback. If the connection fails while the transaction is sent, the CLI prints "Outcome unknown" (see below) and does not send it again.
-- **Waiting for the receipt** can move to a fallback, for the same transaction hash. Nothing is sent again.
+- **Waiting for the receipt** can move to a fallback, for the same transaction hash. Nothing is sent again. If the wait moved to a fallback and that RPC does not return the receipt in time, the CLI prints "Outcome unknown", because the transaction may still be mined.
 
-The CLI does not move to a fallback when the RPC answers with a JSON-RPC error (for example "nonce too low" or a rate-limit error in JSON-RPC form), when the contract reverts, or when the RPC in use reports another chain ID. Another RPC would give the same answer, or must not be used.
+The CLI does not move to a fallback when the RPC answers with a JSON-RPC error (for example "nonce too low" or a rate-limit error in JSON-RPC form), when the contract reverts, or when the RPC in use reports another chain ID. Another RPC would give the same answer, or must not be used. A wrong chain ID is reported as "Chain ID mismatch" (`ChainIdMismatchError`), also by `ChainProvider.health_check()`.
 
 The nonce of a write comes from the RPC in use. After a fallback, that RPC may not yet know about transactions from the same wallet that are still waiting at the RPC used before. If you send several writes quickly from one wallet while the primary RPC fails, check the earlier transactions in the explorer.
 
