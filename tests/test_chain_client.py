@@ -4626,3 +4626,326 @@ class TestChainErrorCauseRedaction:
         with pytest.raises(requests.exceptions.ConnectionError) as exc_info:
             client.access(swarm_hash=DUMMY_HASH)
         assert exc_info.value is raw
+
+
+# RPC fallbacks for reads and for writes before the send (#168), and the
+# contract following a fallback switch (#200)
+
+BASE_SEPOLIA_CHAIN_ID_HEX = hex(84532)
+BASE_MAINNET_CHAIN_ID_HEX = hex(8453)
+
+
+def _encoded_data_record(owner=OTHER_ADDRESS):
+    """The eth_call result of getDataRecord for a registered DUMMY_HASH, ABI-encoded."""
+    import eth_abi
+    from eth_utils.abi import get_abi_output_types
+    from swarm_provenance_uploader.chain.contract import _load_abi
+
+    function = next(item for item in _load_abi() if item.get("name") == "getDataRecord")
+    (record_type,) = get_abi_output_types(function)
+    record = (DUMMY_HASH_BYTES, owner, 1_700_000_000, "swarm-provenance", b"\x00" * 32, [], [], 0)
+    return "0x" + eth_abi.encode([record_type], [record]).hex()
+
+
+def _working_rpc(server, chain_id_hex=BASE_SEPOLIA_CHAIN_ID_HEX):
+    """Make the failing_rpc_server stub answer as a node on the given chain."""
+    server.answers.update({
+        "web3_clientVersion": "stub/1.0",
+        "eth_chainId": chain_id_hex,
+        "eth_call": _encoded_data_record(),
+    })
+    return f"http://127.0.0.1:{server.server_port}"
+
+
+class TestReadFallbackRealWeb3:
+    """A dead primary RPC: reads go to the fallback, with the real web3 (#168, #200).
+
+    No mock_chain_deps: it replaces web3 with a MagicMock, and the point is
+    that the real contract object sends its eth_call to the new endpoint.
+    Only reads are made, only to 127.0.0.1, without a wallet key.
+    """
+
+    def test_contract_read_succeeds_through_the_fallback(
+        self, failing_rpc_server, closed_port, no_web3_retry_sleep
+    ):
+        pytest.importorskip("web3")
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        primary = f"http://127.0.0.1:{closed_port}"
+        fallback = _working_rpc(failing_rpc_server)
+        client = ChainClient(
+            chain="base-sepolia", rpc_url=primary, rpc_fallbacks=[fallback], require_wallet=False
+        )
+        contract = client._contract
+
+        record = client.get(DUMMY_HASH)
+
+        assert record.owner.lower() == OTHER_ADDRESS
+        assert record.data_type == "swarm-provenance"
+        assert "eth_call" in failing_rpc_server.methods
+        assert client._provider.rpc_url == fallback
+        # #200: the same contract object, bound to the provider's active web3
+        assert client._contract is contract
+        assert contract._contract.w3 is client._provider.web3
+
+    def test_fallback_on_another_chain_is_not_used(
+        self, failing_rpc_server, closed_port, no_web3_retry_sleep
+    ):
+        pytest.importorskip("web3")
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        primary = f"http://127.0.0.1:{closed_port}"
+        fallback = _working_rpc(failing_rpc_server, chain_id_hex=BASE_MAINNET_CHAIN_ID_HEX)
+        client = ChainClient(
+            chain="base-sepolia", rpc_url=primary, rpc_fallbacks=[fallback], require_wallet=False
+        )
+
+        with pytest.raises(ChainConnectionError):
+            client.get(DUMMY_HASH)
+
+        assert "eth_chainId" in failing_rpc_server.methods
+        assert "eth_call" not in failing_rpc_server.methods
+        assert client._provider.rpc_url == primary
+
+    def test_switch_keeps_the_web3_object(self, failing_rpc_server, closed_port, no_web3_retry_sleep):
+        """_try_fallback changes the provider of the existing Web3 object (#200)."""
+        pytest.importorskip("web3")
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        primary = f"http://127.0.0.1:{closed_port}"
+        fallback = _working_rpc(failing_rpc_server)
+        provider = ChainProvider(chain="base-sepolia", rpc_url=primary, rpc_fallbacks=[fallback])
+        web3 = provider.web3
+
+        assert provider._try_fallback() is True
+
+        assert provider.web3 is web3
+        assert web3.provider.endpoint_uri == fallback
+        assert provider.rpc_url == fallback
+
+    def test_every_endpoint_dead_is_a_redacted_connection_error(
+        self, failing_rpc_server, closed_port, no_web3_retry_sleep, caplog
+    ):
+        import logging
+
+        pytest.importorskip("web3")
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        failing_rpc_server.mode = "http401"
+        primary = f"http://127.0.0.1:{closed_port}/v2/{RPC_KEY}"
+        # Connects (answers is_connected and the chain ID), then fails the read
+        failing_rpc_server.answers.update({
+            "web3_clientVersion": "stub/1.0", "eth_chainId": BASE_SEPOLIA_CHAIN_ID_HEX,
+        })
+        fallback = f"http://127.0.0.1:{failing_rpc_server.server_port}/v2/{RPC_KEY}"
+        client = ChainClient(
+            chain="base-sepolia", rpc_url=primary, rpc_fallbacks=[fallback], require_wallet=False
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="swarm_provenance_uploader"):
+            with pytest.raises(ChainConnectionError) as exc_info:
+                client.get(DUMMY_HASH)
+
+        _assert_no_key(exc_info.value)
+        assert "RPC fallback" in caplog.text
+        assert RPC_KEY not in caplog.text
+
+
+def _fallback_client(mock_chain_deps, logs=()):
+    """A write client whose _try_fallback switches once, then has no endpoint left."""
+    client = _write_client(mock_chain_deps, list(logs))
+    mock_chain_deps["web3_instance"].eth.get_code.return_value = DUMMY_CODE
+    client._provider._try_fallback = MagicMock(side_effect=[True, False, False, False])
+    return client
+
+
+class TestWriteFallbackBeforeSend:
+    """A transport failure before the send falls back; the transaction is sent once (#168)."""
+
+    @pytest.mark.parametrize("step", ["get_transaction_count", "estimate_gas", "get_balance", "get_code"])
+    def test_step_falls_back_and_sends_once(self, mock_chain_deps, step):
+        import requests
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _fallback_client(mock_chain_deps, [_log("DataStatusChanged")])
+        method = getattr(web3.eth, step)
+        ok = method.return_value
+        method.side_effect = [requests.exceptions.ConnectionError("connection refused"), ok, ok, ok]
+
+        client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        client._provider._try_fallback.assert_called_once()
+        web3.eth.send_raw_transaction.assert_called_once()
+        mock_chain_deps["account"].sign_transaction.assert_called_once()
+
+    def test_gas_estimate_in_build_falls_back(self, mock_chain_deps):
+        import requests
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _fallback_client(mock_chain_deps, [_log("DataAccessed")])
+        build = mock_chain_deps["contract"].functions.recordAccess.return_value.build_transaction
+        tx = {"from": DUMMY_ADDRESS, "to": DUMMY_CONTRACT, "data": "0x"}
+        build.side_effect = [requests.exceptions.ConnectionError("connection refused"), tx]
+
+        client.access(swarm_hash=DUMMY_HASH)
+
+        assert build.call_count == 2
+        client._provider._try_fallback.assert_called_once()
+        web3.eth.send_raw_transaction.assert_called_once()
+
+    def test_no_endpoint_left_is_connection_error_and_nothing_is_sent(self, mock_chain_deps):
+        import requests
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _fallback_client(mock_chain_deps, [_log("DataStatusChanged")])
+        web3.eth.get_transaction_count.side_effect = requests.exceptions.ConnectionError("refused")
+
+        with pytest.raises(ChainConnectionError, match="before the transaction was sent"):
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert client._provider._try_fallback.call_count == 2
+        web3.eth.send_raw_transaction.assert_not_called()
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+
+    def test_wrong_chain_primary_does_not_fall_back(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.exceptions import ChainIdMismatchError
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _fallback_client(mock_chain_deps, [_log("DataStatusChanged")])
+        web3.eth.chain_id = 8453  # the primary answers on mainnet
+
+        with pytest.raises(ChainIdMismatchError):
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        client._provider._try_fallback.assert_not_called()
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+
+    def test_json_rpc_rejection_does_not_fall_back(self, mock_chain_deps):
+        """A node that answers with a JSON-RPC error is not a transport failure."""
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _fallback_client(mock_chain_deps, [_log("DataStatusChanged")])
+        web3.eth.get_transaction_count.side_effect = web3_exceptions.Web3RPCError("nonce too low")
+
+        with pytest.raises(ChainTransactionError):
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        client._provider._try_fallback.assert_not_called()
+        web3.eth.send_raw_transaction.assert_not_called()
+
+    def test_contract_revert_in_build_does_not_fall_back(self, mock_chain_deps):
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+
+        client = _fallback_client(mock_chain_deps, [_log("DataAccessed")])
+        build = mock_chain_deps["contract"].functions.recordAccess.return_value.build_transaction
+        build.side_effect = web3_exceptions.ContractLogicError("execution reverted: no")
+
+        with pytest.raises(ChainTransactionError, match="reverted"):
+            client.access(swarm_hash=DUMMY_HASH)
+
+        client._provider._try_fallback.assert_not_called()
+
+
+class TestWriteNoFallbackAfterSend:
+    """After send_raw_transaction is called, nothing is sent again (#168, #181)."""
+
+    def test_send_failure_is_outcome_unknown_without_fallback(self, mock_chain_deps):
+        import requests
+        from swarm_provenance_uploader.chain.exceptions import TransactionOutcomeUnknownError
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _fallback_client(mock_chain_deps, [_log("DataStatusChanged")])
+        web3.eth.send_raw_transaction.side_effect = requests.exceptions.ConnectionError("reset")
+
+        with pytest.raises(TransactionOutcomeUnknownError):
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        web3.eth.send_raw_transaction.assert_called_once()
+        mock_chain_deps["account"].sign_transaction.assert_called_once()
+        client._provider._try_fallback.assert_not_called()
+
+    def test_receipt_wait_falls_back_for_the_same_hash(self, mock_chain_deps):
+        import requests
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _fallback_client(mock_chain_deps, [_log("DataStatusChanged")])
+        receipt = web3.eth.wait_for_transaction_receipt.return_value
+        web3.eth.wait_for_transaction_receipt.side_effect = [
+            requests.exceptions.ConnectionError("reset"), receipt,
+        ]
+
+        client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        web3.eth.send_raw_transaction.assert_called_once()
+        client._provider._try_fallback.assert_called_once()
+        hashes = [c.args[0] for c in web3.eth.wait_for_transaction_receipt.call_args_list]
+        assert hashes == [DUMMY_TX_HASH_BYTES, DUMMY_TX_HASH_BYTES]
+
+    def test_receipt_wait_with_no_endpoint_left_is_outcome_unknown(self, mock_chain_deps):
+        import requests
+        from swarm_provenance_uploader.chain.exceptions import TransactionOutcomeUnknownError
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _fallback_client(mock_chain_deps, [_log("DataStatusChanged")])
+        web3.eth.wait_for_transaction_receipt.side_effect = requests.exceptions.ConnectionError("reset")
+
+        with pytest.raises(TransactionOutcomeUnknownError):
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        web3.eth.send_raw_transaction.assert_called_once()
+
+    def test_receipt_timeout_does_not_fall_back(self, mock_chain_deps):
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _fallback_client(mock_chain_deps, [_log("DataStatusChanged")])
+        web3.eth.wait_for_transaction_receipt.side_effect = web3_exceptions.TimeExhausted("timeout")
+
+        with pytest.raises(ChainTransactionError):
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        client._provider._try_fallback.assert_not_called()
+        web3.eth.send_raw_transaction.assert_called_once()
+
+
+class TestReadFallbackMocked:
+    """Read methods retry on the fallback after a transport failure (#168)."""
+
+    def _client(self, mock_chain_deps):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        client = ChainClient(chain="base-sepolia", require_wallet=False)
+        client._provider._try_fallback = MagicMock(side_effect=[True, False, False, False])
+        return client
+
+    def test_link_read_in_provenance_chain_falls_back(self, mock_chain_deps):
+        import requests
+
+        contract = mock_chain_deps["contract"]
+        contract.functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, OTHER_ADDRESS, 1, "t", b"\x00" * 32, [], [], 0,
+        )
+        links = contract.functions.getTransformationLinks.return_value.call
+        links.side_effect = [[], requests.exceptions.ConnectionError("reset"), [], []]
+        contract.functions.getTransformationParents.return_value.call.return_value = []
+        client = self._client(mock_chain_deps)
+
+        chain = client.get_provenance_chain(DUMMY_HASH)
+
+        assert [r.data_hash for r in chain] == [DUMMY_HASH]
+        client._provider._try_fallback.assert_called_once()
+
+    def test_json_rpc_rejection_in_a_read_does_not_fall_back(self, mock_chain_deps):
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+
+        mock_chain_deps["web3_instance"].eth.get_balance.side_effect = web3_exceptions.Web3RPCError(
+            "rate limited"
+        )
+        client = self._client(mock_chain_deps)
+        client._wallet  # the test key from mock_chain_deps
+
+        with pytest.raises(ChainConfigurationError):
+            client.balance()
+
+        client._provider._try_fallback.assert_not_called()
