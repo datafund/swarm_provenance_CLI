@@ -390,6 +390,77 @@ class TestStampsCommands:
         assert result.exit_code == 1
         assert "requires gateway backend" in result.stdout
 
+    @pytest.mark.parametrize("prefix", ["0x", "0X"])
+    def test_stamps_info_accepts_0x_prefix(self, mocker, prefix):
+        """stamps info drops a 0x prefix before calling the gateway (#159)."""
+        mock_client = mocker.MagicMock()
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=DUMMY_STAMP, usable=True, exists=True, depth=17, amount="1",
+            bucketDepth=16, immutableFlag=False, batchTTL=3600)
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+
+        result = runner.invoke(app, ["stamps", "info", prefix + DUMMY_STAMP])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.output}"
+        assert mock_client.get_stamp.call_args.args[0] == DUMMY_STAMP
+
+    def test_stamps_info_local_accepts_0x_prefix(self, mocker):
+        """stamps info on the local backend drops a 0x prefix before calling Bee (#159)."""
+        get_info = mocker.patch(
+            "swarm_provenance_uploader.cli.swarm_client.get_stamp_info",
+            return_value={"batchID": DUMMY_STAMP, "usable": True, "exists": True,
+                          "batchTTL": 3600, "depth": 17, "amount": "1"})
+
+        result = runner.invoke(app, ["--backend", "local", "stamps", "info", "0x" + DUMMY_STAMP])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.output}"
+        assert get_info.call_args.args[1] == DUMMY_STAMP
+
+    def test_stamps_extend_accepts_0x_prefix(self, mocker):
+        """stamps extend drops a 0x prefix before calling the gateway (#159)."""
+        mock_client = mocker.MagicMock()
+        mock_client.extend_stamp.return_value = DUMMY_STAMP
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+
+        result = runner.invoke(app, ["stamps", "extend", "0x" + DUMMY_STAMP, "--amount", "1000000"])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.output}"
+        assert mock_client.extend_stamp.call_args.args[0] == DUMMY_STAMP
+
+    def test_stamps_check_accepts_0x_prefix(self, mocker):
+        """stamps check drops a 0x prefix before calling the gateway (#159)."""
+        from swarm_provenance_uploader.models import StampHealthCheckResponse
+
+        mock_client = mocker.MagicMock()
+        mock_client.check_stamp_health.return_value = StampHealthCheckResponse(
+            stamp_id=DUMMY_STAMP, can_upload=True, errors=[], warnings=[], status=None)
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+
+        result = runner.invoke(app, ["stamps", "check", "0x" + DUMMY_STAMP])
+
+        assert result.exit_code == 0, f"CLI Failed: {result.output}"
+        assert mock_client.check_stamp_health.call_args.args[0] == DUMMY_STAMP
+
+    @pytest.mark.parametrize("command", [
+        ["stamps", "info"],
+        ["--backend", "local", "stamps", "info"],
+        ["stamps", "extend", "--amount", "1000000"],
+        ["stamps", "check"],
+    ])
+    @pytest.mark.parametrize("stamp_id", ["../../wallet", "a" * 63, "0x" + "a" * 63, "x" * 64])
+    def test_stamps_commands_refuse_bad_stamp_id(self, mocker, command, stamp_id):
+        """stamps info/extend/check refuse an ID that is not 64 hex before any request (#159)."""
+        constructor = mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        get_info = mocker.patch("swarm_provenance_uploader.cli.swarm_client.get_stamp_info")
+
+        result = runner.invoke(app, [*command, stamp_id])
+
+        assert result.exit_code == 1
+        assert "STAMP_ID is not a stamp ID (64 hex characters)" in result.output
+        assert "Failed to" not in result.output
+        constructor.assert_not_called()
+        get_info.assert_not_called()
+
 
 # =============================================================================
 # INFO COMMANDS TESTS (wallet, chequebook, health)
