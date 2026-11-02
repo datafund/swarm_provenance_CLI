@@ -92,5 +92,5 @@ echo "Swarm reference: $SWARM_REF"
 echo "Stamp ID: $STAMP_ID"
 echo
 echo "Additional stamp commands available:"
-echo "  swarm-prov-upload stamps extend $STAMP_ID --amount 1000000"
-echo "  (requires funded wallet with BZZ tokens)"
+echo "  swarm-prov-upload --x402 stamps extend $STAMP_ID --duration-hours 48"
+echo "  (paid with x402 from the wallet that bought the stamp)"

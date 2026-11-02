@@ -553,8 +553,8 @@ swarm-prov-upload stamps list --full --wallet 0xYourPayerAddress
 # Get stamp details
 swarm-prov-upload stamps info <stamp_id>
 
-# Extend stamp TTL
-swarm-prov-upload stamps extend <stamp_id> --amount 1000000
+# Extend stamp TTL by 48 hours (paid; a stamp you bought needs --x402 from the same wallet)
+swarm-prov-upload --x402 stamps extend <stamp_id> --duration-hours 48
 
 # Check stamp health (can it be used for uploads?)
 swarm-prov-upload stamps check <stamp_id>
