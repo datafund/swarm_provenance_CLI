@@ -1412,38 +1412,29 @@ def upload_collection(
             import shutil
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    if not_returned is not None:
-        # Still a JSON document for scripts (#153): no reference, plus what identifies the payment
-        from .models import CollectionFileInfo
-        typer.echo(json.dumps({
-            "collection_hash": collection_hash,
-            "files": [CollectionFileInfo(**fi).model_dump() for fi in file_infos],
-            "total_size": total_size,
-            "file_count": len(file_infos),
-            "stamp_id": stamp_id,
-            "swarm_reference": None,
-            "provenance_standard": provenance_standard,
-            "status": "delivered_not_stored",
-            "transaction": not_returned.transaction,
-            "payer": not_returned.payer,
-            "idempotency_key": not_returned.idempotency_key,
-        }, indent=2))
-        _report_delivered_not_stored(not_returned, "the collection upload", final_step=True)
-
     _unused_stamp.update(id=None, how=None)  # used: nothing to reuse
 
     # Output
     if output_json:
         from .models import CollectionFileInfo, CollectionProvenanceMetadata
-        metadata = CollectionProvenanceMetadata(
+        metadata_fields = dict(
             collection_hash=collection_hash,
             files=[CollectionFileInfo(**fi) for fi in file_infos],
             total_size=total_size,
             file_count=len(file_infos),
             stamp_id=stamp_id,
-            swarm_reference=result.reference,
             provenance_standard=provenance_standard,
         )
+        if not_returned is not None:
+            # Still a JSON document for scripts (#153): the same fields with no reference
+            # (model_construct, because the model requires one), plus what identifies the payment
+            document = CollectionProvenanceMetadata.model_construct(
+                **metadata_fields, swarm_reference=None).model_dump(mode="json")
+            document.update(status="delivered_not_stored", transaction=not_returned.transaction,
+                            payer=not_returned.payer, idempotency_key=not_returned.idempotency_key)
+            typer.echo(json.dumps(document, indent=2))
+            _report_delivered_not_stored(not_returned, "the collection upload", final_step=True)
+        metadata = CollectionProvenanceMetadata(**metadata_fields, swarm_reference=result.reference)
         typer.echo(metadata.model_dump_json(indent=2))
     else:
         typer.secho(f"\nSUCCESS! Collection uploaded.", fg=typer.colors.GREEN, bold=True)
