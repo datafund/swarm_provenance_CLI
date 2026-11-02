@@ -15,6 +15,7 @@ from . import config, __version__
 from ._requirements import INSTALL_ETH_ACCOUNT, INSTALL_SIGNING_DEPS
 from .core import file_utils, swarm_client, metadata_builder
 from .core.gateway_client import GatewayClient, is_insecure_gateway_url, is_valid_idempotency_key
+from .core.x402_client import normalize_network
 from .models import ProvenanceMetadata, ValidationError
 from . import exceptions
 from .chain.redact import redact_url, redact_urls
@@ -65,7 +66,7 @@ _x402_config = {
     "enabled": config.X402_ENABLED,
     "auto_pay": config.X402_AUTO_PAY,
     "max_auto_pay_usd": config.X402_MAX_AUTO_PAY_USD,
-    "network": config.X402_NETWORK,
+    "network": normalize_network(config.X402_NETWORK),
     "expected_pay_to": config.X402_EXPECTED_PAY_TO,
 }
 
@@ -127,7 +128,9 @@ def _get_chain_client(verbose: bool = False):
         )
     except exceptions.ChainConfigurationError as e:
         typer.secho(f"ERROR: Chain configuration invalid: {e}", fg=typer.colors.RED, err=True)
-        typer.echo("Check PROVENANCE_WALLET_KEY environment variable and chain settings.", err=True)
+        if not isinstance(e, exceptions.ChainIdMismatchError):
+            # The mismatch message carries its own advice (CHAIN_NAME=localhost)
+            typer.echo("Check PROVENANCE_WALLET_KEY environment variable and chain settings.", err=True)
         raise typer.Exit(code=1)
 
 
@@ -195,7 +198,6 @@ def _gateway_stamp_info(gw_client, stamp_id: str, verbose: bool) -> Optional[dic
     if not stamp_details:
         return None
     return {
-        "exists": stamp_details.exists,
         "usable": stamp_details.usable,
         "batchTTL": stamp_details.batchTTL,
     }
@@ -206,7 +208,7 @@ def _wait_for_stamp_usable(stamp_id: str, get_stamp_info, stamp_source: str,
     """Poll until the stamp is usable; exit 1 if it is not usable after all retries.
 
     stamp_source is "existing", "pool" or "bought" and picks the first message.
-    get_stamp_info() returns a dict with "exists", "usable" and "batchTTL", or None.
+    get_stamp_info() returns a dict with "usable" and "batchTTL", or None.
     """
     if stamp_source == "existing":
         typer.echo(f"Verifying stamp is usable...")
@@ -224,15 +226,14 @@ def _wait_for_stamp_usable(stamp_id: str, get_stamp_info, stamp_source: str,
             stamp_info = get_stamp_info()
 
             if stamp_info:
-                exists = stamp_info.get("exists")
                 usable = stamp_info.get("usable", False)
                 batch_ttl_seconds = stamp_info.get("batchTTL")  # TTL in seconds
 
                 if verbose:
                     ttl_str = f"{batch_ttl_seconds // 60}m {batch_ttl_seconds % 60}s" if batch_ttl_seconds is not None else "N/A"
-                    typer.echo(f"    Attempt {i+1}: Stamp found - Exists={exists}, Usable={usable}, TTL={ttl_str}")
+                    typer.echo(f"    Attempt {i+1}: Stamp found - Usable={usable}, TTL={ttl_str}")
 
-                # Check usable flag - exists may be None from gateway API
+                # Only the usable flag decides; the gateway may send it as null
                 if usable:
                     stamp_is_ready_for_upload = True
                     if not verbose: typer.echo(typer.style("OK", fg=typer.colors.GREEN))
@@ -1456,6 +1457,29 @@ def upload_collection(
 
 # --- Stamps Subcommands ---
 
+def _format_utilization(percent: Optional[float]) -> str:
+    """The gateway's `utilizationPercent` for display (#143).
+
+    Not `utilization`: that is the raw bucket fill level, so a depth-17
+    batch at 50 % has utilization 1.
+    """
+    return "unknown" if percent is None else f"{round(percent, 1):g}%"
+
+
+def _or_unknown(value) -> str:
+    """A gateway value for display; the gateway sends null when it cannot tell (#143)."""
+    return "unknown" if value is None else str(value)
+
+
+def _format_usable(usable: Optional[bool], width: int = 0) -> str:
+    """Yes, No or Unknown, padded before styling so colour codes do not count."""
+    if usable is None:
+        return typer.style(f"{'Unknown':<{width}}", fg=typer.colors.YELLOW)
+    if usable:
+        return typer.style(f"{'Yes':<{width}}", fg=typer.colors.GREEN)
+    return typer.style(f"{'No':<{width}}", fg=typer.colors.RED)
+
+
 def _sanitize_label(label: Optional[str]) -> str:
     """A stamp label as printable text (labels come from the gateway)."""
     return "".join(ch for ch in (label or "") if ch.isprintable())
@@ -1513,10 +1537,9 @@ def stamps_list(
         for stamp in result.stamps:
             stamp_id_str = stamp.batchID if full else f"{stamp.batchID[:8]}...{stamp.batchID[-8:]}"
             # Pad before styling: colour codes would count towards the width
-            usable_str = (typer.style(f"{'Yes':<8}", fg=typer.colors.GREEN) if stamp.usable
-                          else typer.style(f"{'No':<8}", fg=typer.colors.RED))
+            usable_str = _format_usable(stamp.usable, 8)
             ttl_str = _format_ttl(stamp.batchTTL)
-            util_str = f"{stamp.utilization}%"
+            util_str = _format_utilization(stamp.utilizationPercent)
             line = f"{stamp_id_str:<{id_width}} {usable_str} {ttl_str:<12} {stamp.depth:<6} {util_str:<12}"
             if full:
                 line += f" {_sanitize_label(stamp.label)}"
@@ -1562,12 +1585,13 @@ def stamps_info(
 
             typer.echo(f"\nStamp Details:")
             typer.echo(f"  Batch ID:    {stamp.batchID}")
-            typer.echo(f"  Usable:      {typer.style('Yes', fg=typer.colors.GREEN) if stamp.usable else typer.style('No', fg=typer.colors.RED)}")
-            typer.echo(f"  Exists:      {'Yes' if stamp.exists else 'No'}")
+            typer.echo(f"  Usable:      {_format_usable(stamp.usable)}")
+            # `local`: the batch is on this gateway's node. The gateway sends no `exists`.
+            typer.echo(f"  Local:       {'Unknown' if stamp.local is None else 'Yes' if stamp.local else 'No'}")
             typer.echo(f"  TTL:         {_format_ttl(stamp.batchTTL)}")
             typer.echo(f"  Depth:       {stamp.depth}")
             typer.echo(f"  Amount:      {stamp.amount}")
-            typer.echo(f"  Utilization: {stamp.utilization}%")
+            typer.echo(f"  Utilization: {_format_utilization(stamp.utilizationPercent)}")
             if stamp.label:
                 typer.echo(f"  Label:       {_sanitize_label(stamp.label)}")
         else:
@@ -1774,7 +1798,7 @@ def wallet(
         wallet_info = gw_client.get_wallet(verbose=verbose)
         typer.echo(f"\nWallet Information:")
         typer.echo(f"  Address: {wallet_info.walletAddress}")
-        typer.echo(f"  BZZ Balance: {wallet_info.bzzBalance}")
+        typer.echo(f"  BZZ Balance: {_or_unknown(wallet_info.bzzBalance)}")
     except Exception as e:
         typer.secho(f"ERROR: Failed to get wallet info: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -1800,8 +1824,8 @@ def chequebook(
         cheque_info = gw_client.get_chequebook(verbose=verbose)
         typer.echo(f"\nChequebook Information:")
         typer.echo(f"  Address:           {cheque_info.chequebookAddress}")
-        typer.echo(f"  Available Balance: {cheque_info.availableBalance}")
-        typer.echo(f"  Total Balance:     {cheque_info.totalBalance}")
+        typer.echo(f"  Available Balance: {_or_unknown(cheque_info.availableBalance)}")
+        typer.echo(f"  Total Balance:     {_or_unknown(cheque_info.totalBalance)}")
     except Exception as e:
         typer.secho(f"ERROR: Failed to get chequebook info: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -2538,21 +2562,45 @@ def chain_balance(
         typer.echo(f"Bridge ETH: {bridge}")
 
 
+def _validate_owner_address(value: Optional[str]) -> Optional[str]:
+    """Typer callback for --owner: a 0x-prefixed 20-byte hex address, any case."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", value):
+        raise typer.BadParameter("must be a 0x-prefixed 40-hex-digit address.")
+    return value
+
+
 @_chain_command("verify")
 def chain_verify(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to verify on-chain.")],
+    require_active: Annotated[bool, typer.Option(
+        "--require-active",
+        help="Also require the record status to be ACTIVE (exit 1 for RESTRICTED or DELETED).",
+    )] = False,
+    owner: Annotated[Optional[str], typer.Option(
+        "--owner",
+        help="Also require this owner address (case-insensitive; exit 1 if it differs).",
+        callback=_validate_owner_address,
+    )] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
 ):
     """
     Verify that a Swarm hash is anchored on-chain.
 
-    Exit code 0 if anchored, 1 if not found (useful for scripting).
+    Prints the record's status and owner. Exit code 0 if anchored, 1 if not
+    found (useful for scripting). Without --require-active and --owner, a
+    RESTRICTED or DELETED record, or one with any owner, still exits 0.
     """
     try:
         client = _get_chain_client(verbose=verbose)
-        is_registered = client.verify(swarm_hash, verbose=verbose)
+        record = client.get(swarm_hash, verbose=verbose)
     except typer.Exit:
         raise
+    except exceptions.DataNotRegisteredError:
+        typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
@@ -2562,10 +2610,29 @@ def chain_verify(
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
-    if is_registered:
-        typer.secho(f"Verified: {swarm_hash} is anchored on-chain.", fg=typer.colors.GREEN)
+    status = record.status.name
+    failures = []
+    if require_active and status != "ACTIVE":
+        failures.append(f"status is {status}, not ACTIVE (--require-active)")
+    if owner is not None and record.owner.lower() != owner.lower():
+        failures.append(f"owner is {record.owner}, not {owner} (--owner)")
+
+    if failures:
+        typer.secho(f"Not verified: {swarm_hash} is anchored on-chain, but:", fg=typer.colors.YELLOW)
+        for failure in failures:
+            typer.secho(f"  - {failure}", fg=typer.colors.YELLOW)
+    elif status != "ACTIVE":
+        # Exit 0 as before, but not called "Verified"
+        typer.secho(
+            f"Anchored on-chain (status: {status}): {swarm_hash}. "
+            "The record is not ACTIVE; use --require-active to exit 1 in this case.",
+            fg=typer.colors.YELLOW,
+        )
     else:
-        typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
+        typer.secho(f"Verified: {swarm_hash} is anchored on-chain.", fg=typer.colors.GREEN)
+    typer.echo(f"  Status: {status}")
+    typer.echo(f"  Owner:  {record.owner}")
+    if failures:
         raise typer.Exit(code=1)
 
 
@@ -3463,7 +3530,7 @@ def main(
     )] = None,
     x402_network: Annotated[Optional[str], typer.Option(
         "--x402-network",
-        help="x402 network: 'base-sepolia' (testnet) or 'base' (mainnet). [default: base-sepolia]"
+        help="x402 network: 'base-sepolia' (testnet) or 'base' (mainnet); the CAIP-2 ids 'eip155:84532' and 'eip155:8453' also work. [default: base-sepolia]"
     )] = None,
     chain: Annotated[Optional[str], typer.Option(
         "--chain",
@@ -3530,10 +3597,12 @@ def main(
     if max_pay is not None:
         _x402_config["max_auto_pay_usd"] = max_pay
     if x402_network:
-        if x402_network not in ("base-sepolia", "base"):
-            typer.secho(f"ERROR: Invalid x402 network '{x402_network}'. Use 'base-sepolia' or 'base'.", fg=typer.colors.RED, err=True)
+        network = normalize_network(x402_network)
+        if network not in ("base-sepolia", "base"):
+            typer.secho(f"ERROR: Invalid x402 network '{x402_network}'. Use 'base-sepolia' or 'base' "
+                        "(or 'eip155:84532' or 'eip155:8453').", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
-        _x402_config["network"] = x402_network
+        _x402_config["network"] = network
 
     # Free tier configuration
     if free is not None:
