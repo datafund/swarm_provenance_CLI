@@ -1490,6 +1490,64 @@ class TestPurchasePending:
         assert err.nonce == NONCE
         assert err.amount == "50000"  # the USDC payment, not the BZZ batch amount
 
+    def test_gateway_text_is_sanitized(self, paying_client, requests_mock):
+        """The pending report is printed in full: gateway text must not redraw it (#151)."""
+        from swarm_provenance_uploader.exceptions import StampPurchasePendingError
+
+        body = dict(self.PENDING, message="Pending\x1b[2K\x1b[1A\u202e" + "m" * 500,
+                    label="x402\x1b[8m-abc", transaction=TX_HASH + "\x1b[2J")
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 202, "json": body}])
+        with pytest.raises(StampPurchasePendingError) as exc_info:
+            paying_client.purchase_stamp()
+        err = exc_info.value
+        for text in (str(err), err.label, err.transaction):
+            assert "\x1b" not in text and "\u202e" not in text
+        assert str(err).startswith("Pending")
+        assert len(str(err)) <= 300
+        assert err.label == "x402 [8m-abc"
+        assert err.transaction == TX_HASH + " [2J"
+
+    def test_control_only_message_falls_back_to_default(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import StampPurchasePendingError
+
+        body = dict(self.PENDING, message="\x1b\r\n\u200b")
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 202, "json": body}])
+        with pytest.raises(StampPurchasePendingError, match="not confirmed yet"):
+            paying_client.purchase_stamp()
+
+    def test_non_string_transaction_is_ignored(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import StampPurchasePendingError
+
+        body = dict(self.PENDING, transaction={"hash": "0x" + "ee" * 32})
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 202, "json": body, "headers": {"X-Payment-Transaction": TX_HASH}}])
+        with pytest.raises(StampPurchasePendingError) as exc_info:
+            paying_client.purchase_stamp()
+        assert exc_info.value.transaction == TX_HASH  # the client's own, from the header
+
+    def test_header_transaction_is_sanitized(self, paying_client, requests_mock):
+        """Without a body transaction, the header's is the one the report prints (#151)."""
+        from swarm_provenance_uploader.exceptions import StampPurchasePendingError
+
+        body = {k: v for k, v in self.PENDING.items() if k != "transaction"}
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 202, "json": body,
+            "headers": {"X-Payment-Transaction": TX_HASH + "\x1b[2K\x1b[1A"}}])
+        with pytest.raises(StampPurchasePendingError) as exc_info:
+            paying_client.purchase_stamp()
+        assert exc_info.value.transaction == TX_HASH + " [2K [1A"
+
+    @pytest.mark.parametrize("depth", ["17\x1b[8m", True, 17.5, [17]])
+    def test_depth_other_than_int_is_dropped(self, paying_client, requests_mock, depth):
+        """The report prints Depth just before the warning: only an int is kept (#151)."""
+        from swarm_provenance_uploader.exceptions import StampPurchasePendingError
+
+        body = dict(self.PENDING, depth=depth)
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 202, "json": body}])
+        with pytest.raises(StampPurchasePendingError) as exc_info:
+            paying_client.purchase_stamp()
+        assert exc_info.value.depth is None
+
 
 class TestPaidRequestTimeouts:
     """Paid calls must wait longer than the gateway's own post-settlement work."""
@@ -2168,6 +2226,31 @@ class TestIdempotencyStopCodes:
         assert err.transaction == TX_HASH
         assert err.settled
 
+    def test_settlement_unknown_nonce_is_sanitized(self, idem_x402, requests_mock):
+        """Gateway identifiers are printed in the do-not-re-run report (#151)."""
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        original = "0x" + "f" * 64
+        err = self._stop(idem_x402, requests_mock,
+                         _idem("IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN", nonce=original + "\x1b[8m\u202e"),
+                         PaymentOutcomeUnknownError)
+        assert err.nonce == original + " [8m"
+
+    def test_settled_pending_transaction_is_sanitized(self, idem_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        answer = _idem("IDEMPOTENCY_KEY_SETTLED_PENDING", transaction=TX_HASH + "\x1b[2J\u200b")
+        answer["headers"].pop("X-Payment-Transaction")  # the body value is the one read first
+        err = self._stop(idem_x402, requests_mock, answer, PaymentSettledNotDeliveredError)
+        assert err.transaction == TX_HASH + " [2J"
+
+    def test_non_string_nonce_falls_back_to_ours(self, idem_x402, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        err = self._stop(idem_x402, requests_mock,
+                         _idem("IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN", nonce=["0x1"]), PaymentOutcomeUnknownError)
+        assert err.nonce == NONCES[0]
+
     def test_delivered_not_stored_is_its_own_error(self, idem_x402, requests_mock):
         from swarm_provenance_uploader.exceptions import PaymentDeliveredNotStoredError
 
@@ -2614,6 +2697,35 @@ class TestPaidFailureMessages:
         text = str(exc.value)
         assert "Gateway: lost" in text
         assert "\x1b" not in text and "\u202e" not in text
+
+    def test_outcome_unknown_header_transaction_is_sanitized(self, paying_client, requests_mock):
+        """The settlement transaction is printed in the do-not-re-run report (#151)."""
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 502, "json": {"code": "X", "message": "boom"},
+            "headers": {"X-Payment-Transaction": TX_HASH + "\x1b[2K\x1b[1A"}}])
+        with pytest.raises(PaymentOutcomeUnknownError) as exc:
+            paying_client.purchase_stamp()
+
+        assert exc.value.transaction == TX_HASH + " [2K [1A"
+
+    def test_settled_not_delivered_receipt_transaction_is_sanitized(self, paying_client, requests_mock):
+        import base64
+        import json
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        receipt = base64.b64encode(json.dumps({
+            "success": True, "transaction": TX_HASH + "\x1b[2K\u202e",
+            "network": "base-sepolia", "payer": PAYER}).encode()).decode()
+        requests_mock.post(f"{GW}/api/v1/data/", [PAYMENT_REQUIRED, {
+            "status_code": 500,
+            "json": {"code": "DELIVERY_FAILED_AFTER_PAYMENT", "message": "lost"},
+            "headers": {"X-PAYMENT-RESPONSE": receipt}}])
+        with pytest.raises(PaymentSettledNotDeliveredError) as exc:
+            paying_client.upload_data(b"x", DUMMY_STAMP)
+
+        assert exc.value.transaction == TX_HASH + " [2K"
 
 
 def _allowance_402(code="DAILY_STAMP_ALLOWANCE_EXHAUSTED", resets_at="2026-10-23T00:00:00Z"):
