@@ -4679,7 +4679,7 @@ class TestPaymentOutcomeReporting:
     )
     TX = "0x" + "cd" * 32
 
-    def _upload(self, mocker, **client_behaviour):
+    def _upload(self, mocker, color=False, **client_behaviour):
         mock_client = mocker.MagicMock()
         mock_client.purchase_stamp.return_value = DUMMY_STAMP
         mock_client.get_stamp.return_value = StampDetails(
@@ -4693,7 +4693,7 @@ class TestPaymentOutcomeReporting:
         with runner.isolated_filesystem():
             with open("data.txt", "w") as f:
                 f.write("data")
-            return runner.invoke(app, ["upload", "--file", "data.txt"])
+            return runner.invoke(app, ["upload", "--file", "data.txt"], color=color)
 
     def test_unknown_outcome_on_purchase(self, mocker):
         err = exceptions.PaymentOutcomeUnknownError("The paid request did not complete (ReadTimeout).", **self.PAYMENT)
@@ -4737,6 +4737,33 @@ class TestPaymentOutcomeReporting:
         assert "Do not buy another one" in result.output
         assert f"stamps list --wallet {self.PAYMENT['payer']} --full" in result.output
         assert "Idempotency-Key" not in result.output  # the gateway's hint does not apply to the CLI
+
+    def test_purchase_pending_gateway_text_cannot_hide_warning(self, mocker):
+        """An ANSI sequence in the gateway's 202 body must not reach the terminal (#151)."""
+        import requests
+        from swarm_provenance_uploader.core.gateway_client import GatewayClient
+
+        response = requests.Response()
+        response.status_code = 202
+        response._content = json.dumps({
+            "code": "PURCHASE_PENDING",
+            "message": "Pending.\x1b[2K\x1b[1A\x1b[8m",
+            "label": "x402-abc\x1b[8m",
+            "transaction": self.TX + "\x1b[8m",
+            "depth": 17,
+        }).encode()
+        response.x402_payment = dict(self.PAYMENT)
+        with pytest.raises(exceptions.StampPurchasePendingError) as exc_info:
+            GatewayClient(base_url="https://gateway.example")._raise_purchase_pending(response)
+
+        # color=True: Click strips escape sequences from non-terminal output otherwise
+        result = self._upload(mocker, color=True, purchase_stamp=exc_info.value)
+
+        assert result.exit_code == 1
+        for sequence in ("\x1b[2K", "\x1b[1A", "\x1b[8m"):
+            assert sequence not in result.output
+        assert "Pending." in result.output
+        assert "Do not buy another one" in result.output
 
     def test_upload_collection_unknown_outcome(self, mocker, tmp_path):
         (tmp_path / "a.txt").write_text("a")

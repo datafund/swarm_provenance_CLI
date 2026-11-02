@@ -845,6 +845,20 @@ class TestAdvertisedDomainCheck:
         assert client.sign_payment(self._option("base", {"name": "USD Coin", "version": "2"}))
         assert client.sign_payment(self._option("base", None))
 
+    @pytest.mark.parametrize("field", ["name", "version"])
+    def test_advertised_value_is_escaped(self, mock_eth_deps, field):
+        """The advertised value is gateway text: show it escaped, not raw (#151)."""
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(network="base", skip_domain_validation=True)
+        extra = {"name": "USD Coin", "version": "2"}
+        extra[field] = "USD\x1b[2K\x1b[1ACoin\u202e"
+        with pytest.raises(X402ConfigurationError) as exc_info:
+            client.sign_payment(self._option("base", extra))
+        text = str(exc_info.value)
+        assert "\x1b" not in text and "\u202e" not in text
+        assert "\\x1b[2K" in text
+
     def test_numeric_extra_version_accepted(self, mock_eth_deps):
         from swarm_provenance_uploader.core.x402_client import X402Client
 
