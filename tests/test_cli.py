@@ -4202,6 +4202,58 @@ class TestUploadCollectionCommand:
             assert output["file_count"] == 1
             assert len(output["files"]) == 1
 
+    @staticmethod
+    def _separate_stderr_runner():
+        """A runner that keeps stderr out of result.stdout (Click 8.1 mixes them by default)."""
+        try:
+            return CliRunner(mix_stderr=False)
+        except TypeError:  # Click 8.2+ always keeps them apart
+            return CliRunner()
+
+    def _delivered_not_stored(self, mocker, *args):
+        """Run upload-collection where the manifest upload ends in DELIVERED_NOT_STORED (#153)."""
+        mock_client = self._mock_gateway_for_collection(mocker)
+        mock_client.upload_manifest.side_effect = exceptions.PaymentDeliveredNotStoredError(
+            "succeeded and was paid once", transaction="0x" + "cd" * 32,
+            payer="0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00",
+            code="IDEMPOTENCY_KEY_DELIVERED_NOT_STORED",
+        )
+        with runner.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/data.csv", "w") as f:
+                f.write("a,b\n1,2")
+            return self._separate_stderr_runner().invoke(app, ["upload-collection", "mydir", *args])
+
+    def test_upload_collection_json_delivered_not_stored_prints_json(self, mocker):
+        """With --json, a result the gateway could not return still gives a JSON document (#153)."""
+        result = self._delivered_not_stored(mocker, "--json")
+
+        assert result.exit_code == 0, result.output
+        json_start = result.stdout.index("{")
+        output, end = json.JSONDecoder().raw_decode(result.stdout, json_start)
+        assert result.stdout[end:].strip() == ""  # nothing after the JSON document
+        assert output["swarm_reference"] is None
+        assert output["status"] == "delivered_not_stored"
+        assert output["transaction"] == "0x" + "cd" * 32
+        assert output["payer"] == "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
+        assert output["idempotency_key"] is None
+        assert output["stamp_id"] == DUMMY_STAMP
+        assert output["file_count"] == 1
+        assert [f["path"] for f in output["files"]] == ["data.csv"]
+        assert "ERROR" not in result.stdout
+        assert "The collection upload succeeded and was paid once" in result.stderr
+        assert "0x" + "cd" * 32 in result.stderr
+
+    def test_upload_collection_delivered_not_stored_without_json_unchanged(self, mocker):
+        """Without --json, the explanation is printed as before and no JSON document (#153)."""
+        result = self._delivered_not_stored(mocker)
+
+        assert result.exit_code == 0, result.output
+        assert "{" not in result.stdout
+        assert "The collection upload succeeded and was paid once" in result.stderr
+        assert "Do not pay again" in result.stderr
+
     def test_upload_collection_not_a_directory(self):
         """Tests error when path is a file, not a directory."""
         with runner.isolated_filesystem():
