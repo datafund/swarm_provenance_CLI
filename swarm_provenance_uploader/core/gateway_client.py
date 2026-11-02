@@ -103,6 +103,14 @@ def _sanitize_gateway_text(text: Optional[str], limit: int = 80) -> Optional[str
     return text or None
 
 
+def _gateway_identifier(value) -> Optional[str]:
+    """A gateway-sent identifier (transaction, nonce) cleaned for the payment report.
+
+    Values that are not strings are ignored (None), so the caller's own value is kept.
+    """
+    return _sanitize_gateway_text(value) if isinstance(value, str) else None
+
+
 class GatewayClient:
     """Client for provenance-gateway.datafund.io API.
 
@@ -901,11 +909,14 @@ class GatewayClient:
         key = payment.get("idempotency_key")
         first = dict(outstanding or payment)
         first["idempotency_key"] = key
-        transaction = body.get("transaction") or response.headers.get("X-Payment-Transaction")
+        # Gateway-authored, printed in the do-not-re-run report: cleaned (#151)
+        transaction = (_gateway_identifier(body.get("transaction"))
+                       or _gateway_identifier(response.headers.get("X-Payment-Transaction")))
         transaction = transaction if transaction and transaction != "unknown" else None
 
         if code == "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN":
-            first.update(nonce=body.get("nonce") or first.get("nonce"), transaction=None,
+            first.update(nonce=_gateway_identifier(body.get("nonce")) or first.get("nonce"),
+                         transaction=None,
                          valid_before=first.get("valid_before") if outstanding else None)
             raise PaymentOutcomeUnknownError(
                 "The first request with this Idempotency-Key was sent for settlement and no "
@@ -1154,11 +1165,13 @@ class GatewayClient:
         """
         body = self._error_body(response)
         payment = dict(getattr(response, "x402_payment", None) or {})
-        payment["transaction"] = body.get("transaction") or payment.get("transaction")
+        # Gateway-authored text, printed in the payment report: cleaned (#151)
+        payment["transaction"] = _gateway_identifier(body.get("transaction")) or payment.get("transaction")
+        label = body.get("label")
         raise StampPurchasePendingError(
-            body.get("message")
+            _sanitize_gateway_text(body.get("message"), limit=300)
             or "Payment received, but the stamp purchase is not confirmed yet.",
-            label=body.get("label"),
+            label=_sanitize_gateway_text(label, limit=64) if isinstance(label, str) else label,
             depth=body.get("depth"),
             lookup=body.get("lookup"),
             status_code=response.status_code,
