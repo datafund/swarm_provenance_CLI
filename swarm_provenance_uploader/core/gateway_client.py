@@ -830,10 +830,13 @@ class GatewayClient:
         response: requests.Response,
         payment_result: Optional[X402PaymentResponse],
     ) -> Optional[str]:
-        """The settlement transaction hash, from the header or the payment response."""
-        tx = response.headers.get("X-Payment-Transaction")
+        """The settlement transaction hash, from the header or the payment response.
+
+        Gateway-authored and printed in the payment report, so it is cleaned (#151).
+        """
+        tx = _gateway_identifier(response.headers.get("X-Payment-Transaction"))
         if not tx and payment_result:
-            tx = payment_result.transaction
+            tx = _gateway_identifier(payment_result.transaction)
         return tx if tx and tx != "unknown" else None
 
     @staticmethod
@@ -1168,11 +1171,12 @@ class GatewayClient:
         # Gateway-authored text, printed in the payment report: cleaned (#151)
         payment["transaction"] = _gateway_identifier(body.get("transaction")) or payment.get("transaction")
         label = body.get("label")
+        depth = body.get("depth")
         raise StampPurchasePendingError(
             _sanitize_gateway_text(body.get("message"), limit=300)
             or "Payment received, but the stamp purchase is not confirmed yet.",
             label=_sanitize_gateway_text(label, limit=64) if isinstance(label, str) else label,
-            depth=body.get("depth"),
+            depth=depth if isinstance(depth, int) and not isinstance(depth, bool) else None,
             lookup=body.get("lookup"),
             status_code=response.status_code,
             code=body.get("code"),

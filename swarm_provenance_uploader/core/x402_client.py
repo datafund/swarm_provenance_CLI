@@ -535,9 +535,11 @@ class X402Client:
             # EIP-712 name and version are strings; a gateway sending version 2
             # as a number means the same domain.
             if advertised is not None and str(advertised) != domain.get(field):
-                # repr() escapes control characters in the gateway's value (#151)
+                # Gateway text: shortened, and repr() escapes its control characters (#151)
+                shown = str(advertised)
+                shown = shown[:64] + "…" if len(shown) > 64 else shown
                 raise X402ConfigurationError(
-                    f"Gateway advertises EIP-712 {field} {str(advertised)!r} for {self.network}, "
+                    f"Gateway advertises EIP-712 {field} {shown!r} for {self.network}, "
                     f"but the USDC contract uses '{domain.get(field)}'. The payment would be "
                     "rejected at verification; nothing was signed. The gateway's x402 "
                     "configuration needs updating."
