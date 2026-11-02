@@ -3500,6 +3500,15 @@ class TimeExhausted(Exception):
     """Stand-in for web3.exceptions.TimeExhausted: the receipt wait timed out."""
 
 
+def _format_hash(digest):
+    """A hash as the installed web3 formats the one send_raw_transaction returns."""
+    try:
+        from hexbytes import HexBytes
+    except ImportError:
+        return digest.hex()
+    return HexBytes(digest).hex()
+
+
 class TestSendTransactionTransportFailures:
     """A transport failure before the send is a connection error; after it, the outcome is unknown."""
 
@@ -3508,7 +3517,7 @@ class TestSendTransactionTransportFailures:
     def _signed_hash(self):
         from swarm_provenance_uploader.core.swarm_verify import keccak256
 
-        return keccak256(self.SIGNED).hex()
+        return _format_hash(keccak256(self.SIGNED))
 
     @pytest.mark.parametrize(
         "step",
@@ -3544,6 +3553,46 @@ class TestSendTransactionTransportFailures:
         assert "before the transaction was sent" in str(exc_info.value)
         assert exc_info.value.rpc_url == client._provider.rpc_url
         web3.eth.send_raw_transaction.assert_not_called()
+
+    def test_balance_check_failure_is_connection_error(self, mock_chain_deps):
+        """The pre-flight balance read (wallet.get_balance) failing is a failure before the send."""
+        import requests
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
+        web3.eth.get_balance.side_effect = requests.exceptions.ConnectionError("connection refused")
+
+        with pytest.raises(ChainConnectionError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert not isinstance(exc_info.value, ChainTransactionError)
+        assert "before the transaction was sent" in str(exc_info.value)
+        web3.eth.get_balance.assert_called()
+        web3.eth.send_raw_transaction.assert_not_called()
+
+    def test_signed_hash_format_matches_send_result(self):
+        """The computed hash has the format of web3's HexBytes.hex(), like the returned hash."""
+        hexbytes = pytest.importorskip("hexbytes")
+        from swarm_provenance_uploader.core.chain_client import _signed_tx_hash
+        from swarm_provenance_uploader.core.swarm_verify import keccak256
+
+        raw = bytes.fromhex("02f8") + b"\x01" * 40
+        assert _signed_tx_hash(raw) == hexbytes.HexBytes(keccak256(raw)).hex()
+
+    def test_signed_hash_format_with_0x_prefix(self, monkeypatch):
+        """With a hexbytes whose hex() adds 0x (older versions), the computed hash has it too."""
+        pytest.importorskip("hexbytes")
+        import hexbytes
+        from swarm_provenance_uploader.core.chain_client import _signed_tx_hash
+        from swarm_provenance_uploader.core.swarm_verify import keccak256
+
+        class PrefixedHexBytes(bytes):
+            def hex(self):
+                return "0x" + bytes(self).hex()
+
+        monkeypatch.setattr(hexbytes, "HexBytes", PrefixedHexBytes)
+        raw = b"\x02" * 10
+        assert _signed_tx_hash(raw) == "0x" + keccak256(raw).hex()
 
     def test_failure_in_send_raw_transaction_outcome_unknown(self, mock_chain_deps):
         import requests

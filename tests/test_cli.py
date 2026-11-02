@@ -6816,3 +6816,107 @@ class TestSendOutcomeUnknown:
         assert output["unconfirmed"]["error"] == "outcome_unknown"
         assert output["unconfirmed"]["tx_hash"] == self.STEP_TX
         assert "error" not in output
+
+    def _protect_client(self, mocker):
+        from swarm_provenance_uploader.models import (
+            AnchorResult, ChainProvenanceRecord, DataStatusEnum, TransformResult,
+        )
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF, owner=DUMMY_ADDRESS, timestamp=1700000000,
+            data_type="swarm-provenance", status=DataStatusEnum.ACTIVE,
+            accessors=[], transformations=[],
+        )
+        mock_client.anchor.return_value = AnchorResult(
+            tx_hash=self.ANCHOR_TX, block_number=1, gas_used=1, explorer_url=None,
+            swarm_hash="c" * 64, data_type="swarm-provenance", owner=DUMMY_ADDRESS,
+        )
+        mock_client.transform.return_value = TransformResult(
+            tx_hash=self.TRANSFORM_TX, block_number=2, gas_used=1, explorer_url=None,
+            original_hash=DUMMY_SWARM_REF, new_hash="c" * 64, description="d",
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+        return mock_client
+
+    ANCHOR_TX = "0x" + "a1" * 32
+    TRANSFORM_TX = "0x" + "b2" * 32
+    PROTECT = ["chain", "protect", DUMMY_SWARM_REF, "c" * 64, "--description", "d", "--anchor-new"]
+    TRANSFORM = ["chain", "transform", DUMMY_SWARM_REF, "c" * 64, "--description", "d", "--restrict-original"]
+
+    @pytest.mark.parametrize(
+        "step,method,event,done",
+        [
+            ("anchor", "anchor", "DataRegistered", []),
+            ("transform", "transform", "DataTransformed", ["ANCHOR_TX"]),
+        ],
+        ids=["anchor", "transform"],
+    )
+    def test_protect_step(self, mocker, step, method, event, done):
+        client = self._protect_client(mocker)
+        getattr(client, method).side_effect = self._error(event)
+
+        result = runner.invoke(app, self.PROTECT)
+        assert result.exit_code == 1, result.output
+        assert "Outcome unknown" in result.output
+        assert "Transaction failed" not in result.output
+        assert self.STEP_TX in result.output
+        assert self.STEP_EXPLORER in result.output
+        error_at = result.output.index("ERROR:")
+        for name in done:
+            assert -1 < result.output.find(getattr(self, name)) < error_at
+        assert "Protect complete" not in result.output
+        client.set_status.assert_not_called()
+
+        result = runner.invoke(app, self.PROTECT + ["--json"])
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.output)
+        assert output["failed_step"] == step
+        assert output["partial_failure"] is bool(done)
+        assert output["unconfirmed"]["error"] == "outcome_unknown"
+        assert output["unconfirmed"]["tx_hash"] == self.STEP_TX
+        assert output["unconfirmed"]["event"] == event
+        assert "error" not in output
+        assert output["restrict"] is None
+
+    def _not_verified(self):
+        from swarm_provenance_uploader.exceptions import TransactionNotVerifiedError
+
+        return TransactionNotVerifiedError(
+            f"Not verified: transaction {self.STEP_TX} was mined",
+            tx_hash=self.STEP_TX, event_name="DataStatusChanged", expected_count=1,
+            contract_address=DUMMY_ADDRESS, explorer_url=self.STEP_EXPLORER, reason="boom",
+        )
+
+    @pytest.mark.parametrize("args", ["PROTECT", "TRANSFORM"])
+    @pytest.mark.parametrize("kind", ["outcome_unknown", "not_verified"])
+    def test_restrict_hint_after_unconfirmed_step(self, mocker, args, kind):
+        """The manual restrict hint says to check the transaction first."""
+        client = self._protect_client(mocker)
+        client.set_status.side_effect = (
+            self._error("DataStatusChanged") if kind == "outcome_unknown" else self._not_verified()
+        )
+
+        result = runner.invoke(app, getattr(self, args))
+
+        assert result.exit_code == 1, result.output
+        assert (
+            "After you have checked the transaction, restrict manually: "
+            f"swarm-prov-upload chain status {DUMMY_SWARM_REF} --set restricted"
+        ) in result.output
+        assert "  Restrict manually:" not in result.output
+
+    @pytest.mark.parametrize("args", ["PROTECT", "TRANSFORM"])
+    def test_restrict_hint_after_plain_failure_unchanged(self, mocker, args):
+        from swarm_provenance_uploader.exceptions import ChainTransactionError
+
+        client = self._protect_client(mocker)
+        client.set_status.side_effect = ChainTransactionError("reverted", tx_hash=self.STEP_TX)
+
+        result = runner.invoke(app, getattr(self, args))
+
+        assert result.exit_code == 1, result.output
+        assert (
+            f"  Restrict manually: swarm-prov-upload chain status {DUMMY_SWARM_REF} --set restricted"
+        ) in result.output
+        assert "After you have checked the transaction" not in result.output
