@@ -28,6 +28,26 @@ class ChainConfigurationError(ChainError):
     pass
 
 
+class ChainIdMismatchError(ChainConfigurationError):
+    """The RPC endpoint is on another chain than the configured preset.
+
+    Raised for the ``base`` and ``base-sepolia`` presets, when the client
+    starts or before its first signature. Nothing has been signed or sent.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        chain: str = None,
+        expected_chain_id: int = None,
+        actual_chain_id: int = None,
+    ):
+        super().__init__(message)
+        self.chain = chain
+        self.expected_chain_id = expected_chain_id
+        self.actual_chain_id = actual_chain_id
+
+
 class ChainConnectionError(ChainError):
     """Failed to connect to RPC endpoint.
 

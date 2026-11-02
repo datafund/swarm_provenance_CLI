@@ -20,21 +20,24 @@ class ProvenanceMetadata(BaseModel):
 class StampDetails(BaseModel):
     """Details of a postage stamp batch."""
     batchID: str = Field(description="The batch ID (stamp ID)")
-    utilization: Optional[int] = Field(default=None, description="Utilization percentage (may be null)")
-    usable: bool = Field(description="Whether the stamp is usable for uploads")
+    utilization: Optional[int] = Field(default=None, description="Raw bucket fill level (not a percentage; may be null)")
+    utilizationPercent: Optional[float] = Field(default=None, description="Utilization as a percentage (0-100), from the gateway; null when unknown")
+    usable: Optional[bool] = Field(default=None, description="Whether the stamp is usable for uploads (null when the gateway cannot tell)")
     label: Optional[str] = Field(default=None, description="Optional label for the stamp")
     depth: int = Field(description="Stamp depth")
     amount: str = Field(description="Stamp amount (as string for large numbers)")
     bucketDepth: int = Field(description="Bucket depth")
-    immutableFlag: bool = Field(description="Whether the stamp is immutable")
+    immutableFlag: Optional[bool] = Field(default=None, description="Whether the stamp is immutable (null when not available)")
     batchTTL: int = Field(description="Time to live in seconds")
     # Optional fields that may or may not be present depending on API version
     blockNumber: Optional[int] = Field(default=None, description="Block number when stamp was created")
-    exists: Optional[bool] = Field(default=None, description="Whether the stamp exists")
+    # Not sent by the gateway (its StampDetails has no `exists`); kept so code
+    # that reads it keeps working. It is always None from the gateway.
+    exists: Optional[bool] = Field(default=None, description="Not sent by the gateway; always None from it")
     start: Optional[int] = Field(default=None, description="Start block number")
     owner: Optional[str] = Field(default=None, description="Owner address")
     expectedExpiration: Optional[str] = Field(default=None, description="Expected expiration date")
-    local: Optional[bool] = Field(default=None, description="Whether stamp is local")
+    local: Optional[bool] = Field(default=None, description="Whether the batch is on this gateway's own Bee node")
 
 
 class StampListResponse(BaseModel):
@@ -78,7 +81,7 @@ class DataUploadResponse(BaseModel):
 class DataDownloadResponse(BaseModel):
     """Response from downloading data as JSON."""
     data: str = Field(description="Base64 encoded data")
-    content_type: str = Field(description="Content type of the data")
+    content_type: Optional[str] = Field(default=None, description="Content type of the data, if available")
     size: int = Field(description="Size of the data in bytes")
     reference: str = Field(description="Swarm reference hash")
 
@@ -86,14 +89,14 @@ class DataDownloadResponse(BaseModel):
 class WalletResponse(BaseModel):
     """Response from wallet endpoint."""
     walletAddress: str = Field(description="Ethereum wallet address")
-    bzzBalance: str = Field(description="BZZ balance (as string for precision)")
+    bzzBalance: Optional[str] = Field(default=None, description="BZZ balance (as string for precision); null when the node does not report it")
 
 
 class ChequebookResponse(BaseModel):
     """Response from chequebook endpoint."""
     chequebookAddress: str = Field(description="Chequebook contract address")
-    availableBalance: str = Field(description="Available balance")
-    totalBalance: str = Field(description="Total balance")
+    availableBalance: Optional[str] = Field(default=None, description="Available balance; null when the node does not report it")
+    totalBalance: Optional[str] = Field(default=None, description="Total balance; null when the node does not report it")
 
 
 # --- x402 Payment Models ---
@@ -329,10 +332,23 @@ class ChainWalletInfo(BaseModel):
 # --- Collection / Manifest Upload Models ---
 
 class ManifestUploadTiming(BaseModel):
-    """Optional timing breakdown from manifest upload."""
-    stamp_check_ms: Optional[int] = Field(default=None, description="Time spent checking stamp in milliseconds")
-    upload_ms: Optional[int] = Field(default=None, description="Time spent uploading in milliseconds")
-    total_ms: Optional[int] = Field(default=None, description="Total request time in milliseconds")
+    """Optional timing breakdown from manifest upload.
+
+    The gateway sends milliseconds as floats, under the names below
+    (swarm_connect `ManifestUploadTiming`). `stamp_check_ms` and `upload_ms`
+    are older names, kept for gateways that still send them.
+    """
+    stamp_validate_ms: Optional[float] = Field(default=None, description="Time spent validating the stamp, in milliseconds")
+    file_read_ms: Optional[float] = Field(default=None, description="Time spent reading the uploaded file, in milliseconds")
+    bee_upload_ms: Optional[float] = Field(default=None, description="Time spent uploading to Bee, in milliseconds")
+    total_ms: Optional[float] = Field(default=None, description="Total request time in milliseconds")
+    tar_validate_ms: Optional[float] = Field(default=None, description="Time spent validating the TAR archive, in milliseconds")
+    tar_count_ms: Optional[float] = Field(default=None, description="Time spent counting files in the TAR archive, in milliseconds")
+    file_count: Optional[int] = Field(default=None, description="Number of files in the TAR archive")
+    ms_per_file: Optional[float] = Field(default=None, description="Average milliseconds per file")
+    files_per_second: Optional[float] = Field(default=None, description="Upload throughput in files per second")
+    stamp_check_ms: Optional[float] = Field(default=None, description="Older name: time spent checking the stamp, in milliseconds")
+    upload_ms: Optional[float] = Field(default=None, description="Older name: time spent uploading, in milliseconds")
 
 
 class ManifestUploadResponse(BaseModel):

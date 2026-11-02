@@ -196,7 +196,7 @@ swarm-prov-upload x402 info
 | `X402_ENABLED` | Enable x402 payments | `false` |
 | `X402_PRIVATE_KEY` | Wallet private key (keep secret!) | - |
 | `X402_PRIVATE_KEY_ENV` | Name of the variable that holds the key. When set to another name, only that variable is read. A value that is not a valid variable name, or that looks like a key, is rejected and not printed | `X402_PRIVATE_KEY` |
-| `X402_NETWORK` | `base-sepolia` (testnet) or `base` (mainnet) | `base-sepolia` |
+| `X402_NETWORK` | `base-sepolia` (testnet) or `base` (mainnet). The CAIP-2 ids `eip155:84532` and `eip155:8453` also work | `base-sepolia` |
 | `X402_AUTO_PAY` | Auto-pay without prompts | `false` |
 | `X402_MAX_AUTO_PAY_USD` | Maximum auto-pay amount per request | `1.00` |
 | `X402_EXPECTED_PAY_TO` | Only pay this recipient address (optional) | not set |
@@ -212,7 +212,7 @@ The signing key and `x402 status` use the same lookup: the variable named by `X4
 | `--x402` / `--no-x402` | Enable/disable x402 for this command |
 | `--auto-pay` / `--no-auto-pay` | Enable/disable auto-pay |
 | `--max-pay FLOAT` | Maximum auto-pay amount in USD |
-| `--x402-network TEXT` | Network: `base-sepolia` or `base` |
+| `--x402-network TEXT` | Network: `base-sepolia` or `base` (or the CAIP-2 ids `eip155:84532` and `eip155:8453`) |
 | `--idempotency-key TEXT` | Idempotency-Key for this command's paid requests; pass the key printed by a failed run to repeat it without paying twice (on a gateway that supports it) |
 
 ### Testnet setup
@@ -280,8 +280,10 @@ swarm-prov-upload chain get <swarm_hash> --json
 swarm-prov-upload chain get <swarm_hash> --follow           # walk transformation chain
 swarm-prov-upload chain get <swarm_hash> --follow --depth 3 # limit traversal depth
 
-# Verify a hash is registered on-chain (exit code 0=yes, 1=no)
+# Verify a hash is registered on-chain (exit code 0=yes, 1=no); prints its status and owner
 swarm-prov-upload chain verify <swarm_hash>
+swarm-prov-upload chain verify <swarm_hash> --require-active   # exit 1 if RESTRICTED or DELETED
+swarm-prov-upload chain verify <swarm_hash> --owner <address>  # exit 1 if another address owns it
 
 # Query or set data status
 swarm-prov-upload chain status <swarm_hash>                 # show current status
@@ -324,9 +326,9 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
-| `CHAIN_NAME` | `base-sepolia` (testnet) or `base` (mainnet) | `base-sepolia` |
+| `CHAIN_NAME` | `base-sepolia` (testnet), `base` (mainnet), or `localhost` (local development node; takes the chain ID the node reports) | `base-sepolia` |
 | `PROVENANCE_WALLET_KEY` | Wallet private key (keep secret!) | - |
-| `CHAIN_RPC_URL` | Custom RPC URL (optional) | Uses preset |
+| `CHAIN_RPC_URL` | Custom RPC URL (optional). With `base` or `base-sepolia`, it must report the preset chain ID | Uses preset |
 | `CHAIN_CONTRACT` | Custom contract address (optional) | Uses preset |
 | `CHAIN_EXPLORER_URL` | Custom block explorer URL (optional) | Uses preset |
 | `CHAIN_GAS_LIMIT` | Explicit gas limit (optional, skips RPC estimation) | Auto-estimated |
