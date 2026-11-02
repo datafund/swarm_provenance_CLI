@@ -4457,6 +4457,82 @@ class TestUploadCollectionCommand:
             mock_client.upload_manifest.assert_not_called()
             assert f"--stamp-id {DUMMY_STAMP}" in result.output
 
+    @pytest.mark.parametrize("args", [
+        ["--stamp-retries", "0"], ["--stamp-retries", "-1"], ["--stamp-interval", "-1"],
+    ])
+    def test_upload_collection_rejects_bad_stamp_check_values(self, mocker, args):
+        """Tests that a retry count below 1 or a negative interval is a usage error, before a stamp is bought."""
+        mock_client = self._mock_gateway_for_collection(mocker)
+
+        with runner.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/file.txt", "w") as f:
+                f.write("data")
+
+            result = runner.invoke(app, ["upload-collection", "mydir", *args])
+
+            assert result.exit_code == 2
+            mock_client.purchase_stamp.assert_not_called()
+            mock_client.upload_manifest.assert_not_called()
+
+    @pytest.mark.parametrize("failure", [
+        "purchase_error", "pool_not_enabled", "pool_error", "payment_required",
+        "payment_outcome_unknown", "never_usable", "upload_error", "tar_error",
+    ])
+    def test_upload_collection_removes_temp_tar_on_failure(self, mocker, tmp_path, failure):
+        """Tests that the temp folder with the TAR is removed on every exit after it is created."""
+        mock_client = self._mock_gateway_for_collection(mocker)
+        temp_dir = tmp_path / "collection-tmp"
+        temp_dir.mkdir()
+        mocker.patch("tempfile.mkdtemp", return_value=str(temp_dir))
+        args = []
+        if failure == "purchase_error":
+            mock_client.purchase_stamp.side_effect = ConnectionError("nope")
+        elif failure == "pool_not_enabled":
+            mock_client.acquire_stamp_from_pool.side_effect = exceptions.PoolNotEnabledError("off")
+            args = ["--usePool"]
+        elif failure == "pool_error":
+            mock_client.acquire_stamp_from_pool.side_effect = ConnectionError("nope")
+            args = ["--usePool"]
+        elif failure == "payment_required":
+            mock_client.purchase_stamp.side_effect = exceptions.PaymentRequiredError("pay")
+        elif failure == "payment_outcome_unknown":
+            mock_client.purchase_stamp.side_effect = exceptions.PaymentOutcomeUnknownError("timed out")
+        elif failure == "never_usable":
+            mock_client.get_stamp.return_value = _usable_stamp(DUMMY_STAMP, usable=False)
+            args = ["--stamp-retries", "1"]
+        elif failure == "upload_error":
+            mock_client.upload_manifest.side_effect = ConnectionError("nope")
+        elif failure == "tar_error":
+            mocker.patch("swarm_provenance_uploader.cli.file_utils.create_tar_from_directory",
+                         side_effect=OSError("disk full"))
+
+        data_dir = tmp_path / "mydir"
+        data_dir.mkdir()
+        (data_dir / "file.txt").write_text("data")
+
+        result = runner.invoke(app, ["upload-collection", str(data_dir), *args])
+
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(result.exception, SystemExit), result.exception
+        assert not temp_dir.exists()
+
+    def test_upload_collection_removes_temp_tar_on_success(self, mocker, tmp_path):
+        """Tests that the temp folder with the TAR is removed after a successful upload."""
+        self._mock_gateway_for_collection(mocker)
+        temp_dir = tmp_path / "collection-tmp"
+        temp_dir.mkdir()
+        mocker.patch("tempfile.mkdtemp", return_value=str(temp_dir))
+        data_dir = tmp_path / "mydir"
+        data_dir.mkdir()
+        (data_dir / "file.txt").write_text("data")
+
+        result = runner.invoke(app, ["upload-collection", str(data_dir)])
+
+        assert result.exit_code == 0, result.output
+        assert not temp_dir.exists()
+
     @staticmethod
     def _manifest_response():
         from swarm_provenance_uploader.models import ManifestUploadResponse
@@ -5299,6 +5375,17 @@ class TestStampIdVisibility:
         assert result.exit_code == 1
         assert "may have been taken" in result.output
         assert f"--stamp-id {self.STAMP}" in result.output
+
+    @pytest.mark.parametrize("args", [
+        ["--stamp-retries", "0"], ["--stamp-retries", "-1"], ["--stamp-interval", "-1"],
+    ])
+    def test_upload_rejects_bad_stamp_check_values(self, mocker, args):
+        """Tests that a retry count below 1 or a negative interval is a usage error, before a stamp is bought."""
+        client = self._client(mocker)
+        result = self._upload(*args)
+        assert result.exit_code == 2
+        client.purchase_stamp.assert_not_called()
+        client.upload_data.assert_not_called()
 
     def test_stamp_never_usable_gives_hint(self, mocker):
         self._client(mocker, usable=False)
