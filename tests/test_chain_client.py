@@ -2567,6 +2567,14 @@ class TestProvenanceChainFailClosed:
         )
         assert [r.data_hash for r in chain] == [a, b]
 
+    def test_prefixed_upper_case_start_hash_visited_once(self, mock_chain_deps):
+        """A 0x-prefixed upper-case start hash is the same node as its child's parent."""
+        a, b = "ab" * 32, "cd" * 32
+        chain = self._chain(mock_chain_deps, {a: [b]}, "0x" + a.upper())
+        assert [r.data_hash for r in chain] == [a, b]
+        assert chain[0].parents == []
+        assert chain[1].parents == [a]
+
     def test_default_depth_is_10(self, mock_chain_deps):
         """max_depth=None walks 10 levels: 11 nodes of a 13-node line."""
         nodes = [_hex_hash(n) for n in range(1, 14)]
@@ -2643,6 +2651,32 @@ class TestProvenanceChainFailClosedEventPaths:
             chain = client.get_provenance_chain(swarm_hash=DUMMY_HASH, max_depth=1)
         assert chain[0].data_hash == DUMMY_HASH
         assert chain[0].parents == [parent]
+
+
+    def test_local_index_prefixed_upper_case_start_hash(self, mock_chain_deps):
+        """Event index: a 0x-prefixed upper-case start hash finds its edges, once."""
+        from swarm_provenance_uploader.chain.event_cache import clear_registry
+
+        clear_registry()
+        a, b = "ab" * 32, "cd" * 32
+
+        def get_data_record(data_hash):
+            mock_call = MagicMock()
+            mock_call.call.return_value = (
+                data_hash, DUMMY_ADDRESS, 1700000000, "swarm-provenance",
+                b"\x00" * 32, [], [], 0,
+            )
+            return mock_call
+
+        mock_chain_deps["contract"].functions.getDataRecord = get_data_record
+        mock_cache = MagicMock()
+        mock_cache.get_maps.return_value = ({a: [(b, "step")]}, {b: [(a, "step")]})
+        with patch("swarm_provenance_uploader.chain.event_cache.get_cache", return_value=mock_cache):
+            client = self._v1_client(mock_chain_deps, 0)
+            chain = client.get_provenance_chain(swarm_hash="0x" + a.upper())
+        assert [r.data_hash for r in chain] == [a, b]
+        assert chain[0].parents == []
+        assert chain[1].parents == [a]
 
 
 class TestTraversalErrorWithWeb3:
