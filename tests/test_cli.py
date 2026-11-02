@@ -4216,7 +4216,7 @@ class TestUploadCollectionCommand:
         mock_client.upload_manifest.side_effect = exceptions.PaymentDeliveredNotStoredError(
             "succeeded and was paid once", transaction="0x" + "cd" * 32,
             payer="0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00",
-            code="IDEMPOTENCY_KEY_DELIVERED_NOT_STORED",
+            code="IDEMPOTENCY_KEY_DELIVERED_NOT_STORED", idempotency_key="retry-123",
         )
         with runner.isolated_filesystem():
             import os
@@ -4233,11 +4233,15 @@ class TestUploadCollectionCommand:
         json_start = result.stdout.index("{")
         output, end = json.JSONDecoder().raw_decode(result.stdout, json_start)
         assert result.stdout[end:].strip() == ""  # nothing after the JSON document
+        from swarm_provenance_uploader.models import CollectionProvenanceMetadata
+        # The success document's keys, in order, then the keys that identify the payment
+        assert list(output) == list(CollectionProvenanceMetadata.model_fields) + [
+            "status", "transaction", "payer", "idempotency_key"]
         assert output["swarm_reference"] is None
         assert output["status"] == "delivered_not_stored"
         assert output["transaction"] == "0x" + "cd" * 32
         assert output["payer"] == "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
-        assert output["idempotency_key"] is None
+        assert output["idempotency_key"] == "retry-123"
         assert output["stamp_id"] == DUMMY_STAMP
         assert output["file_count"] == 1
         assert [f["path"] for f in output["files"]] == ["data.csv"]
@@ -4531,6 +4535,7 @@ class TestUploadCollectionCommand:
     @pytest.mark.parametrize("failure", [
         "purchase_error", "pool_not_enabled", "pool_error", "payment_required",
         "payment_outcome_unknown", "never_usable", "upload_error", "tar_error",
+        "delivered_not_stored_json",
     ])
     def test_upload_collection_removes_temp_tar_on_failure(self, mocker, tmp_path, failure):
         """Tests that the temp folder with the TAR is removed on every exit after it is created."""
@@ -4559,6 +4564,11 @@ class TestUploadCollectionCommand:
         elif failure == "tar_error":
             mocker.patch("swarm_provenance_uploader.cli.file_utils.create_tar_from_directory",
                          side_effect=OSError("disk full"))
+        elif failure == "delivered_not_stored_json":
+            # Not a failure (exit 0), but the result is not returned: the JSON path leaves the try block
+            mock_client.upload_manifest.side_effect = exceptions.PaymentDeliveredNotStoredError(
+                "succeeded and was paid once", transaction="0x" + "cd" * 32)
+            args = ["--json"]
 
         data_dir = tmp_path / "mydir"
         data_dir.mkdir()
@@ -4566,7 +4576,10 @@ class TestUploadCollectionCommand:
 
         result = runner.invoke(app, ["upload-collection", str(data_dir), *args])
 
-        assert result.exit_code != 0
+        if failure == "delivered_not_stored_json":
+            assert result.exit_code == 0, result.output
+        else:
+            assert result.exit_code != 0
         assert result.exception is None or isinstance(result.exception, SystemExit), result.exception
         assert not temp_dir.exists()
 
