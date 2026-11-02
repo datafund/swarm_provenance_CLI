@@ -395,8 +395,9 @@ class GatewayClient:
         requirements = x402_client.parse_402_response(body)
         option = x402_client.select_payment_option(requirements)
         amount_usd = x402_client.format_amount_usd(option.maxAmountRequired)
-        # Exact, and no float overflow for an absurdly long amount
-        amount_float = Decimal(int(option.maxAmountRequired)).scaleb(-6)
+        # Exact, and no float overflow for an absurdly long amount. Built from
+        # a string: scaleb() would round to the 28-digit Decimal context (#152).
+        amount_float = Decimal(f"{int(option.maxAmountRequired)}E-6")
 
         if verbose:
             print(f"DEBUG: Selected payment option: {amount_usd} on {option.network}")
