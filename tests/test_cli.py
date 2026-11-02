@@ -5114,7 +5114,7 @@ class TestPaymentPromptReviewCases:
 class TestAutoPayLimitValidation:
     """A non-numeric, NaN, infinite or negative auto-pay limit is a configuration error (#152)."""
 
-    BAD_LIMITS = ["nan", "inf", "-1", "-0.01", "abc", "0,30"]
+    BAD_LIMITS = ["nan", "inf", "-1", "-0.01", "abc", "0,30", "0_30", "1_0.0_0", "\u0663"]
 
     @pytest.mark.parametrize("value", BAD_LIMITS)
     def test_invalid_max_pay_flag_rejected(self, mocker, value):
@@ -5198,7 +5198,9 @@ class TestAutoPayLimitValidation:
 
     @pytest.mark.parametrize("value, shown", [("1e30", "$1E+30"), ("1e400", "$1E+400"),
                                               ("1000000000000000.5", "$1.0000000000000005E+15"),
-                                              ("999999999999999.25", "$999999999999999.25"), ("0.004", "$0.004000")])
+                                              ("999999999999999.25", "$999999999999999.25"), ("0.004", "$0.004000"),
+                                              ("0.2999999", "$0.2999999"), ("0.30000000", "$0.30"),
+                                              ("1.0000001", "$1.0000001")])
     @pytest.mark.parametrize("via", ["env", "flag"])
     def test_x402_status_shows_huge_limit(self, value, shown, via):
         args = ["x402", "status"]

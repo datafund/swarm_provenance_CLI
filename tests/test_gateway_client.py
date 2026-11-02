@@ -1700,6 +1700,20 @@ class TestAutoPayHugeLimit:
             patcher.stop()
         mock_x402.sign_payment.assert_not_called()
 
+    def test_refusal_message_shows_every_limit_decimal(self, mock_x402, requests_mock):
+        """0.2999999 is not shown as $0.300000 next to a $0.300000 payment."""
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        mock_x402.select_payment_option.return_value = _option(amount="300000")
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_max_auto_pay_usd="0.2999999")
+        try:
+            with pytest.raises(PaymentRequiredError, match=r"limit of \$0\.2999999;"):
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+        mock_x402.sign_payment.assert_not_called()
+
     def test_refusal_message_keeps_six_decimals(self, mock_x402, requests_mock):
         from swarm_provenance_uploader.exceptions import PaymentRequiredError
 
@@ -1715,6 +1729,23 @@ class TestAutoPayHugeLimit:
 
 class TestAutoPayLimitValidation:
     """The auto-pay limit must be a finite, non-negative number (#152)."""
+
+    @pytest.mark.parametrize("limit", ["0_30", "1_0.0_0", "\u0663", "0.\u0663", "\uff11",
+                                       "1e", ".", "", " ", "0x10", "1/2", "Infinity", "sNaN"])
+    def test_only_plain_ascii_numbers_accepted(self, limit):
+        """Underscores and non-ASCII digits, which Decimal() accepts, are refused (0_30 was read as 30)."""
+        from swarm_provenance_uploader.core.gateway_client import parse_auto_pay_limit
+
+        with pytest.raises(ValueError, match="x402_max_auto_pay_usd must be a number"):
+            parse_auto_pay_limit(limit)
+
+    @pytest.mark.parametrize("limit, value", [(" 0.30 ", "0.30"), ("\t1\n", "1"), (".5", "0.5"),
+                                              ("5.", "5"), ("+1", "1"), ("1e3", "1E+3"),
+                                              ("2.5E-2", "0.025"), ("-0", "0")])
+    def test_plain_numbers_accepted(self, limit, value):
+        from swarm_provenance_uploader.core.gateway_client import parse_auto_pay_limit
+
+        assert parse_auto_pay_limit(limit) == Decimal(value)
 
     @pytest.mark.parametrize("limit", [float("nan"), float("inf"), float("-inf"), -0.01, -1,
                                        "nan", "abc", None])
