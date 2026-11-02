@@ -2344,10 +2344,17 @@ def _handle_not_recorded(
             fg=typer.colors.RED, err=True,
         )
     elif isinstance(e, exceptions.TransactionOutcomeUnknownError):
+        if e.explorer_url:
+            check = "Check it in the explorer before you try again."
+        else:
+            # No explorer for this chain (for example a local node)
+            check = (
+                "Check whether it was recorded with swarm-prov-upload chain get "
+                "<data hash> before you try again."
+            )
         typer.secho(
             prefix + "Outcome unknown. The connection to the RPC failed after the "
-            "transaction was sent, so it is not known whether it was mined. Check it "
-            "in the explorer before you try again.",
+            "transaction was sent, so it is not known whether it was mined. " + check,
             fg=typer.colors.RED, err=True,
         )
         typer.echo(f"  Reason:      {redact_urls(getattr(e, 'reason', None) or str(e))}", err=True)
