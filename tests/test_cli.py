@@ -5214,8 +5214,8 @@ class TestAutoPayLimitValidation:
 
     def test_max_pay_help_still_says_float(self):
         result = runner.invoke(app, ["--help"])
-        assert "--max-pay" in result.output
-        assert "FLOAT" in re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        assert re.search(r"--max-pay\s+FLOAT", plain)
 
 
 class TestPayToPinStatus:
