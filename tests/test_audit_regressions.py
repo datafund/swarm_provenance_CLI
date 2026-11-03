@@ -321,7 +321,7 @@ class TestStampIdValidation:
         constructor = mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
         result = runner.invoke(app, [*command, "--stamp-id", "../../x"])
         assert result.exit_code == 1
-        assert "not a stamp ID" in result.output
+        assert "--stamp-id is not a stamp ID (64 hex characters)" in result.output
         constructor.assert_not_called()
 
     def test_cli_accepts_0x_prefixed_stamp_id(self, mocker, tmp_path, monkeypatch):

@@ -1103,6 +1103,29 @@ class TestChainClientGasLimit:
         tx = call_args[0][0]
         assert tx["gas"] == 500_000
 
+    @pytest.mark.parametrize("gas_limit", [0, -1, 20_999, True, 1.5, "50000"],
+                             ids=["zero", "negative", "below-minimum", "bool", "float", "string"])
+    def test_gas_limit_must_be_whole_number_of_at_least_21000(self, mock_chain_deps, gas_limit):
+        """ChainClient(gas_limit=...) refuses a value that is not an int of at least 21000 (#226)."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.exceptions import ChainConfigurationError
+
+        with pytest.raises(ChainConfigurationError, match=r"gas_limit.*21000"):
+            ChainClient(chain="base-sepolia", gas_limit=gas_limit)
+
+    def test_gas_limit_minimum_accepted(self, mock_chain_deps):
+        """ChainClient(gas_limit=21000) is accepted and used as the gas of the transaction (#226)."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", b"\x00" * 32, [], [], 0,
+        )
+
+        client = ChainClient(chain="base-sepolia", gas_limit=21_000)
+        client.anchor(swarm_hash=DUMMY_HASH)
+
+        assert mock_chain_deps["account"].sign_transaction.call_args[0][0]["gas"] == 21_000
+
     def test_explicit_gas_limit_no_multiplier(self, mock_chain_deps):
         """Tests that explicit gas limit ignores multiplier."""
         from swarm_provenance_uploader.core.chain_client import ChainClient

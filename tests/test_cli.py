@@ -43,6 +43,7 @@ def reset_backend_config():
     _chain_config["wallet_key_env"] = "PROVENANCE_WALLET_KEY"
     _chain_config["explorer_url"] = None
     _chain_config["gas_limit"] = None
+    _chain_config["gas_limit_error"] = None
     yield
     # Reset again after test
     _backend_config["backend"] = "gateway"
@@ -62,6 +63,7 @@ def reset_backend_config():
     _chain_config["wallet_key_env"] = "PROVENANCE_WALLET_KEY"
     _chain_config["explorer_url"] = None
     _chain_config["gas_limit"] = None
+    _chain_config["gas_limit_error"] = None
 
 
 # =============================================================================
@@ -5096,6 +5098,140 @@ class TestChainGasLimitFlag:
         help_text = " ".join(option.help.split())
         assert "Skips gas estimation" in help_text
         assert "a transaction that would revert is still sent and costs gas" in help_text
+
+    GAS_COMMANDS = ["anchor", "set-storage-ref", "access", "status", "transfer",
+                    "delegate", "transform", "protect", "merge"]
+
+    def test_gas_commands_listed(self):
+        """GAS_COMMANDS names every chain command that has --gas."""
+        chain = typer.main.get_command(app).commands["chain"]
+        with_gas = {name for name, command in chain.commands.items()
+                    if any(p.name == "gas" for p in command.params)}
+        assert with_gas == set(self.GAS_COMMANDS)
+
+    def test_gas_check_option_names(self):
+        """_check_gas_limit_setting() finds --gas and --json by the parameter names gas and output_json.
+
+        A chain command that names either option differently would skip the
+        CHAIN_GAS_LIMIT check or print text instead of JSON (#226).
+        """
+        chain = typer.main.get_command(app).commands["chain"]
+        for name, command in chain.commands.items():
+            for param in command.params:
+                if "--gas" in param.opts:
+                    assert param.name == "gas", name
+                if "--json" in param.opts:
+                    assert param.name == "output_json", name
+
+    @pytest.mark.parametrize("command", GAS_COMMANDS)
+    def test_gas_has_lower_bound(self, command):
+        """--gas takes at least 21000, the gas of the simplest transaction, and has no upper bound (#226)."""
+        import click
+
+        chain = typer.main.get_command(app).commands["chain"]
+        option = next(p for p in chain.commands[command].params if p.name == "gas")
+        assert isinstance(option.type, click.IntRange)
+        assert option.type.min == 21000
+        assert option.type.max is None
+
+    @pytest.mark.parametrize("value", ["0", "-1", "20999", "1.5", "abc"])
+    def test_gas_below_minimum_is_usage_error(self, mocker, value):
+        """--gas below 21000 or not a whole number is a usage error (exit 2) before a chain client is built (#226)."""
+        get_client = mocker.patch("swarm_provenance_uploader.cli._get_chain_client")
+        try:
+            separate = CliRunner(mix_stderr=False)
+        except TypeError:  # Click 8.2+ always keeps stdout and stderr apart
+            separate = CliRunner()
+
+        result = separate.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--gas", value])
+
+        assert result.exit_code == 2
+        assert result.stdout == ""
+        output = re.sub(r"\x1b\[[0-9;]*m", "", result.stderr)
+        assert "--gas" in output
+        if value not in ("1.5", "abc"):
+            assert "21000" in output
+        get_client.assert_not_called()
+
+    def test_gas_minimum_accepted(self, mocker):
+        """--gas 21000 is accepted (#226)."""
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client")
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--gas", "21000"])
+
+        assert result.exit_code == 0, result.output
+        assert _chain_config["gas_limit"] == 21000
+
+
+class TestChainGasLimitSetting:
+    """A CHAIN_GAS_LIMIT that is not a gas limit of 21000 or more (#226)."""
+
+    ERROR = "CHAIN_GAS_LIMIT is not a whole number of at least 21000: 'abc'"
+
+    @pytest.fixture
+    def bad_setting(self, monkeypatch):
+        monkeypatch.setitem(_chain_config, "gas_limit_error", self.ERROR)
+
+    @pytest.fixture
+    def chain_client_class(self, mocker):
+        return mocker.patch("swarm_provenance_uploader.core.chain_client.ChainClient")
+
+    def test_write_command_reports_setting(self, bad_setting, chain_client_class):
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1
+        assert self.ERROR in result.output
+        assert "Traceback" not in result.output
+        chain_client_class.assert_not_called()
+
+    def test_write_command_json(self, bad_setting, chain_client_class):
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
+
+        assert result.exit_code == 1
+        assert json.loads(result.stdout) == {"error": "invalid_gas_limit", "message": self.ERROR}
+        chain_client_class.assert_not_called()
+
+    def test_gas_option_overrides_setting(self, bad_setting, chain_client_class):
+        """With --gas, CHAIN_GAS_LIMIT is not used, so its value does not matter."""
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--gas", "500000"])
+
+        assert result.exit_code == 0, result.output
+        assert chain_client_class.call_args.kwargs["gas_limit"] == 500000
+
+    def test_command_without_gas_ignores_setting(self, bad_setting, chain_client_class):
+        """A command that sends no transaction works with a bad CHAIN_GAS_LIMIT."""
+        from swarm_provenance_uploader.models import ChainWalletInfo
+
+        chain_client_class.return_value.balance.return_value = ChainWalletInfo(
+            address=DUMMY_ADDRESS, balance_wei=10**18, balance_eth="1.0",
+            chain="base-sepolia", contract_address="0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a",
+        )
+
+        result = runner.invoke(app, ["chain", "balance"])
+
+        assert result.exit_code == 0, result.output
+        chain_client_class.assert_called_once()
+
+    def test_status_query_ignores_setting(self, bad_setting, chain_client_class):
+        """chain status without --set sends no transaction, so a bad CHAIN_GAS_LIMIT does not stop it."""
+        from swarm_provenance_uploader.models import ChainProvenanceRecord, DataStatusEnum
+
+        chain_client_class.return_value.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF, owner=DUMMY_ADDRESS, timestamp=1700000000,
+            data_type="swarm-provenance", status=DataStatusEnum.ACTIVE,
+        )
+
+        result = runner.invoke(app, ["chain", "status", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 0, result.output
+        assert "ACTIVE" in result.output
+
+    def test_status_set_reports_setting(self, bad_setting, chain_client_class):
+        result = runner.invoke(app, ["chain", "status", DUMMY_SWARM_REF, "--set", "restricted"])
+
+        assert result.exit_code == 1
+        assert self.ERROR in result.output
+        chain_client_class.assert_not_called()
 
 
 class TestChainMergeCommand:

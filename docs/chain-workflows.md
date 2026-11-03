@@ -702,8 +702,8 @@ These exit codes apply to every chain command, including the composite commands 
 | Exit code | Meaning | JSON `error` (with `--json`) |
 |-----------|---------|------------------------------|
 | 0 | Success | (no error) |
-| 1 | Error: hash not found, transaction reverted, not recorded, not verified, replaced, transaction not found (`chain wait`), connection error | `transaction_failed`, `not_recorded`, `not_verified`, `replaced`, `not_found`, and others |
-| 2 | Usage error: an option or argument is not valid | (no JSON) |
+| 1 | Error: hash not found, transaction reverted, not recorded, not verified, replaced, transaction not found (`chain wait`), connection error, a `CHAIN_GAS_LIMIT` that is not a whole number of at least 21000 (chain writes run without `--gas`) | `transaction_failed`, `not_recorded`, `not_verified`, `replaced`, `not_found`, `invalid_gas_limit`, and others |
+| 2 | Usage error: an option or argument is not valid, for example `--gas` below 21000 | (no JSON) |
 | 3 | The transaction was sent and may still be mined: receipt timeout, or outcome unknown. Do not run the command again; wait with `chain wait`, or check the transaction in the explorer. `chain wait` also exits 3 when it cannot reach any RPC, because the transaction may still be pending | `receipt_timeout`, `outcome_unknown`, `connection_failed` (`chain wait` only) |
 
 In the JSON output of a composite command, the error object of an unconfirmed step is under `unconfirmed`.
