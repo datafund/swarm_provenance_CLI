@@ -27,8 +27,10 @@ def failing_rpc_server():
     "drop" closes the connection without an answer. Methods in
     ``server.answers`` ({method: result}) get that result instead.
     ``server.path_answers`` ({path: {method: result}}) adds answers for one
-    request path only. ``server.requests`` records (path, method) for each
-    request.
+    request path only. ``server.errors`` ({method: error object}) answers
+    that method with a JSON-RPC error instead, with "{path}" in its string
+    values replaced by the request path (#234). ``server.requests`` records
+    (path, method) for each request.
     """
     import http.server
     import json
@@ -45,7 +47,15 @@ def failing_rpc_server():
             self.server.methods.append(method)
             self.server.requests.append((self.path, method))
             answers = {**self.server.answers, **self.server.path_answers.get(self.path, {})}
-            if method in answers:
+            if method in self.server.errors:
+                error = json.loads(
+                    json.dumps(self.server.errors[method]).replace("{path}", self.path)
+                )
+                body = json.dumps({
+                    "jsonrpc": "2.0", "id": request.get("id"), "error": error,
+                }).encode()
+                status, content_type = 200, "application/json"
+            elif method in answers:
                 body = json.dumps({
                     "jsonrpc": "2.0", "id": request.get("id"), "result": answers[method],
                 }).encode()
@@ -82,6 +92,8 @@ def failing_rpc_server():
     server.answers = {}
     # The same per request path, on top of answers: {path: {method: result}}
     server.path_answers = {}
+    # JSON-RPC methods that get this error object: {method: error}
+    server.errors = {}
     # The JSON-RPC method of every request received
     server.methods = []
     # (path, JSON-RPC method) of every request received

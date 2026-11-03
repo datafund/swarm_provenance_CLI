@@ -32,6 +32,7 @@ from ..exceptions import (
     PaymentRejectedError,
     PaymentRequiredError,
     PaymentSettledNotDeliveredError,
+    PaymentResultUnreadableError,
     StampPurchasePendingError,
     PoolNotEnabledError,
     PoolEmptyError,
@@ -107,11 +108,12 @@ def format_auto_pay_limit(limit: Decimal, places: int = 6) -> str:
     The auto-pay limit as text, without the Decimal context's rounding.
 
     `places` decimals below 1e15, or every decimal digit when `places` would
-    round the limit (0.2999999 is not shown as 0.300000); from 1e15, every
-    digit in scientific notation (1E+30), so a huge limit neither fails nor
-    prints hundreds of digits.
+    round the limit (0.2999999 is not shown as 0.300000); from 1e15, and for
+    a positive limit below 1e-15, every digit in scientific notation (1E+30,
+    1E-16), so a huge or tiny limit neither fails nor prints hundreds of
+    digits (#236: 1e-100000000 would otherwise be about 100 MB of text).
     """
-    if limit and limit.adjusted() >= 15:
+    if limit and (limit.adjusted() >= 15 or limit.adjusted() < -15):
         return f"{limit:E}"
     text = f"{limit:.{places}f}"
     return text if Decimal(text) == limit else f"{limit:f}"
@@ -231,7 +233,9 @@ class GatewayClient:
             x402_on_payment_sent: Optional hook called with the payment's details
                                   (payer, nonce, amount, amount_usd, pay_to,
                                   network, transaction) once a signed payment has
-                                  been sent and not refused.
+                                  been sent and not refused: not for a 402, nor
+                                  for an answer the gateway sends before it
+                                  settles the payment (#215).
             x402_expected_pay_to: Only sign payments to this address (falls back
                                   to the X402_EXPECTED_PAY_TO env var).
             idempotency_key: Idempotency-Key sent with every paid request. The
@@ -845,18 +849,39 @@ class GatewayClient:
         """
         Whether this paid operation is what paid, for the payments-sent total.
 
-        A second 402 was not accepted. The IDEMPOTENCY_* answers and a replayed
+        A second 402 is trusted as uncollected, unless it says it was settled:
+        the gateway answers 402 when it did not accept the payment, including
+        a settlement it refused, so nothing is counted for it. The IDEMPOTENCY_* answers and a replayed
         result refer to the first request with the key: this operation paid
         only if one of its own attempts is the one that may have been collected
         (otherwise it was an earlier run, already counted there).
+
+        Otherwise only answers that are not proven uncharged count (#215): a
+        2xx, a 5xx other than those the gateway sends before settling, and any
+        answer that says it was settled. swarm_connect settles immediately
+        before the irreversible step, and marks every non-2xx answer after
+        settlement with `X-Payment-Status: settled_not_delivered` (or the
+        DELIVERY_FAILED_AFTER_PAYMENT code), so a 4xx without either was
+        refused before the payment was collected.
         """
-        if response.status_code == 402:
-            return False
+        status = response.status_code
+        # In the same order as _raise_for_paid_failure, so that the count
+        # agrees with the report: IDEMPOTENCY_*, then settled, then 402.
         if (code or "").startswith("IDEMPOTENCY") or response.headers.get("Idempotent-Replayed"):
             return outstanding is not None
-        body_code = str(GatewayClient._error_body(response).get("code") or "")
+        body = GatewayClient._error_body(response)
+        body_code = str(body.get("code") or "")
         if body_code.startswith("IDEMPOTENCY"):
             return outstanding is not None
+        if (response.headers.get("X-Payment-Status") == "settled_not_delivered"
+                or body_code == "DELIVERY_FAILED_AFTER_PAYMENT"):
+            return True
+        if status == 402:
+            return False
+        if 400 <= status < 500:
+            return False
+        if status >= 500 and GatewayClient._says_not_charged(body):
+            return False
         return True
 
     @staticmethod
@@ -909,7 +934,7 @@ class GatewayClient:
 
         A success without a reference stored nothing the caller can find, so
         it is an error: a ConnectionError here, which `_reading_paid_result`
-        turns into PaymentSettledNotDeliveredError when a payment was sent.
+        turns into PaymentResultUnreadableError when a payment was sent.
         """
         reference = data.get("reference") if isinstance(data, dict) else None
         if not isinstance(reference, str) or not reference.strip():
@@ -930,17 +955,48 @@ class GatewayClient:
             body = body["detail"]
         return body if isinstance(body, dict) else {}
 
-    # Server errors the gateway sends only before it settles a payment.
-    _NOT_CHARGED_CODES = {"PURCHASE_CAPACITY"}
+    # Server errors the gateway sends only before it settles a payment. In
+    # swarm_connect, PURCHASE_CAPACITY is raised just before settle_payment();
+    # GATEWAY_DAILY_SPEND_CEILING and SPEND_BUDGET_UNAVAILABLE come from the
+    # spend-limit check, which runs before it in both stamp purchase and
+    # stamp extension (#213). POOL_ALLOWANCE_UNAVAILABLE comes from the pool
+    # acquire's allowance check, which a paid acquire on a test network also
+    # passes through before the handler settles the payment.
+    _NOT_CHARGED_CODES = {"PURCHASE_CAPACITY", "GATEWAY_DAILY_SPEND_CEILING", "SPEND_BUDGET_UNAVAILABLE",
+                          "POOL_ALLOWANCE_UNAVAILABLE"}
+
+    # Only answers the gateway sends ONLY before it settles belong here. Its
+    # generic 5xx texts ("Could not purchase stamp. The Bee node may be
+    # unavailable.", "Invalid response from Swarm API. Please try again.", "An
+    # unexpected error occurred while ...", the upload 502/500) are raised both
+    # before and after settle_payment(). Only X-Payment-Status:
+    # settled_not_delivered tells the two apart, and nothing on the answer says
+    # that the gateway adds it (it started with swarm_connect #398) or that no
+    # proxy removed it. A header-less one therefore stays "may have been taken".
+    #
+    # 5xx texts without a code that the gateway sends before it settles (#213):
+    # the stamp extension's check that Bee reports a stamp price (503), the
+    # x402 dependency's pricing failure (503, for example a Bee price of 0),
+    # which comes before the payment is even verified, and its 502 when the
+    # facilitator's verify call fails. PAYMENT_SETTLEMENT_UNAVAILABLE (502, the
+    # settle call failed) is not listed: that transfer may have gone through.
+    _NOT_CHARGED_DETAIL_PREFIXES = (
+        "The Bee node has not reported a current stamp price yet.",
+        "Failed to calculate price for this operation.",
+        "Could not verify payment with facilitator.",
+    )
 
     @classmethod
     def _says_not_charged(cls, body: dict) -> bool:
         """True for a 5xx the gateway answers before collecting the payment."""
         if body.get("code") in cls._NOT_CHARGED_CODES:
             return True
-        # The gateway's answer to a paid request that crashed before settling.
         detail = body.get("detail")
-        return isinstance(detail, str) and detail.endswith("You were not charged.")
+        if not isinstance(detail, str):
+            return False
+        # The gateway's answer to a paid request that crashed before settling.
+        return (detail.endswith("You were not charged.")
+                or detail.startswith(cls._NOT_CHARGED_DETAIL_PREFIXES))
 
     @contextmanager
     def _reading_paid_result(self, response: requests.Response):
@@ -957,7 +1013,7 @@ class GatewayClient:
             payment = getattr(response, "x402_payment", None)
             if not payment or isinstance(e, PaymentOutcomeUnknownError):
                 raise
-            raise PaymentSettledNotDeliveredError(
+            raise PaymentResultUnreadableError(
                 f"The payment was collected and the gateway answered HTTP {response.status_code}, "
                 f"but its response could not be read ({type(e).__name__}: {e}).",
                 status_code=response.status_code, **payment,
@@ -1212,8 +1268,14 @@ class GatewayClient:
             if response.status_code == 202:
                 self._raise_purchase_pending(response)
             self._raise_for_gateway_error(response)
-            with self._reading_paid_result(response):
-                result = StampPurchaseResponse.model_validate(response.json())
+            try:
+                with self._reading_paid_result(response):
+                    result = StampPurchaseResponse.model_validate(response.json())
+            except PaymentResultUnreadableError as unreadable:
+                # swarm_connect names a paid batch "<label>-<random hex>", or
+                # "paid-<random hex>" without a label: enough to find it (#216)
+                unreadable.label_prefix = f"{label}-" if label else "paid-"
+                raise
             if verbose:
                 print(f"DEBUG: Purchased stamp ID: {result.batchID}")
             return result.batchID
@@ -1674,6 +1736,8 @@ class GatewayClient:
             PoolNotEnabledError: If pool is not enabled on this gateway
             PoolEmptyError: If no stamps available for requested size/depth
             PoolAcquisitionError: If acquisition fails despite availability
+            PaymentSettledNotDeliveredError: If a paid acquire is answered
+                2xx with success false: the payment was collected (#209)
         """
         size_desc = size or "default"
         if depth:
@@ -1708,8 +1772,25 @@ class GatewayClient:
                 result = AcquireStampResponse.model_validate(response.json())
 
             if not result.success:
+                # Gateway-authored text, cleaned before it is shown (#209, as #151)
+                # One closing mark: a period is added unless it ends in !, ? or
+                # the ellipsis of a message cut to length (#209)
+                message = (_sanitize_gateway_text(result.message, limit=300) or "").rstrip(". ") \
+                    or "no reason given"
+                end = "" if message.endswith(("!", "?", "\u2026")) else "."
+                payment = getattr(response, "x402_payment", None)
+                if payment:
+                    # swarm_connect settles every paid request it answers with
+                    # 2xx (the handler before handing the batch over, or the
+                    # x402 middleware), so a paid success:false was charged
+                    # and delivered nothing. A retry would pay again (#209).
+                    raise PaymentSettledNotDeliveredError(
+                        f"The payment was collected, but the gateway answered HTTP "
+                        f"{response.status_code} without a stamp: {message}{end}",
+                        status_code=response.status_code, **payment,
+                    )
                 raise PoolAcquisitionError(
-                    f"Failed to acquire stamp from pool: {result.message}. "
+                    f"Failed to acquire stamp from pool: {message}{end} "
                     "Retry may succeed.",
                     available_count=0,
                 )

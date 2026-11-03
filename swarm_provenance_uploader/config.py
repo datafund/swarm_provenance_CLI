@@ -96,15 +96,36 @@ CHAIN_RPC_URLS = _split_urls(os.getenv("CHAIN_RPC_URLS"))
 # Custom contract address (optional, overrides preset for selected chain)
 CHAIN_CONTRACT = os.getenv("CHAIN_CONTRACT")
 
+# Block the contract was deployed in (optional), where event scans start.
+# Kept as written: ChainProvider checks it when a chain client is built, so
+# a bad value does not stop commands that do not use the chain.
+CHAIN_DEPLOY_BLOCK = os.getenv("CHAIN_DEPLOY_BLOCK")
+
 # Custom block explorer URL (optional, overrides preset for selected chain)
 CHAIN_EXPLORER_URL = os.getenv("CHAIN_EXPLORER_URL")
 
 # Environment variable name that contains the wallet private key
 CHAIN_WALLET_KEY_ENV = os.getenv("CHAIN_WALLET_KEY_ENV", "PROVENANCE_WALLET_KEY")
 
-# Explicit gas limit (optional, overrides estimation when set)
-try:
-    _chain_gas_limit_str = os.getenv("CHAIN_GAS_LIMIT")
-    CHAIN_GAS_LIMIT = int(_chain_gas_limit_str) if _chain_gas_limit_str else None
-except (ValueError, TypeError):
-    CHAIN_GAS_LIMIT = None
+# Smallest gas limit accepted for --gas and CHAIN_GAS_LIMIT (#226). Defined
+# in constants.py, so the library can use it without loading .env.
+from .constants import MIN_GAS_LIMIT  # noqa: E402
+
+# Explicit gas limit (optional, overrides estimation when set). A value that
+# is not a whole number of at least MIN_GAS_LIMIT is not used: the error is
+# kept in CHAIN_GAS_LIMIT_ERROR, and the CLI reports it when a chain write
+# would use the setting, so other commands still work (#226).
+CHAIN_GAS_LIMIT = None
+CHAIN_GAS_LIMIT_ERROR = None
+_chain_gas_limit_str = (os.getenv("CHAIN_GAS_LIMIT") or "").strip()
+if _chain_gas_limit_str:
+    # Only ASCII digits: int() would also take "50_000", "+50000" and
+    # non-ASCII digits such as full-width ones
+    if _chain_gas_limit_str.isascii() and _chain_gas_limit_str.isdigit():
+        CHAIN_GAS_LIMIT = int(_chain_gas_limit_str)
+    if CHAIN_GAS_LIMIT is None or CHAIN_GAS_LIMIT < MIN_GAS_LIMIT:
+        CHAIN_GAS_LIMIT = None
+        CHAIN_GAS_LIMIT_ERROR = (
+            f"CHAIN_GAS_LIMIT is not a whole number of at least {MIN_GAS_LIMIT}: "
+            f"{_chain_gas_limit_str!r}"
+        )

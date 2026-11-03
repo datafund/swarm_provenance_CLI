@@ -225,6 +225,22 @@ class PaymentSettledNotDeliveredError(PaymentOutcomeUnknownError):
     settled = True
 
 
+class PaymentResultUnreadableError(PaymentSettledNotDeliveredError):
+    """A paid request was answered 2xx, but the answer could not be read (#216).
+
+    The gateway answers 2xx only after it has settled the payment and done
+    the work, so the request most likely succeeded; only its result (for
+    example the batch ID or Swarm reference) is missing. Check the result
+    before contacting the operator. Re-running pays again.
+
+    After a stamp purchase, `label_prefix` is how the new batch's label
+    starts (the gateway adds a random suffix to the label of a paid
+    purchase); None otherwise.
+    """
+
+    label_prefix = None
+
+
 class PaymentDeliveredNotStoredError(PaymentSettledNotDeliveredError):
     """The first request with this Idempotency-Key succeeded and was paid once.
 
@@ -362,6 +378,8 @@ _CHAIN_EXCEPTIONS = frozenset({
     "ChainError",
     "ChainConfigurationError",
     "ChainIdMismatchError",
+    "ContractCodeNotFoundError",
+    "DeployBlockError",
     "ChainConnectionError",
     "ChainTransactionError",
     "ChainValidationError",

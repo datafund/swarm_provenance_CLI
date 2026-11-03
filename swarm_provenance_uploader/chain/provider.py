@@ -8,9 +8,15 @@ Requires optional dependencies (the `blockchain` extra): web3 and eth-account.
 """
 
 import logging
-from typing import List, Optional
+import re
+from typing import List, Optional, Union
 
-from .exceptions import ChainConfigurationError, ChainConnectionError, ChainIdMismatchError
+from .exceptions import (
+    ChainConfigurationError,
+    ChainConnectionError,
+    ChainIdMismatchError,
+    DeployBlockError,
+)
 from .redact import redact_url, register_url_secrets
 from .._requirements import INSTALL_SIGNING_DEPS
 
@@ -33,6 +39,44 @@ def _import_web3():
                 f"Run: {INSTALL_SIGNING_DEPS}"
             ) from e
     return _Web3
+
+
+def _http_provider(Web3, url: str, timeout: int):
+    """An HTTPProvider for url that never repeats eth_sendRawTransaction (#229).
+
+    web3 retries the methods on its REQUEST_RETRY_ALLOWLIST, including
+    eth_sendRawTransaction, after an HTTP error answer or a read timeout. If
+    the first request reached the node, the repeat gets "already known" or
+    "nonce too low", which hides that the transaction was sent. Every other
+    method keeps web3's default retry (the same errors, retries and
+    backoff). The list set is never empty, because web3 replaces an empty
+    list with its default.
+
+    If the installed web3 does not take the configuration, its default is
+    kept; ChainClient then still reports those answers to a send as
+    "outcome unknown".
+    """
+    provider = Web3.HTTPProvider(url, request_kwargs={"timeout": timeout})
+    try:
+        from web3.providers.rpc.utils import ExceptionRetryConfiguration
+
+        default = provider.exception_retry_configuration
+        if default is None:
+            return provider  # no retry at all
+        allowlist = [m for m in default.method_allowlist if m != "eth_sendRawTransaction"]
+        provider.exception_retry_configuration = (
+            ExceptionRetryConfiguration(
+                errors=default.errors,
+                retries=default.retries,
+                backoff_factor=default.backoff_factor,
+                method_allowlist=allowlist,
+            )
+            if allowlist
+            else None
+        )
+    except Exception as e:
+        logger.debug("Kept web3's default request retry: %s", type(e).__name__)
+    return provider
 
 
 # Network presets for supported chains
@@ -93,6 +137,31 @@ def _preset_strings() -> List[str]:
     return strings
 
 
+def _parse_deploy_block(value) -> Optional[int]:
+    """The deploy block from CHAIN_DEPLOY_BLOCK or the deploy_block argument (#231).
+
+    None or a blank string means not set. An int of 0 or more, or a string
+    of ASCII digits (surrounding spaces are ignored), is the block number.
+
+    Raises:
+        DeployBlockError: For any other value (a ChainConfigurationError).
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if re.fullmatch(r"[0-9]+", text):
+            return int(text)
+    elif isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    raise DeployBlockError(
+        "CHAIN_DEPLOY_BLOCK (deploy_block) must be a non-negative integer, "
+        f"the block the contract was deployed in; got {value!r}"
+    )
+
+
 class ChainProvider:
     """Provider for Web3 connections to supported EVM chains.
 
@@ -115,6 +184,7 @@ class ChainProvider:
         explorer_url: Optional[str] = None,
         rpc_fallbacks: Optional[List[str]] = None,
         request_timeout: int = 30,
+        deploy_block: Optional[Union[int, str]] = None,
     ):
         """
         Initialize the chain provider.
@@ -127,6 +197,11 @@ class ChainProvider:
             rpc_fallbacks: Fallback RPC URLs tried in order on failure.
                 If None and no custom rpc_url, uses preset fallbacks.
             request_timeout: HTTP request timeout in seconds (default 30).
+            deploy_block: Block the contract was deployed in, where event
+                scans start (CHAIN_DEPLOY_BLOCK): an int of 0 or more, or a
+                string of digits. If None, the preset's deploy block is
+                used for the preset's own contract; a custom contract
+                address then has no known deploy block (#231).
 
         Raises:
             ChainConfigurationError: If chain is unsupported or web3 not installed.
@@ -143,7 +218,21 @@ class ChainProvider:
         self.rpc_url = rpc_url or preset["rpc_url"]
         self.explorer_url = explorer_url or preset["explorer_url"]
         self.contract_address = contract_address or preset["contract_address"]
-        self.deploy_block = preset.get("deploy_block")
+        # The preset's deploy block belongs to the preset's contract. For a
+        # custom contract it is unknown unless given: a contract deployed
+        # before the preset block would lose its older events (#231)
+        deploy_block = _parse_deploy_block(deploy_block)
+        preset_contract = preset["contract_address"]
+        if deploy_block is not None:
+            self.deploy_block = deploy_block
+        elif (
+            preset_contract
+            and self.contract_address
+            and self.contract_address.lower() == preset_contract.lower()
+        ):
+            self.deploy_block = preset.get("deploy_block")
+        else:
+            self.deploy_block = None
         self._custom_rpc = rpc_url is not None
         self._request_timeout = request_timeout
         # True while ChainClient's fallback loop (_with_fallback) runs: the
@@ -175,12 +264,7 @@ class ChainProvider:
             )
 
         # Initialize Web3 connection
-        self._web3 = Web3(
-            Web3.HTTPProvider(
-                self.rpc_url,
-                request_kwargs={"timeout": self._request_timeout},
-            )
-        )
+        self._web3 = Web3(_http_provider(Web3, self.rpc_url, self._request_timeout))
 
         # When a custom RPC is provided, read the chain ID from the node.
         # The localhost preset takes whatever the node reports (a local node
@@ -287,12 +371,7 @@ class ChainProvider:
                 continue
             tried.add(url)
             try:
-                candidate = Web3(
-                    Web3.HTTPProvider(
-                        url,
-                        request_kwargs={"timeout": self._request_timeout},
-                    )
-                )
+                candidate = Web3(_http_provider(Web3, url, self._request_timeout))
                 if candidate.is_connected():
                     # Never switch to an endpoint on another chain
                     candidate_chain_id = candidate.eth.chain_id
