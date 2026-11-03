@@ -6156,3 +6156,311 @@ class TestAbiEventNames:
         for name in WRITE_EVENTS:
             assert name in names
         assert names == sorted(names)
+
+
+# --- #228: an error other than a timeout or a transport failure during the receipt wait ---
+
+
+def _rpc_error(real_web3_exceptions, message, code=-32005):
+    """The real Web3RPCError web3 raises for a JSON-RPC error answer."""
+    return real_web3_exceptions.Web3RPCError(
+        str({"code": code, "message": message}),
+        rpc_response={"jsonrpc": "2.0", "id": 1, "error": {"code": code, "message": message}},
+    )
+
+
+class TestReceiptWaitErrorIsOutcomeUnknown:
+    """After the send returned a hash, the wait can no longer report "Transaction failed" (#228)."""
+
+    @pytest.mark.parametrize("kind", ["rpc-error", "other"])
+    def test_write(self, real_web3_exceptions, mock_chain_deps, kind):
+        from swarm_provenance_uploader.exceptions import (
+            ReceiptTimeoutError,
+            TransactionOutcomeUnknownError,
+        )
+
+        _inject_real_exceptions(real_web3_exceptions)
+        web3 = mock_chain_deps["web3_instance"]
+        client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
+        client._provider._try_fallback = MagicMock(return_value=True)
+        if kind == "rpc-error":
+            error, reason = _rpc_error(real_web3_exceptions, "limit exceeded"), "limit exceeded"
+        else:
+            error, reason = ValueError("unexpected answer"), "unexpected answer"
+        web3.eth.wait_for_transaction_receipt.side_effect = error
+
+        with pytest.raises(TransactionOutcomeUnknownError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        err = exc_info.value
+        assert not isinstance(err, ReceiptTimeoutError)
+        assert err.tx_hash == _format_hash(DUMMY_TX_HASH_BYTES)
+        assert err.explorer_url.endswith(err.tx_hash)
+        assert err.event_name == "DataStatusChanged"
+        assert err.expected_count == 1
+        assert err.contract_address == DUMMY_CONTRACT
+        assert err.reason == reason
+        assert "Transaction failed" not in str(err)
+        assert err.tx_hash in str(err)
+        web3.eth.send_raw_transaction.assert_called_once()
+        web3.eth.wait_for_transaction_receipt.assert_called_once()
+        # Not a transport failure: no fallback
+        client._provider._try_fallback.assert_not_called()
+
+    def test_rejection_on_the_fallback(self, real_web3_exceptions, mock_chain_deps):
+        """A transport failure moves the wait to a fallback, which answers with an error."""
+        import requests
+        from swarm_provenance_uploader.exceptions import TransactionOutcomeUnknownError
+
+        _inject_real_exceptions(real_web3_exceptions)
+        web3 = mock_chain_deps["web3_instance"]
+        client = _fallback_client(mock_chain_deps, [_log("DataStatusChanged")])
+        web3.eth.wait_for_transaction_receipt.side_effect = [
+            requests.exceptions.ConnectionError("reset"),
+            _rpc_error(real_web3_exceptions, "limit exceeded"),
+        ]
+
+        with pytest.raises(TransactionOutcomeUnknownError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert exc_info.value.tx_hash == _format_hash(DUMMY_TX_HASH_BYTES)
+        assert exc_info.value.reason == "limit exceeded"
+        web3.eth.send_raw_transaction.assert_called_once()
+        assert web3.eth.wait_for_transaction_receipt.call_count == 2
+
+    def test_wait_for_transaction(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import TransactionOutcomeUnknownError
+
+        _inject_real_exceptions(real_web3_exceptions)
+        web3 = mock_chain_deps["web3_instance"]
+        client = _write_client(mock_chain_deps, [_log("DataRegistered")])
+        web3.eth.wait_for_transaction_receipt.side_effect = _rpc_error(
+            real_web3_exceptions, "limit exceeded"
+        )
+
+        with pytest.raises(TransactionOutcomeUnknownError) as exc_info:
+            client.wait_for_transaction("0x" + "bb" * 32, "DataRegistered")
+
+        err = exc_info.value
+        assert err.tx_hash == "0x" + "bb" * 32
+        assert err.event_name == "DataRegistered"
+        assert err.reason == "limit exceeded"
+        web3.eth.send_raw_transaction.assert_not_called()
+
+    @pytest.mark.parametrize("path", [f"/v2/{RPC_KEY}", f"/?apikey={RPC_KEY}"], ids=["path", "query"])
+    def test_wait_for_transaction_real_web3(self, failing_rpc_server, no_web3_retry_sleep, path):
+        """The real web3 against an RPC that answers the receipt lookup with -32005 and the key."""
+        pytest.importorskip("web3")
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.exceptions import TransactionOutcomeUnknownError
+
+        failing_rpc_server.mode = "jsonrpc"
+        failing_rpc_server.answers = {"eth_chainId": "0x7a69"}
+        client = ChainClient(
+            chain="localhost",
+            rpc_url=f"http://127.0.0.1:{failing_rpc_server.server_port}{path}",
+            rpc_fallbacks=[],
+            require_wallet=False,
+        )
+
+        with pytest.raises(TransactionOutcomeUnknownError) as exc_info:
+            client.wait_for_transaction("0x" + "bb" * 32, timeout=5)
+
+        err = exc_info.value
+        _assert_no_key(err)
+        assert err.tx_hash == "0x" + "bb" * 32
+        assert err.reason.startswith("invalid api key in /")
+        assert "eth_getTransactionReceipt" in failing_rpc_server.methods
+        assert "eth_sendRawTransaction" not in failing_rpc_server.methods
+
+
+# --- #229: a repeated send ---
+
+
+class TestSendIsNotRetriedByWeb3:
+    """web3's HTTPProvider does not repeat eth_sendRawTransaction (#229)."""
+
+    def _provider(self, url):
+        pytest.importorskip("web3")
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        return ChainProvider(chain="localhost", rpc_url=url, rpc_fallbacks=[])
+
+    def test_allowlist_keeps_every_default_method_but_the_send(self, failing_rpc_server):
+        from web3.providers.rpc.utils import REQUEST_RETRY_ALLOWLIST, check_if_retry_on_failure
+
+        failing_rpc_server.answers = {"eth_chainId": "0x7a69"}
+        provider = self._provider(f"http://127.0.0.1:{failing_rpc_server.server_port}")
+        allowlist = provider.web3.provider.exception_retry_configuration.method_allowlist
+
+        assert allowlist
+        assert "eth_sendRawTransaction" in REQUEST_RETRY_ALLOWLIST
+        assert list(allowlist) == [m for m in REQUEST_RETRY_ALLOWLIST if m != "eth_sendRawTransaction"]
+        assert not check_if_retry_on_failure("eth_sendRawTransaction", allowlist)
+        assert check_if_retry_on_failure("eth_call", allowlist)
+        assert check_if_retry_on_failure("eth_getTransactionReceipt", allowlist)
+
+    # web3 retries the methods on its allowlist after the builtin
+    # ConnectionError, requests.HTTPError and requests.Timeout (a read
+    # timeout: the request may have reached the node). An HTTP error answer
+    # (here 401; a proxy's 502 after it forwarded the request is the same)
+    # takes that path.
+
+    def test_http_error_answer_sends_once(self, failing_rpc_server, no_web3_retry_sleep):
+        import requests
+
+        failing_rpc_server.mode = "http401"
+        provider = self._provider(f"http://127.0.0.1:{failing_rpc_server.server_port}/v2/{RPC_KEY}")
+
+        with pytest.raises(requests.exceptions.HTTPError):
+            provider.web3.eth.send_raw_transaction(b"\x02" * 40)
+        with pytest.raises(requests.exceptions.HTTPError):
+            provider.web3.eth.get_transaction_receipt("0x" + "bb" * 32)
+
+        assert failing_rpc_server.methods.count("eth_sendRawTransaction") == 1
+        # Other methods keep web3's retry
+        assert failing_rpc_server.methods.count("eth_getTransactionReceipt") > 1
+
+    def test_http_error_answer_sends_once_after_a_fallback_switch(self, failing_rpc_server, no_web3_retry_sleep):
+        import requests
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        pytest.importorskip("web3")
+        failing_rpc_server.mode = "http401"
+        failing_rpc_server.path_answers = {
+            "/fallback": {"web3_clientVersion": "stub", "eth_chainId": "0x7a69"},
+        }
+        base = f"http://127.0.0.1:{failing_rpc_server.server_port}"
+        provider = ChainProvider(
+            chain="localhost", rpc_url=f"{base}/primary", rpc_fallbacks=[f"{base}/fallback"]
+        )
+        assert provider._try_fallback() is True
+
+        with pytest.raises(requests.exceptions.HTTPError):
+            provider.web3.eth.send_raw_transaction(b"\x02" * 40)
+        with pytest.raises(requests.exceptions.HTTPError):
+            provider.web3.eth.get_transaction_receipt("0x" + "bb" * 32)
+
+        assert failing_rpc_server.requests.count(("/fallback", "eth_sendRawTransaction")) == 1
+        assert failing_rpc_server.requests.count(("/fallback", "eth_getTransactionReceipt")) > 1
+
+
+# Texts the nodes send for a transaction they already have, or for a used
+# nonce: geth, Nethermind, Erigon and reth "already known" and "nonce too
+# low" (reth adds the nonces), Besu "Known transaction" and "Nonce too low"
+DUPLICATE_SEND_TEXTS = [
+    "already known",
+    "Known transaction",
+    "nonce too low",
+    "nonce too low: next nonce 5, tx nonce 4",
+    "Nonce too low",
+]
+
+
+class TestDuplicateSendIsOutcomeUnknown:
+    """A send answered as already known, or with a used nonce, may have been sent (#229)."""
+
+    @pytest.mark.parametrize("text", DUPLICATE_SEND_TEXTS)
+    def test_rpc_response(self, real_web3_exceptions, text):
+        from swarm_provenance_uploader.core.chain_client import _signed_tx_hash
+        from swarm_provenance_uploader.exceptions import TransactionOutcomeUnknownError
+
+        error = real_web3_exceptions.Web3RPCError(
+            str({"code": -32000, "message": text}),
+            rpc_response={"error": {"code": -32000, "message": text}},
+        )
+        client, web3 = _send_client("send_raw_transaction", error)
+
+        with pytest.raises(TransactionOutcomeUnknownError) as exc_info:
+            _send(client)
+
+        err = exc_info.value
+        assert err.tx_hash == _signed_tx_hash(SEND_RAW)
+        assert err.explorer_url.endswith(err.tx_hash)
+        assert err.event_name == "DataStatusChanged"
+        assert err.reason == text
+        assert "Transaction failed" not in str(err)
+        web3.eth.send_raw_transaction.assert_called_once()
+        web3.eth.wait_for_transaction_receipt.assert_not_called()
+
+    def test_message_only(self, real_web3_exceptions):
+        """A Web3RPCError without rpc_response, whose message is the error object's repr."""
+        from swarm_provenance_uploader.core.chain_client import _signed_tx_hash
+        from swarm_provenance_uploader.exceptions import TransactionOutcomeUnknownError
+
+        error = real_web3_exceptions.Web3RPCError("{'code': -32000, 'message': 'already known'}")
+        client, web3 = _send_client("send_raw_transaction", error)
+
+        with pytest.raises(TransactionOutcomeUnknownError) as exc_info:
+            _send(client)
+
+        assert exc_info.value.tx_hash == _signed_tx_hash(SEND_RAW)
+
+
+# --- #234: contract errors that read methods pass through ---
+
+
+def _assert_raw_error_has_no_key(error, key=RPC_KEY):
+    import traceback
+
+    trace = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    assert key not in trace, trace
+    for text in _chain_texts(error):
+        assert key not in text, text
+    for name in ("message", "data", "user_message"):
+        assert key not in repr(getattr(error, name, None))
+
+
+_REVERT_ANSWERS = {
+    # Revert reason that repeats the request path
+    "logic": {"code": 3, "message": "execution reverted: bad key {path}", "data": "0x"},
+    # Error data that web3 cannot decode: ContractCustomError
+    "custom": {"code": -32000, "message": "execution reverted", "data": "key {path}"},
+}
+
+
+class TestContractErrorsFromReadsAreRedacted:
+    """ContractLogicError and BadFunctionCallOutput keep their type, without the RPC key (#234)."""
+
+    @pytest.mark.parametrize("path", [f"/v2/{RPC_KEY}", f"/?apikey={RPC_KEY}"], ids=["path", "query"])
+    @pytest.mark.parametrize("answer", list(_REVERT_ANSWERS))
+    @pytest.mark.parametrize("method", ["get", "verify", "get_by_storage_ref"])
+    def test_real_web3(self, failing_rpc_server, method, answer, path):
+        web3_exceptions = pytest.importorskip("web3.exceptions")
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        failing_rpc_server.answers = {"eth_chainId": "0x7a69"}
+        failing_rpc_server.errors = {"eth_call": _REVERT_ANSWERS[answer]}
+        client = ChainClient(
+            chain="localhost",
+            rpc_url=f"http://127.0.0.1:{failing_rpc_server.server_port}{path}",
+            rpc_fallbacks=[],
+            require_wallet=False,
+        )
+
+        # Library callers that catch the web3 type keep working
+        with pytest.raises(web3_exceptions.ContractLogicError) as exc_info:
+            getattr(client, method)(DUMMY_HASH)
+
+        error = exc_info.value
+        if answer == "custom":
+            assert isinstance(error, web3_exceptions.ContractCustomError)
+        else:
+            assert error.message.startswith("execution reverted: bad key /")
+        _assert_raw_error_has_no_key(error)
+
+    @pytest.mark.parametrize("rpc_url", RPC_URLS_WITH_KEY, ids=RPC_URL_IDS)
+    def test_bad_function_call_output(self, real_web3_exceptions, mock_chain_deps, rpc_url):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        _inject_real_exceptions(real_web3_exceptions)
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.side_effect = (
+            real_web3_exceptions.BadFunctionCallOutput(f"Could not decode the answer of {rpc_url}")
+        )
+        client = ChainClient(chain="base-sepolia", rpc_url=rpc_url, rpc_fallbacks=[])
+
+        with pytest.raises(real_web3_exceptions.BadFunctionCallOutput) as exc_info:
+            client.get(DUMMY_HASH)
+
+        _assert_raw_error_has_no_key(exc_info.value)
+        assert "Could not decode the answer of https://" in str(exc_info.value)

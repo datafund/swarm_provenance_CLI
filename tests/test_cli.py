@@ -8973,3 +8973,174 @@ class TestReplacedAdviceOneSource:
         assert "delegate state" in cli._replaced_cli_advice("DataRegistered")
         mocker.patch("swarm_provenance_uploader.chain.exceptions.replaced_check_kind", return_value="record")
         assert "chain get" in cli._replaced_cli_advice("DelegateAuthorized")
+
+
+# --- #219: the chain configuration hint names the key only for commands that need it ---
+
+
+_READ_ONLY_CHAIN_ARGS = [
+    ["chain", "verify", "a" * 64],
+    ["chain", "get", "a" * 64],
+    ["chain", "get", "a" * 64, "--follow"],
+    ["chain", "lookup", "e" * 64],
+    ["chain", "status", "a" * 64],
+    ["chain", "wait", "0x" + "bb" * 32],
+]
+_READ_ONLY_CHAIN_IDS = ["verify", "get", "get-follow", "lookup", "status-query", "wait"]
+_KEY_CHAIN_ARGS = [
+    ["chain", "balance"],
+    ["chain", "anchor", "a" * 64],
+    ["chain", "set-storage-ref", "a" * 64, "e" * 64],
+    ["chain", "access", "a" * 64],
+    ["chain", "status", "a" * 64, "--set", "restricted"],
+    ["chain", "transfer", "a" * 64, "--to", "0x" + "1" * 40],
+    ["chain", "delegate", "0x" + "1" * 40, "--authorize"],
+    ["chain", "transform", "a" * 64, "c" * 64, "--description", "d"],
+    ["chain", "protect", "a" * 64, "c" * 64],
+    ["chain", "merge", "a" * 64, "b" * 64, "c" * 64, "--description", "d"],
+]
+_KEY_CHAIN_IDS = ["balance", "anchor", "set-storage-ref", "access", "status-set", "transfer",
+                  "delegate", "transform", "protect", "merge"]
+
+
+class TestChainConfigurationHint:
+    """An invalid chain setting points at the wallet key only for commands that use it (#219).
+
+    ChainClient is real here; web3 and eth-account are mocked by mock_chain_deps.
+    """
+
+    KEY_ENV = "MY_SIGNER_KEY_FOR_TEST"
+
+    @pytest.fixture
+    def bad_chain(self, monkeypatch):
+        monkeypatch.setitem(_chain_config, "chain", "no-such-chain")
+        monkeypatch.setitem(_chain_config, "wallet_key_env", self.KEY_ENV)
+
+    @pytest.mark.parametrize("args", _READ_ONLY_CHAIN_ARGS, ids=_READ_ONLY_CHAIN_IDS)
+    def test_read_only_command(self, bad_chain, mock_chain_deps, args):
+        from typer.testing import CliRunner as _Runner
+
+        result = _Runner(mix_stderr=False).invoke(app, args)
+
+        assert result.exit_code == 1, result.stdout + result.stderr
+        assert "Unsupported chain: no-such-chain" in result.stderr
+        assert "Check chain settings" in result.stderr
+        assert "CHAIN_NAME" in result.stderr
+        assert self.KEY_ENV not in result.stderr
+        assert "WALLET_KEY" not in result.stderr
+
+    @pytest.mark.parametrize("args", _KEY_CHAIN_ARGS, ids=_KEY_CHAIN_IDS)
+    def test_command_that_needs_the_key(self, bad_chain, mock_chain_deps, args):
+        from typer.testing import CliRunner as _Runner
+
+        result = _Runner(mix_stderr=False).invoke(app, args)
+
+        assert result.exit_code == 1, result.stdout + result.stderr
+        assert "Unsupported chain: no-such-chain" in result.stderr
+        # The configured variable (CHAIN_WALLET_KEY_ENV), not a fixed name
+        assert f"Check {self.KEY_ENV} environment variable and chain settings" in result.stderr
+        assert "CHAIN_NAME" in result.stderr
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+
+# --- #228, #229: a sent transaction whose outcome is not known is not "Transaction failed" ---
+
+
+@pytest.fixture
+def real_web3_errors():
+    """The real web3.exceptions module, imported before mock_chain_deps replaces web3.
+
+    List it before mock_chain_deps in a test's arguments.
+    """
+    return pytest.importorskip("web3.exceptions")
+
+
+def _use_real_web3_errors(real_web3_errors):
+    import sys
+    from unittest.mock import MagicMock
+
+    assert not isinstance(real_web3_errors, MagicMock)
+    sys.modules["web3"].exceptions = real_web3_errors
+
+
+def _rpc_error_answer(real_web3_errors, message, code=-32005):
+    return real_web3_errors.Web3RPCError(
+        str({"code": code, "message": message}),
+        rpc_response={"jsonrpc": "2.0", "id": 1, "error": {"code": code, "message": message}},
+    )
+
+
+class TestOutcomeUnknownAfterTheSend:
+    """ChainClient is real here; web3 and eth-account are mocked by mock_chain_deps."""
+
+    HASH = "a" * 64
+    SENT = "0x" + "bb" * 32  # what the mocked send_raw_transaction returns
+
+    @pytest.fixture
+    def not_registered(self, mock_chain_deps):
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            bytes.fromhex(self.HASH), "0x" + "0" * 40, 0, "", b"\x00" * 32, [], [], 0,
+        )
+
+    def test_receipt_wait_rpc_error_text(self, real_web3_errors, mock_chain_deps, not_registered):
+        """#228: a JSON-RPC error answer during the receipt wait."""
+        from typer.testing import CliRunner as _Runner
+
+        _use_real_web3_errors(real_web3_errors)
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.wait_for_transaction_receipt.side_effect = _rpc_error_answer(
+            real_web3_errors, "limit exceeded"
+        )
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "anchor", self.HASH])
+
+        assert result.exit_code == 3, result.stdout + result.stderr
+        assert "Transaction failed" not in result.stderr
+        assert "Outcome unknown" in result.stderr
+        assert f"Wait for it: swarm-prov-upload chain wait {self.SENT} --event DataRegistered" in result.stderr
+        assert "limit exceeded" in result.stderr
+        web3.eth.send_raw_transaction.assert_called_once()
+
+    def test_chain_wait_rpc_error_json(self, real_web3_errors, mock_chain_deps):
+        """#228: chain wait reports a JSON-RPC error answer as outcome unknown, exit 3."""
+        from typer.testing import CliRunner as _Runner
+
+        _use_real_web3_errors(real_web3_errors)
+        mock_chain_deps["web3_instance"].eth.wait_for_transaction_receipt.side_effect = (
+            _rpc_error_answer(real_web3_errors, "limit exceeded")
+        )
+
+        result = _Runner(mix_stderr=False).invoke(
+            app, ["chain", "wait", self.SENT, "--event", "DataRegistered", "--json"]
+        )
+
+        assert result.exit_code == 3, result.stdout + result.stderr
+        data = json.loads(result.stdout)
+        assert data["error"] == "outcome_unknown"
+        assert data["tx_hash"] == self.SENT
+        assert data["reason"] == "limit exceeded"
+        assert data["wait_command"] == f"swarm-prov-upload chain wait {self.SENT} --event DataRegistered"
+
+    def test_duplicate_send_json(self, real_web3_errors, mock_chain_deps, not_registered):
+        """#229: the send answered "already known": the hash is the signed transaction's."""
+        from typer.testing import CliRunner as _Runner
+        from swarm_provenance_uploader.core.chain_client import _signed_tx_hash
+
+        _use_real_web3_errors(real_web3_errors)
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.send_raw_transaction.side_effect = _rpc_error_answer(
+            real_web3_errors, "already known", code=-32000
+        )
+        signed = _signed_tx_hash(b"\x00" * 32)  # what the mocked wallet signs
+        signed = signed if signed.startswith("0x") else "0x" + signed
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "anchor", self.HASH, "--json"])
+
+        assert result.exit_code == 3, result.stdout + result.stderr
+        data = json.loads(result.stdout)
+        assert data["error"] == "outcome_unknown"
+        assert data["tx_hash"] in (signed, signed[2:])
+        assert data["reason"] == "already known"
+        assert data["wait_command"] == f"swarm-prov-upload chain wait {signed} --event DataRegistered"
+        web3.eth.send_raw_transaction.assert_called_once()
+        web3.eth.wait_for_transaction_receipt.assert_not_called()
