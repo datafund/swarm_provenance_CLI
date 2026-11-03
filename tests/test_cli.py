@@ -44,6 +44,7 @@ def reset_backend_config():
     _chain_config["wallet_key_env"] = "PROVENANCE_WALLET_KEY"
     _chain_config["explorer_url"] = None
     _chain_config["gas_limit"] = None
+    _chain_config["gas_limit_error"] = None
     yield
     # Reset again after test
     _backend_config["backend"] = "gateway"
@@ -63,6 +64,7 @@ def reset_backend_config():
     _chain_config["wallet_key_env"] = "PROVENANCE_WALLET_KEY"
     _chain_config["explorer_url"] = None
     _chain_config["gas_limit"] = None
+    _chain_config["gas_limit_error"] = None
 
 
 # =============================================================================
@@ -941,6 +943,14 @@ class TestX402StatusDetails:
         assert result.exit_code == 0
         assert "Enabled" in result.stdout
         assert "10.00" in result.stdout or "$10.00" in result.stdout
+
+    def test_x402_status_tiny_max_pay_in_scientific_notation(self):
+        """#236: a tiny limit is shown as 1E-100000000, not as 100 MB of zeros."""
+        result = runner.invoke(app, ["--x402", "--max-pay", "1e-100000000", "x402", "status"])
+
+        assert result.exit_code == 0, result.output[:500]
+        assert "Max auto-pay: $1E-100000000" in result.stdout
+        assert len(result.stdout) < 5000
 
 
 # =============================================================================
@@ -2619,13 +2629,60 @@ class TestChainIdMismatchHint:
             side_effect=exceptions.ChainConfigurationError("No private key"),
         )
 
-        result = _Runner(mix_stderr=False).invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "anchor", DUMMY_SWARM_REF])
 
         assert result.exit_code == 1
         assert "PROVENANCE_WALLET_KEY" in result.stderr
 
+        # A read-only command does not need the key, so the hint does not name it (#219)
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
 
-CHAIN_OWNER = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
+        assert result.exit_code == 1
+        assert "Check chain settings" in result.stderr
+        assert "PROVENANCE_WALLET_KEY" not in result.stderr
+
+
+class TestDeployBlockErrorHint:
+    """A bad CHAIN_DEPLOY_BLOCK names the setting, not the wallet key (#231, merge with #219)."""
+
+    @pytest.mark.parametrize("json_flag", [[], ["--json"]], ids=["text", "json"])
+    def test_write_command_names_only_the_setting(self, mocker, json_flag):
+        from typer.testing import CliRunner as _Runner
+
+        node = _fake_rpc_node(mocker, 84532)
+        mocker.patch.dict(_chain_config, {
+            "chain": "base-sepolia",
+            "rpc_url": "https://rpc.example.org",
+            "wallet_key_env": "PROVENANCE_WALLET_KEY",
+            "deploy_block": "abc",
+        })
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, *json_flag])
+
+        assert result.exit_code == 1
+        assert "Chain configuration invalid" in result.stderr
+        assert "CHAIN_DEPLOY_BLOCK" in result.stderr
+        assert "non-negative integer" in result.stderr
+        assert "PROVENANCE_WALLET_KEY" not in result.stderr
+        assert "PROVENANCE_WALLET_KEY" not in result.stdout
+        assert "Check chain settings" not in result.stderr
+        assert "Traceback" not in result.stderr + result.stdout
+        node.eth.send_raw_transaction.assert_not_called()
+
+    def test_chain_head_error_is_a_deploy_block_error(self):
+        """The deploy block above the chain head raises the same subclass."""
+        from unittest.mock import MagicMock as _Mock
+        from swarm_provenance_uploader.chain.event_cache import TransformationEventCache
+
+        contract = _Mock()
+        cache = TransformationEventCache()
+        with pytest.raises(exceptions.DeployBlockError, match="CHAIN_DEPLOY_BLOCK"):
+            cache.get_maps(contract, deploy_block=200, current_block=100)
+        contract.get_all_transformations.assert_not_called()
+        assert issubclass(exceptions.DeployBlockError, exceptions.ChainConfigurationError)
+
+
+CHAIN_OWNER ="0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
 
 
 def _verify_record(status="ACTIVE", owner=CHAIN_OWNER):
@@ -5089,6 +5146,140 @@ class TestChainGasLimitFlag:
         help_text = " ".join(option.help.split())
         assert "Skips gas estimation" in help_text
         assert "a transaction that would revert is still sent and costs gas" in help_text
+
+    GAS_COMMANDS = ["anchor", "set-storage-ref", "access", "status", "transfer",
+                    "delegate", "transform", "protect", "merge"]
+
+    def test_gas_commands_listed(self):
+        """GAS_COMMANDS names every chain command that has --gas."""
+        chain = typer.main.get_command(app).commands["chain"]
+        with_gas = {name for name, command in chain.commands.items()
+                    if any(p.name == "gas" for p in command.params)}
+        assert with_gas == set(self.GAS_COMMANDS)
+
+    def test_gas_check_option_names(self):
+        """_check_gas_limit_setting() finds --gas and --json by the parameter names gas and output_json.
+
+        A chain command that names either option differently would skip the
+        CHAIN_GAS_LIMIT check or print text instead of JSON (#226).
+        """
+        chain = typer.main.get_command(app).commands["chain"]
+        for name, command in chain.commands.items():
+            for param in command.params:
+                if "--gas" in param.opts:
+                    assert param.name == "gas", name
+                if "--json" in param.opts:
+                    assert param.name == "output_json", name
+
+    @pytest.mark.parametrize("command", GAS_COMMANDS)
+    def test_gas_has_lower_bound(self, command):
+        """--gas takes at least 21000, the gas of the simplest transaction, and has no upper bound (#226)."""
+        import click
+
+        chain = typer.main.get_command(app).commands["chain"]
+        option = next(p for p in chain.commands[command].params if p.name == "gas")
+        assert isinstance(option.type, click.IntRange)
+        assert option.type.min == 21000
+        assert option.type.max is None
+
+    @pytest.mark.parametrize("value", ["0", "-1", "20999", "1.5", "abc"])
+    def test_gas_below_minimum_is_usage_error(self, mocker, value):
+        """--gas below 21000 or not a whole number is a usage error (exit 2) before a chain client is built (#226)."""
+        get_client = mocker.patch("swarm_provenance_uploader.cli._get_chain_client")
+        try:
+            separate = CliRunner(mix_stderr=False)
+        except TypeError:  # Click 8.2+ always keeps stdout and stderr apart
+            separate = CliRunner()
+
+        result = separate.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--gas", value])
+
+        assert result.exit_code == 2
+        assert result.stdout == ""
+        output = re.sub(r"\x1b\[[0-9;]*m", "", result.stderr)
+        assert "--gas" in output
+        if value not in ("1.5", "abc"):
+            assert "21000" in output
+        get_client.assert_not_called()
+
+    def test_gas_minimum_accepted(self, mocker):
+        """--gas 21000 is accepted (#226)."""
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client")
+
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--gas", "21000"])
+
+        assert result.exit_code == 0, result.output
+        assert _chain_config["gas_limit"] == 21000
+
+
+class TestChainGasLimitSetting:
+    """A CHAIN_GAS_LIMIT that is not a gas limit of 21000 or more (#226)."""
+
+    ERROR = "CHAIN_GAS_LIMIT is not a whole number of at least 21000: 'abc'"
+
+    @pytest.fixture
+    def bad_setting(self, monkeypatch):
+        monkeypatch.setitem(_chain_config, "gas_limit_error", self.ERROR)
+
+    @pytest.fixture
+    def chain_client_class(self, mocker):
+        return mocker.patch("swarm_provenance_uploader.core.chain_client.ChainClient")
+
+    def test_write_command_reports_setting(self, bad_setting, chain_client_class):
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1
+        assert self.ERROR in result.output
+        assert "Traceback" not in result.output
+        chain_client_class.assert_not_called()
+
+    def test_write_command_json(self, bad_setting, chain_client_class):
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
+
+        assert result.exit_code == 1
+        assert json.loads(result.stdout) == {"error": "invalid_gas_limit", "message": self.ERROR}
+        chain_client_class.assert_not_called()
+
+    def test_gas_option_overrides_setting(self, bad_setting, chain_client_class):
+        """With --gas, CHAIN_GAS_LIMIT is not used, so its value does not matter."""
+        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--gas", "500000"])
+
+        assert result.exit_code == 0, result.output
+        assert chain_client_class.call_args.kwargs["gas_limit"] == 500000
+
+    def test_command_without_gas_ignores_setting(self, bad_setting, chain_client_class):
+        """A command that sends no transaction works with a bad CHAIN_GAS_LIMIT."""
+        from swarm_provenance_uploader.models import ChainWalletInfo
+
+        chain_client_class.return_value.balance.return_value = ChainWalletInfo(
+            address=DUMMY_ADDRESS, balance_wei=10**18, balance_eth="1.0",
+            chain="base-sepolia", contract_address="0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a",
+        )
+
+        result = runner.invoke(app, ["chain", "balance"])
+
+        assert result.exit_code == 0, result.output
+        chain_client_class.assert_called_once()
+
+    def test_status_query_ignores_setting(self, bad_setting, chain_client_class):
+        """chain status without --set sends no transaction, so a bad CHAIN_GAS_LIMIT does not stop it."""
+        from swarm_provenance_uploader.models import ChainProvenanceRecord, DataStatusEnum
+
+        chain_client_class.return_value.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF, owner=DUMMY_ADDRESS, timestamp=1700000000,
+            data_type="swarm-provenance", status=DataStatusEnum.ACTIVE,
+        )
+
+        result = runner.invoke(app, ["chain", "status", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 0, result.output
+        assert "ACTIVE" in result.output
+
+    def test_status_set_reports_setting(self, bad_setting, chain_client_class):
+        result = runner.invoke(app, ["chain", "status", DUMMY_SWARM_REF, "--set", "restricted"])
+
+        assert result.exit_code == 1
+        assert self.ERROR in result.output
+        chain_client_class.assert_not_called()
 
 
 class TestChainMergeCommand:
@@ -8511,6 +8702,16 @@ class TestReceiptTimeoutAndReplaced:
             timeout=120,
         )
 
+    def test_write_timeout_says_was_sent(self, mocker):
+        """A write sent the transaction itself: "The transaction was sent"."""
+        self._client(mocker, "access", self._timeout())
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 3, result.output
+        assert "Not confirmed yet. The transaction was sent, but no receipt" in result.output
+        assert "may have been sent" not in result.output
+
     def _replaced(self, event="DataAccessed"):
         from swarm_provenance_uploader.exceptions import TransactionReplacedError
 
@@ -8824,6 +9025,9 @@ class TestChainWait:
         assert "It may still be mined" in result.output
         assert "Running chain wait again is safe" in result.output
         assert "do not run" not in result.output.lower()
+        # chain wait was only given the hash: it does not know that it was sent
+        assert "may have been sent" in result.output
+        assert "The transaction was sent" not in result.output
         assert f"swarm-prov-upload chain wait {self.TX} --event DataRegistered" in result.output
 
         result = runner.invoke(app, ["chain", "wait", self.TX, "--json"])
@@ -9073,3 +9277,542 @@ class TestChainLineageAndDuplicateCheckWithRealClient:
             assert self.REJECTED in result.stderr
         mock_chain_deps["account"].sign_transaction.assert_not_called()
         mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+
+# --- #219: the chain configuration hint names the key only for commands that need it ---
+
+
+_READ_ONLY_CHAIN_ARGS = [
+    ["chain", "verify", "a" * 64],
+    ["chain", "get", "a" * 64],
+    ["chain", "get", "a" * 64, "--follow"],
+    ["chain", "lookup", "e" * 64],
+    ["chain", "status", "a" * 64],
+    ["chain", "wait", "0x" + "bb" * 32],
+]
+_READ_ONLY_CHAIN_IDS = ["verify", "get", "get-follow", "lookup", "status-query", "wait"]
+_KEY_CHAIN_ARGS = [
+    ["chain", "balance"],
+    ["chain", "anchor", "a" * 64],
+    ["chain", "set-storage-ref", "a" * 64, "e" * 64],
+    ["chain", "access", "a" * 64],
+    ["chain", "status", "a" * 64, "--set", "restricted"],
+    ["chain", "transfer", "a" * 64, "--to", "0x" + "1" * 40],
+    ["chain", "delegate", "0x" + "1" * 40, "--authorize"],
+    ["chain", "transform", "a" * 64, "c" * 64, "--description", "d"],
+    ["chain", "protect", "a" * 64, "c" * 64],
+    ["chain", "merge", "a" * 64, "b" * 64, "c" * 64, "--description", "d"],
+]
+_KEY_CHAIN_IDS = ["balance", "anchor", "set-storage-ref", "access", "status-set", "transfer",
+                  "delegate", "transform", "protect", "merge"]
+
+
+class TestChainConfigurationHint:
+    """An invalid chain setting points at the wallet key only for commands that use it (#219).
+
+    ChainClient is real here; web3 and eth-account are mocked by mock_chain_deps.
+    """
+
+    KEY_ENV = "MY_SIGNER_KEY_FOR_TEST"
+
+    @pytest.fixture
+    def bad_chain(self, monkeypatch):
+        monkeypatch.setitem(_chain_config, "chain", "no-such-chain")
+        monkeypatch.setitem(_chain_config, "wallet_key_env", self.KEY_ENV)
+
+    @pytest.mark.parametrize("args", _READ_ONLY_CHAIN_ARGS, ids=_READ_ONLY_CHAIN_IDS)
+    def test_read_only_command(self, bad_chain, mock_chain_deps, args):
+        from typer.testing import CliRunner as _Runner
+
+        result = _Runner(mix_stderr=False).invoke(app, args)
+
+        assert result.exit_code == 1, result.stdout + result.stderr
+        assert "Unsupported chain: no-such-chain" in result.stderr
+        assert "Check chain settings" in result.stderr
+        assert "CHAIN_NAME" in result.stderr
+        assert self.KEY_ENV not in result.stderr
+        assert "WALLET_KEY" not in result.stderr
+
+    @pytest.mark.parametrize("args", _KEY_CHAIN_ARGS, ids=_KEY_CHAIN_IDS)
+    def test_command_that_needs_the_key(self, bad_chain, mock_chain_deps, args):
+        from typer.testing import CliRunner as _Runner
+
+        result = _Runner(mix_stderr=False).invoke(app, args)
+
+        assert result.exit_code == 1, result.stdout + result.stderr
+        assert "Unsupported chain: no-such-chain" in result.stderr
+        # The configured variable (CHAIN_WALLET_KEY_ENV), not a fixed name
+        assert f"Check {self.KEY_ENV} environment variable and chain settings" in result.stderr
+        assert "CHAIN_NAME" in result.stderr
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+
+# --- #228, #229: a sent transaction whose outcome is not known is not "Transaction failed" ---
+
+
+@pytest.fixture
+def real_web3_errors():
+    """The real web3.exceptions module, imported before mock_chain_deps replaces web3.
+
+    List it before mock_chain_deps in a test's arguments.
+    """
+    return pytest.importorskip("web3.exceptions")
+
+
+def _use_real_web3_errors(real_web3_errors):
+    import sys
+    from unittest.mock import MagicMock
+
+    assert not isinstance(real_web3_errors, MagicMock)
+    sys.modules["web3"].exceptions = real_web3_errors
+
+
+def _rpc_error_answer(real_web3_errors, message, code=-32005):
+    return real_web3_errors.Web3RPCError(
+        str({"code": code, "message": message}),
+        rpc_response={"jsonrpc": "2.0", "id": 1, "error": {"code": code, "message": message}},
+    )
+
+
+class TestOutcomeUnknownAfterTheSend:
+    """ChainClient is real here; web3 and eth-account are mocked by mock_chain_deps."""
+
+    HASH = "a" * 64
+    SENT = "0x" + "bb" * 32  # what the mocked send_raw_transaction returns
+
+    @pytest.fixture
+    def not_registered(self, mock_chain_deps):
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            bytes.fromhex(self.HASH), "0x" + "0" * 40, 0, "", b"\x00" * 32, [], [], 0,
+        )
+
+    def test_receipt_wait_rpc_error_text(self, real_web3_errors, mock_chain_deps, not_registered):
+        """#228: a JSON-RPC error answer during the receipt wait."""
+        from typer.testing import CliRunner as _Runner
+
+        _use_real_web3_errors(real_web3_errors)
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.wait_for_transaction_receipt.side_effect = _rpc_error_answer(
+            real_web3_errors, "limit exceeded"
+        )
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "anchor", self.HASH])
+
+        assert result.exit_code == 3, result.stdout + result.stderr
+        assert "Transaction failed" not in result.stderr
+        assert "Outcome unknown" in result.stderr
+        # Not "was sent": after "nonce too low" it may not have been
+        assert "The transaction may have been sent, and it is not known whether it was mined." in result.stderr
+        assert f"Wait for it: swarm-prov-upload chain wait {self.SENT} --event DataRegistered" in result.stderr
+        assert "limit exceeded" in result.stderr
+        web3.eth.send_raw_transaction.assert_called_once()
+
+    def test_receipt_wait_rpc_error_json(self, real_web3_errors, mock_chain_deps, not_registered):
+        """#228: the same with --json: outcome_unknown on stdout, exit 3."""
+        from typer.testing import CliRunner as _Runner
+
+        _use_real_web3_errors(real_web3_errors)
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.wait_for_transaction_receipt.side_effect = _rpc_error_answer(
+            real_web3_errors, "limit exceeded"
+        )
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "anchor", self.HASH, "--json"])
+
+        assert result.exit_code == 3, result.stdout + result.stderr
+        data = json.loads(result.stdout)
+        assert data["error"] == "outcome_unknown"
+        assert data["tx_hash"] in (self.SENT, self.SENT[2:])
+        assert data["reason"] == "limit exceeded"
+        assert data["wait_command"] == f"swarm-prov-upload chain wait {self.SENT} --event DataRegistered"
+        web3.eth.send_raw_transaction.assert_called_once()
+
+    def test_chain_wait_rpc_error_json(self, real_web3_errors, mock_chain_deps):
+        """#228: chain wait reports a JSON-RPC error answer as outcome unknown, exit 3."""
+        from typer.testing import CliRunner as _Runner
+
+        _use_real_web3_errors(real_web3_errors)
+        mock_chain_deps["web3_instance"].eth.wait_for_transaction_receipt.side_effect = (
+            _rpc_error_answer(real_web3_errors, "limit exceeded")
+        )
+
+        result = _Runner(mix_stderr=False).invoke(
+            app, ["chain", "wait", self.SENT, "--event", "DataRegistered", "--json"]
+        )
+
+        assert result.exit_code == 3, result.stdout + result.stderr
+        data = json.loads(result.stdout)
+        assert data["error"] == "outcome_unknown"
+        assert data["tx_hash"] == self.SENT
+        assert data["reason"] == "limit exceeded"
+        assert data["wait_command"] == f"swarm-prov-upload chain wait {self.SENT} --event DataRegistered"
+
+    def test_duplicate_send_json(self, real_web3_errors, mock_chain_deps, not_registered):
+        """#229: the send answered "already known": the hash is the signed transaction's."""
+        from typer.testing import CliRunner as _Runner
+        from swarm_provenance_uploader.core.chain_client import _signed_tx_hash
+
+        _use_real_web3_errors(real_web3_errors)
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.send_raw_transaction.side_effect = _rpc_error_answer(
+            real_web3_errors, "already known", code=-32000
+        )
+        signed = _signed_tx_hash(b"\x00" * 32)  # what the mocked wallet signs
+        signed = signed if signed.startswith("0x") else "0x" + signed
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "anchor", self.HASH, "--json"])
+
+        assert result.exit_code == 3, result.stdout + result.stderr
+        data = json.loads(result.stdout)
+        assert data["error"] == "outcome_unknown"
+        assert data["tx_hash"] in (signed, signed[2:])
+        assert data["reason"] == "already known"
+        assert data["wait_command"] == f"swarm-prov-upload chain wait {signed} --event DataRegistered"
+        web3.eth.send_raw_transaction.assert_called_once()
+        web3.eth.wait_for_transaction_receipt.assert_not_called()
+
+
+def test_chain_wait_help_lists_outcome_unknown():
+    """chain wait --help names the exit 3 case of an error answer to the receipt lookup."""
+    result = CliRunner().invoke(app, ["chain", "wait", "--help"])
+
+    text = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    text = " ".join(text.replace("│", " ").split())
+    assert result.exit_code == 0
+    assert "outcome unknown" in text
+    assert "receipt lookup with an error" in text
+
+
+# --- Paid requests refused before settlement, end to end with mocked HTTP (#213, #215) ---
+
+class TestPaidRefusalBeforeSettlementCli:
+    """A real GatewayClient against mocked HTTP; the payment is approved without signing anything."""
+
+    GW = "https://test.gateway.io"
+    PAYMENT_REQUIRED = {"status_code": 402, "json": {"accepts": []}}
+
+    @pytest.fixture(autouse=True)
+    def _approve_without_signing(self, mocker):
+        from swarm_provenance_uploader.core.gateway_client import GatewayClient
+        from tests.test_gateway_client import _signed_header
+
+        mocker.patch.object(GatewayClient, "_approve_payment",
+                            return_value=(_signed_header(), "$0.050000", None))
+
+    def _upload(self, requests_mock, answer):
+        requests_mock.post(f"{self.GW}/api/v1/stamps/", [self.PAYMENT_REQUIRED, answer])
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            return runner.invoke(app, ["--x402", "--gateway-url", self.GW, "upload", "--file", "d.txt"])
+
+    def _extend(self, requests_mock, answer):
+        requests_mock.patch(f"{self.GW}/api/v1/stamps/{DUMMY_STAMP}/extend", [self.PAYMENT_REQUIRED, answer])
+        return runner.invoke(app, ["--x402", "--gateway-url", self.GW, "stamps", "extend", DUMMY_STAMP,
+                                   "--duration-hours", "48"])
+
+    def test_purchase_spend_ceiling_is_not_reported_as_possibly_charged(self, requests_mock):
+        from tests.test_gateway_client import SPEND_CEILING_503
+
+        result = self._upload(requests_mock, SPEND_CEILING_503)
+        assert result.exit_code == 1
+        assert "GATEWAY_DAILY_SPEND_CEILING" in result.output
+        assert "may have been taken" not in result.output
+        assert "Payment was taken" not in result.output
+
+    def test_extend_bee_price_zero_is_not_reported_as_possibly_charged(self, requests_mock):
+        from tests.test_gateway_client import BEE_PRICE_ZERO_503
+
+        result = self._extend(requests_mock, BEE_PRICE_ZERO_503)
+        assert result.exit_code == 1
+        assert "has not reported a current stamp price" in result.output
+        assert "may have been taken" not in result.output
+        assert "Payment was taken" not in result.output
+
+    @staticmethod
+    def _refusal(status, code, message):
+        return {"status_code": status,
+                "json": {"detail": {"code": code, "message": message}, "code": code, "message": message}}
+
+    @pytest.mark.parametrize("status,code", [
+        (403, "STAMP_OWNERSHIP_DENIED"), (400, "EXTENSION_TOO_SMALL"), (400, "STAMP_COST_EXCEEDS_LIMIT"),
+        (503, "GATEWAY_DAILY_SPEND_CEILING"),
+    ])
+    def test_extend_refusal_does_not_count_a_payment(self, requests_mock, status, code):
+        """#215: reproduced in the #214 review as 'Payments sent: $0.050000 USDC (1 payment(s))'."""
+        result = self._extend(requests_mock, self._refusal(status, code, "Refused before payment."))
+        assert result.exit_code == 1
+        assert f"HTTP {status} {code}: Refused before payment." in result.output
+        assert "Payments sent" not in result.output
+
+    def test_extend_validation_error_does_not_count_a_payment(self, requests_mock):
+        result = self._extend(requests_mock, {"status_code": 422, "json": {
+            "detail": [{"loc": ["body", "duration_hours"], "msg": "too large"}],
+            "code": "VALIDATION_ERROR", "message": "The request is invalid; see detail for the fields."}})
+        assert result.exit_code == 1
+        assert "HTTP 422" in result.output
+        assert "Payments sent" not in result.output
+
+    @pytest.mark.parametrize("status,code", [
+        (400, "STAMP_COST_EXCEEDS_LIMIT"), (503, "GATEWAY_DAILY_SPEND_CEILING"), (503, "PURCHASE_CAPACITY"),
+    ])
+    def test_purchase_refusal_does_not_count_a_payment(self, requests_mock, status, code):
+        result = self._upload(requests_mock, self._refusal(status, code, "Refused before payment."))
+        assert result.exit_code == 1
+        assert code in result.output
+        assert "Payments sent" not in result.output
+
+    def test_extend_settled_not_delivered_still_counts_the_payment(self, requests_mock):
+        result = self._extend(requests_mock, {
+            "status_code": 400, "headers": {"X-Payment-Status": "settled_not_delivered",
+                                            "X-Payment-Transaction": "0x" + "cd" * 32},
+            "json": {"detail": "Bee refused the top-up."}})
+        assert result.exit_code == 1
+        assert "Payment was taken, but the stamp extension failed" in result.output
+        assert "Payments sent: $0.050000 USDC (1 payment(s))" in result.output
+
+    def test_purchase_success_still_counts_the_payment(self, requests_mock):
+        requests_mock.post(f"{self.GW}/api/v1/stamps/", [self.PAYMENT_REQUIRED, {
+            "status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        requests_mock.post(f"{self.GW}/api/v1/data/", status_code=500, json={"detail": "boom"})
+        requests_mock.get(f"{self.GW}/api/v1/stamps/{DUMMY_STAMP}", json={
+            "batchID": DUMMY_STAMP, "usable": True, "exists": True, "depth": 17, "amount": "1",
+            "bucketDepth": 16, "immutableFlag": False, "batchTTL": 3600})
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--x402", "--gateway-url", self.GW, "upload", "--file", "d.txt"])
+        assert "Postage stamp purchased" in result.output, result.output
+        assert "Payments sent: $0.050000 USDC (1 payment(s))" in result.output
+
+
+# --- A paid 2xx whose body could not be read (#216) ---
+
+class TestPaidResultUnreadableCli:
+    PAYER = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
+    PAYMENT = dict(payer=PAYER, nonce="0x" + "ab" * 32, amount_usd="$0.050000", network="base-sepolia",
+                   transaction="0x" + "cd" * 32, idempotency_key="key-216", status_code=201)
+
+    def _error(self):
+        return exceptions.PaymentResultUnreadableError(
+            "The payment was collected and the gateway answered HTTP 201, but its response "
+            "could not be read (ValueError: not JSON).", **self.PAYMENT)
+
+    def _client(self, mocker, **behaviour):
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.return_value = DUMMY_STAMP
+        mock_client.get_pool_available_count.return_value = 1
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=DUMMY_STAMP, usable=True, exists=True, depth=17, amount="1",
+            bucketDepth=16, immutableFlag=False, batchTTL=3600,
+        )
+        mock_client.upload_data.return_value = DUMMY_SWARM_REF
+        for name, effect in behaviour.items():
+            getattr(mock_client, name).side_effect = effect
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        return mock_client
+
+    def _upload(self, *args):
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            return runner.invoke(app, ["--x402", "upload", "--file", "d.txt", *args])
+
+    def _assert_common(self, result):
+        # A warning, not an error: the request most likely worked. Exit 1 all the same.
+        assert result.exit_code == 1
+        assert "ERROR" not in result.output
+        assert "its result could not be read" in result.output
+        assert "Payment was taken, but" not in result.output
+        # With the key (PAYMENT has one) only a re-run without it pays again
+        assert "A re-run without the key pays again." in result.output
+        assert "cannot be looked up" not in result.output
+        assert self.PAYMENT["transaction"] in result.output
+
+    def test_extend(self, mocker):
+        self._client(mocker, extend_stamp=self._error())
+        result = runner.invoke(app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
+        self._assert_common(result)
+        assert "WARNING: The stamp extension most likely succeeded, but its result could not be read." \
+            in result.output
+        assert f"swarm-prov-upload stamps info {DUMMY_STAMP}" in result.output
+        assert ("The extension worked if the Amount it shows is higher and the TTL is longer "
+                "than before the extension.") in result.output
+        # A hedge: how soon Bee shows the new values is not verified
+        assert "may take a few minutes to show" in result.output
+        assert "per chunk" not in result.output
+        assert "SUCCESS" not in result.output
+
+    def test_stamp_purchase(self, mocker):
+        self._client(mocker, purchase_stamp=self._error())
+        result = self._upload()
+        self._assert_common(result)
+        assert "WARNING: The stamp purchase most likely succeeded, but its result could not be read." \
+            in result.output
+        assert f"swarm-prov-upload stamps list --wallet {self.PAYER} --full" in result.output
+        assert "TTL" not in result.output
+
+    def test_pool_acquisition(self, mocker):
+        self._client(mocker, acquire_stamp_from_pool=self._error())
+        result = self._upload("--usePool")
+        self._assert_common(result)
+        assert "WARNING: The pool stamp acquisition most likely succeeded, but its result could not be read." \
+            in result.output
+        assert f"swarm-prov-upload stamps list --wallet {self.PAYER} --full" in result.output
+
+    def test_upload(self, mocker):
+        self._client(mocker, upload_data=self._error())
+        result = self._upload()
+        self._assert_common(result)
+        assert "WARNING: The upload most likely succeeded, but its result could not be read." in result.output
+        assert "stamps info" not in result.output
+        assert "Swarm reference" in result.output
+
+    def test_stamp_purchase_without_payer(self, mocker):
+        """With no payer there is no check command, and the missing result is the batch ID."""
+        payment = dict(self.PAYMENT, payer=None)
+        self._client(mocker, purchase_stamp=exceptions.PaymentResultUnreadableError(
+            "The payment was collected and the gateway answered HTTP 201, but its response "
+            "could not be read (ValueError: not JSON).", **payment))
+        result = self._upload()
+        self._assert_common(result)
+        assert "WARNING: The stamp purchase most likely succeeded, but its result could not be read." \
+            in result.output
+        assert "stamps list" not in result.output
+        assert "Swarm reference" not in result.output
+        assert "batch ID" in result.output
+
+    def test_pool_acquisition_without_payer(self, mocker):
+        payment = dict(self.PAYMENT, payer=None)
+        self._client(mocker, acquire_stamp_from_pool=exceptions.PaymentResultUnreadableError(
+            "Unreadable.", **payment))
+        result = self._upload("--usePool")
+        self._assert_common(result)
+        assert "Swarm reference" not in result.output
+        assert "batch ID" in result.output
+
+    def test_extend_with_amount_names_it(self, mocker):
+        self._client(mocker, extend_stamp=self._error())
+        result = runner.invoke(app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--amount", "5000000000"])
+        self._assert_common(result)
+        assert "higher by 5000000000" in result.output
+
+    @pytest.mark.parametrize("what", ["upload", "purchase"])
+    def test_with_key_offers_the_same_key_rerun(self, mocker, what):
+        """#216: the gateway answers a same-key re-run from the stored 2xx result, without settling again."""
+        if what == "upload":
+            self._client(mocker, upload_data=self._error())
+        else:
+            self._client(mocker, purchase_stamp=self._error())
+        result = self._upload()
+        self._assert_common(result)
+        assert ("A gateway that supports Idempotency-Key answers a re-run with the same key from the "
+                "first request, without charging again. It returns the first answer, which includes the "
+                "result if a proxy or the connection lost it; if the gateway's own answer lacked it, the "
+                "replay lacks it too:") in result.output
+        assert "--idempotency-key key-216" in result.output
+
+    @pytest.mark.parametrize("what", ["upload", "purchase"])
+    def test_without_key_no_rerun_offer(self, mocker, what):
+        err = exceptions.PaymentResultUnreadableError(
+            "Unreadable.", **dict(self.PAYMENT, idempotency_key=None))
+        if what == "upload":
+            self._client(mocker, upload_data=err)
+        else:
+            self._client(mocker, purchase_stamp=err)
+        result = self._upload()
+        assert result.exit_code == 1
+        assert "Idempotency-Key" not in result.output
+        assert "--idempotency-key" not in result.output
+        assert "Re-running pays again." in result.output
+        assert "cannot be looked up" not in result.output
+
+    def test_stamp_purchase_shows_the_label_and_no_depth_or_ttl(self, mocker):
+        """#216: only claims that hold for every CLI purchase (the gateway may use a size preset over
+        --depth, and --amount sets the TTL), so neither depth nor TTL is stated."""
+        err = self._error()
+        err.label_prefix = "paid-"
+        err.depth = 20  # even if a caller sets it, the CLI does not state it
+        self._client(mocker, purchase_stamp=err)
+        result = self._upload("--size", "small", "--depth", "20")
+        self._assert_common(result)
+        assert "Stamp label:     paid-<suffix>" in result.output
+        assert ("Stamps the CLI buys have a label that starts with paid- (most stamps from the pool "
+                "start with pool-). The new one has utilization 0%.") in result.output
+        assert ("It may show Usable: No, or not be listed yet, for a few minutes after the purchase."
+                in result.output)
+        report = result.output.split("most likely succeeded")[1]
+        assert "Depth" not in report and "depth" not in report
+        assert "TTL" not in report and "duration" not in report
+        assert "newest" not in report
+        assert "look for the stamp whose label starts with" not in report
+
+    def test_stamp_purchase_with_amount_states_no_ttl(self, mocker):
+        err = self._error()
+        err.label_prefix = "paid-"
+        self._client(mocker, purchase_stamp=err)
+        result = self._upload("--amount", "100000000")
+        report = result.output.split("most likely succeeded")[1]
+        assert "The new one has utilization 0%." in report
+        assert "TTL" not in report and "duration" not in report
+
+    def test_library_label_prefix_is_looked_for(self, mocker):
+        """Only a library call of purchase_stamp(label=...) gives a prefix of its own."""
+        err = self._error()
+        err.label_prefix = "mine-"
+        self._client(mocker, purchase_stamp=err)
+        result = self._upload()
+        assert "In that list, look for the stamp whose label starts with mine-." in result.output
+
+    def test_pool_acquisition_shows_no_label(self, mocker):
+        self._client(mocker, acquire_stamp_from_pool=self._error())
+        result = self._upload("--usePool")
+        self._assert_common(result)
+        assert "Stamp label" not in result.output
+        assert "label starts with" not in result.output
+        assert ("It may show Usable: No, or not be listed yet, for a few minutes after the purchase."
+                in result.output)
+
+    def test_upload_has_no_purchase_timing_note(self, mocker):
+        self._client(mocker, upload_data=self._error())
+        result = self._upload()
+        assert "Usable: No" not in result.output
+
+    def test_other_settled_report_unchanged(self, mocker):
+        err = exceptions.PaymentSettledNotDeliveredError("Collected, failed.", **self.PAYMENT)
+        self._client(mocker, extend_stamp=err)
+        result = runner.invoke(app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
+        assert result.exit_code == 1
+        assert "ERROR: Payment was taken, but the stamp extension failed" in result.output
+        assert "most likely succeeded" not in result.output
+        assert "Contact the gateway operator with the transaction above" in result.output
+
+
+# --- A paid pool acquire answered 2xx with success:false (#209) ---
+
+class TestPaidPoolAcquireNotAcquiredCli:
+    GW = "https://test.gateway.io"
+
+    def test_reported_as_paid_and_not_delivered(self, mocker, requests_mock):
+        from swarm_provenance_uploader.core.gateway_client import GatewayClient
+        from tests.test_gateway_client import _signed_header
+
+        mocker.patch.object(GatewayClient, "_approve_payment",
+                            return_value=(_signed_header(), "$0.050000", None))
+        mocker.patch.object(GatewayClient, "get_pool_available_count", return_value=1)
+        requests_mock.post(f"{self.GW}/api/v1/pool/acquire", [
+            {"status_code": 402, "json": {"accepts": []}},
+            {"status_code": 200, "json": {"success": False, "message": "Not\x1b[2J acquired",
+                                          "fallback_used": False}}])
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--x402", "--gateway-url", self.GW, "upload", "--file", "d.txt",
+                                         "--usePool"])
+        assert result.exit_code == 1
+        assert "Payment was taken, but the pool stamp acquisition failed" in result.output
+        assert "Re-running pays again" in result.output
+        assert "Retry may succeed" not in result.output
+        assert "Try again immediately" not in result.output
+        assert "\x1b" not in result.output
+        assert "Payments sent: $0.050000 USDC (1 payment(s))" in result.output

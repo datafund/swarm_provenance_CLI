@@ -552,3 +552,98 @@ def test_invalid_chain_deploy_block_is_a_configuration_error():
     assert result.exit_code == 1, result.output
     assert "CHAIN_DEPLOY_BLOCK" in result.output
     assert "non-negative integer" in result.output
+
+
+# --- Gas limit (#226) --------------------------------------------------------
+
+PRINT_GAS_LIMIT = ("import swarm_provenance_uploader.config as c; "
+                   "print(repr(c.CHAIN_GAS_LIMIT)); print(repr(c.CHAIN_GAS_LIMIT_ERROR))")
+
+
+def _gas_env(value):
+    env = _clean_env(PYTHONPATH=str(ROOT))  # this checkout, not another installed copy
+    env.pop("CHAIN_GAS_LIMIT", None)
+    if value is not None:
+        env["CHAIN_GAS_LIMIT"] = value
+    env["PYTHONIOENCODING"] = "utf-8"  # the full-width digits case
+    return env
+
+
+@pytest.mark.parametrize("raw, limit", [("21000", 21000), ("500000", 500000), (" 500000 ", 500000),
+                                        ("", None), (None, None)])
+def test_gas_limit_setting_accepted(tmp_path, raw, limit):
+    tmp_path = tmp_path / "work"
+    tmp_path.mkdir()
+    out = _run(PRINT_GAS_LIMIT, tmp_path, _gas_env(raw))
+    assert out == [repr(limit), "None"]
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "20999", "abc", "1.5", "50_000", "+50000", "\uff15\uff10\uff10\uff10\uff10"])
+def test_gas_limit_setting_rejected(tmp_path, raw):
+    """A value that is not a whole number of at least 21000 is not used, and the error names CHAIN_GAS_LIMIT."""
+    tmp_path = tmp_path / "work"
+    tmp_path.mkdir()
+    out = _run(PRINT_GAS_LIMIT, tmp_path, _gas_env(raw))
+    assert out[0] == "None"
+    assert out[1] == repr(f"CHAIN_GAS_LIMIT is not a whole number of at least 21000: {raw!r}")
+
+
+def _run_cli(args, cwd, env):
+    script = Path(cwd).parent / ("_cli_%s.py" % Path(cwd).name)
+    script.write_text("import sys\nfrom swarm_provenance_uploader.cli import app\n"
+                      "sys.argv = ['swarm-prov-upload'] + %r\napp()\n" % (args,))
+    return subprocess.run([sys.executable, str(script)], cwd=str(cwd), env=env,
+                          capture_output=True, text=True, timeout=120)
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "20999", "abc"])
+def test_bad_gas_limit_setting_stops_write(tmp_path, raw):
+    """A chain write with a bad CHAIN_GAS_LIMIT exits 1 with an error that names it, not a traceback."""
+    tmp_path = tmp_path / "work"
+    tmp_path.mkdir()
+    result = _run_cli(["chain", "anchor", "a" * 64], tmp_path, _gas_env(raw))
+
+    assert result.returncode == 1
+    assert "Traceback" not in result.stderr
+    assert f"CHAIN_GAS_LIMIT is not a whole number of at least 21000: {raw!r}" in result.stderr
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "20999", "abc"])
+def test_bad_gas_limit_setting_json(tmp_path, raw):
+    """With --json, stdout is one JSON document that names CHAIN_GAS_LIMIT."""
+    import json
+
+    tmp_path = tmp_path / "work"
+    tmp_path.mkdir()
+    result = _run_cli(["chain", "anchor", "a" * 64, "--json"], tmp_path, _gas_env(raw))
+
+    assert result.returncode == 1
+    assert "Traceback" not in result.stderr
+    assert json.loads(result.stdout) == {
+        "error": "invalid_gas_limit",
+        "message": f"CHAIN_GAS_LIMIT is not a whole number of at least 21000: {raw!r}",
+    }
+
+
+def test_chain_client_does_not_load_dotenv(tmp_path):
+    """Building a ChainClient does not import config, so a library caller's .env is not loaded (#226)."""
+    pytest.importorskip("web3")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / ".env").write_text("SWARM_PROV_DOTENV_SENTINEL=loaded\n")
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("CHAIN_", "PROVENANCE_", "X402_", "SWARM_")) and k != "PYTHONPATH"}
+    env["PYTHONPATH"] = str(ROOT)  # this checkout, not another installed copy
+    code = "\n".join([
+        "import os, socket, sys",
+        "def _blocked(*args, **kwargs):",
+        "    raise OSError('network blocked in this test')",
+        "socket.socket.connect = _blocked",
+        "socket.create_connection = _blocked",
+        "from swarm_provenance_uploader.core.chain_client import ChainClient",
+        "ChainClient(chain='base-sepolia', gas_limit=21000, require_wallet=False)",
+        "print('swarm_provenance_uploader.config' in sys.modules)",
+        "print('SWARM_PROV_DOTENV_SENTINEL' in os.environ)",
+    ])
+    assert _run(code, work, env) == ["False", "False"]

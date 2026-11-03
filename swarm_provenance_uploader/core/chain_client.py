@@ -12,6 +12,8 @@ import ast
 import functools
 import json
 import logging
+import re
+from collections.abc import Mapping
 from typing import List, NoReturn, Optional, Union
 
 from ..chain.contract import EVENT_LOOKBACK_BLOCKS, DataStatus, _normalize_hash
@@ -45,7 +47,7 @@ from ..models import (
     TransformResult,
     TransactionWaitResult,
 )
-from ..chain.exceptions import redact_exception_chain, replaced_check_advice
+from ..chain.exceptions import _redacted_copy, redact_exception_chain, replaced_check_advice
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +116,29 @@ def _is_transaction_not_found(error: Exception) -> bool:
     Matched by class name, like _is_contract_revert.
     """
     return any(cls.__name__ == "TransactionNotFound" for cls in type(error).__mro__)
+
+
+# What nodes answer to a send of a transaction they already have, or whose
+# nonce is used (#229): geth, Nethermind, Erigon and reth "already known"
+# and "nonce too low" (reth adds the nonces), Besu "Known transaction" and
+# "Nonce too low". Matched as words, ignoring case, in the node's message:
+# "known transaction" must not match inside "unknown transaction type".
+_DUPLICATE_SEND_TEXT = re.compile(
+    r"(?<![a-z])(already known|known transaction|nonce too low)(?![a-z])", re.IGNORECASE
+)
+
+
+def _is_duplicate_send(error: Exception) -> bool:
+    """True if a JSON-RPC rejection of a send says the transaction may be sent (#229).
+
+    The node already has this transaction, or a transaction with its nonce
+    is already mined. Either can be the answer to a repeated send of the
+    same signed bytes, whose first request reached the node: by a proxy or
+    load balancer, or by an RPC library that retries.
+    """
+    if not _is_rpc_rejection(error):
+        return False
+    return _DUPLICATE_SEND_TEXT.search(_error_reason(error)) is not None
 
 
 # How long a write waits for its receipt, in seconds (also the chain wait default)
@@ -379,6 +404,61 @@ def _read_error(error: Exception, rpc_url: Optional[str]) -> Optional[ChainError
     return None
 
 
+def _redact_value(value):
+    """value with URLs and registered URL secrets redacted in its strings (#234).
+
+    An exception inside value (for example in the args of another exception)
+    becomes a RedactedException copy with its redacted text. A mapping
+    (a dict, or web3's AttributeDict) is rebuilt as a dict with redacted
+    values; tuples, lists, sets and frozensets keep their type. Bytes are
+    kept as they are: they may be binary revert data, which decoding and
+    redacting as text would change.
+    """
+    if isinstance(value, str):
+        return redact_urls(value)
+    if isinstance(value, BaseException):
+        return _redacted_copy(value)
+    if isinstance(value, tuple):
+        return tuple(_redact_value(v) for v in value)
+    if isinstance(value, list):
+        return [_redact_value(v) for v in value]
+    if isinstance(value, (set, frozenset)):
+        return type(value)(_redact_value(v) for v in value)
+    if isinstance(value, Mapping):
+        return {k: _redact_value(v) for k, v in value.items()}
+    return value
+
+
+def _redact_in_place(error: Exception) -> None:
+    """Redact the text of an exception that a ChainClient method passes through (#234).
+
+    For example a ContractLogicError, ContractCustomError or
+    BadFunctionCallOutput from a contract read, whose message or data can
+    repeat the RPC URL with its API key. The exception keeps its type and
+    identity, so callers that catch the web3 class still catch it. Its
+    ``args`` (what str() shows) and its ``message``, ``data`` and
+    ``user_message`` attributes, a Web3RPCError's ``rpc_response`` (the
+    JSON-RPC answer) and the exception's ``__notes__`` (add_note) are
+    redacted; other attributes, such as
+    OffchainLookup's ``payload``, are kept.
+
+    redact_urls also cuts every registered URL secret out of the text. If a
+    secret is hex only and appears inside hex revert data, that part of
+    the data is cut too. This is intended: the key must not leak, and the
+    data is then incomplete.
+    """
+    try:
+        error.args = _redact_value(error.args)
+    except Exception:  # an exception type that does not allow it
+        pass
+    for name in ("message", "data", "user_message", "rpc_response", "__notes__"):
+        if name in getattr(error, "__dict__", {}):
+            try:
+                setattr(error, name, _redact_value(getattr(error, name)))
+            except Exception:
+                pass
+
+
 def _redacted_errors(map_rpc_failures: bool):
     """Decorate a public ChainClient method so its errors do not repeat the RPC URL (#187).
 
@@ -389,7 +469,9 @@ def _redacted_errors(map_rpc_failures: bool):
     transport failure (_with_fallback, #168), and a raw RPC
     failure becomes a chain error (_read_error), raised from it, so the
     redacted original stays in ``__cause__`` and a traceback still shows
-    where it failed. Other exceptions pass through unchanged.
+    where it failed. Other exceptions, such as a contract revert from a
+    read, pass through with their own type, redacted in place
+    (_redact_in_place) and with a redacted exception chain (#234).
     """
     def decorator(method):
         @functools.wraps(method)
@@ -409,12 +491,13 @@ def _redacted_errors(map_rpc_failures: bool):
                 except ChainError:
                     raise
                 except Exception as e:
-                    if not map_rpc_failures:
-                        raise
-                    error = _read_error(e, self._provider.rpc_url)
-                    if error is None:
-                        raise
-                    raise error from e
+                    if map_rpc_failures:
+                        error = _read_error(e, self._provider.rpc_url)
+                        if error is not None:
+                            raise error from e
+                    _redact_in_place(e)
+                    redact_exception_chain(e)
+                    raise
             except ChainError as e:
                 redact_exception_chain(e)
                 raise
@@ -463,6 +546,7 @@ class ChainClient:
             gas_limit_multiplier: Safety multiplier for gas estimates (default 1.2).
             explorer_url: Custom block explorer URL. If None, uses preset.
             gas_limit: Explicit gas limit. If set, skips estimation and multiplier.
+                Must be an int of at least 21000 (config.MIN_GAS_LIMIT).
             rpc_fallbacks: Fallback RPC URLs tried in order on failure.
             require_wallet: If True (default), load the wallet key now. If
                 False, load it on first use, so read-only operations work
@@ -475,8 +559,19 @@ class ChainClient:
 
         Raises:
             ChainConfigurationError: If dependencies missing or config invalid,
-                or if require_wallet is True and no valid key is configured.
+                if gas_limit is not an int of at least 21000, or if
+                require_wallet is True and no valid key is configured.
         """
+        # constants, not config: importing config would load a .env file
+        from ..constants import MIN_GAS_LIMIT
+
+        if gas_limit is not None and (
+            isinstance(gas_limit, bool) or not isinstance(gas_limit, int) or gas_limit < MIN_GAS_LIMIT
+        ):
+            raise ChainConfigurationError(
+                f"gas_limit must be a whole number of at least {MIN_GAS_LIMIT}, got {gas_limit!r}"
+            )
+
         from ..chain.provider import ChainProvider
         from ..chain.contract import DataProvenanceContract
 
@@ -795,12 +890,15 @@ class ChainClient:
                 RECEIPT_TIMEOUT seconds. The transaction may still be mined.
             TransactionReplacedError: If the receipt wait timed out and
                 another transaction with the same nonce was mined instead.
-            TransactionOutcomeUnknownError: If the connection to the RPC
-                fails after send_raw_transaction was called. The
-                transaction may have been sent. The client does not sign
-                or send a new transaction (web3's HTTP provider may repeat
-                the eth_sendRawTransaction request with the same signed
-                bytes, which has the same hash and nonce).
+            TransactionOutcomeUnknownError: If the transaction may have
+                been sent, but it is not known whether it was mined: the
+                connection to the RPC fails after send_raw_transaction was
+                called; the RPC answers the send with "already known" or
+                "nonce too low" (#229); or, after the send returned the
+                hash, the receipt wait fails with an error that is not a
+                timeout, such as a JSON-RPC error answer (#228). The client
+                does not sign or send a new transaction, and the provider
+                does not repeat eth_sendRawTransaction.
             ChainTransactionError: If transaction fails.
         """
         web3 = self._provider.web3
@@ -808,6 +906,8 @@ class ChainClient:
         # failure does not mean that nothing was sent
         send_called = False
         raw_tx = None
+        # Set when send_raw_transaction returned: the transaction was sent
+        tx_hash = None
 
         self._check_contract_code()
 
@@ -878,6 +978,24 @@ class ChainClient:
         except (ChainTransactionError, InsufficientFundsError):
             raise
         except Exception as e:
+            # Every other error is classified here, in this order:
+            # 1. A ChainError before signing (raw_tx None), such as a
+            #    ContractCodeNotFoundError from prepare(): unchanged, nothing
+            #    was sent.
+            # 2. "insufficient funds" before the hash returned, not a revert:
+            #    InsufficientFundsError.
+            # 3. A transport failure before send_raw_transaction was called:
+            #    ChainConnectionError, nothing was sent.
+            # 4. A duplicate-send answer to send_raw_transaction (#229):
+            #    outcome unknown, "may have been sent".
+            # 5. A transport failure while send_raw_transaction ran: outcome
+            #    unknown, "may have been sent".
+            # 6. A transport failure after the hash returned: outcome unknown,
+            #    "was sent". The contract code check never runs after the send,
+            #    so no ContractCodeNotFoundError reaches this branch.
+            # 7. Any other error after the hash returned that is not a revert
+            #    (#228): outcome unknown, "was sent".
+            # 8. Anything else: ChainTransactionError.
             if isinstance(e, ChainError) and raw_tx is None:
                 # From the contract code check in prepare() (for example
                 # ContractCodeNotFoundError after a switch, #230): nothing
@@ -887,7 +1005,13 @@ class ChainClient:
             # Detect "insufficient funds" in RPC error messages and convert.
             # A contract revert is checked first, as in _build_tx: its reason
             # may contain the words without being a funding problem.
-            if not _is_contract_revert(e) and "insufficient funds" in reason.lower():
+            # Only before the send returned the hash: after it, the
+            # transaction was sent, whatever the error says
+            if (
+                tx_hash is None
+                and not _is_contract_revert(e)
+                and "insufficient funds" in reason.lower()
+            ):
                 try:
                     balance_wei = self._wallet.get_balance(self._provider.web3)
                     raise InsufficientFundsError(
@@ -902,7 +1026,7 @@ class ChainClient:
                 except Exception:
                     pass  # Fall through to generic handler
             tx_hash_str = None
-            if "tx_hash" in dir():
+            if tx_hash is not None:
                 tx_hash_str = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
             elif send_called:
                 # The send raised before it returned the hash: the hash of
@@ -910,19 +1034,59 @@ class ChainClient:
                 tx_hash_str = _signed_tx_hash(raw_tx)
             # Transport only: connection, timeout, or an answer that is not
             # JSON-RPC. A JSON-RPC error answer means the node answered. A
-            # receipt-wait timeout keeps its own handling.
-            if _is_rpc_failure(e) and not _is_rpc_rejection(e) and not _is_receipt_timeout(e):
-                if not send_called:
-                    raise ChainConnectionError(
-                        f"The RPC endpoint failed before the transaction was sent: {reason}",
-                        rpc_url=self._provider.rpc_url,
-                    ) from e
+            # receipt-wait timeout keeps its own handling. After the hash
+            # returned, a ChainConnectionError counts too (_is_transport_failure):
+            # the receipt wait raises it unchanged when no RPC is left. Before,
+            # the old test is kept, so a ChainConnectionError there is
+            # reported as before.
+            if tx_hash is not None:
+                transport = _is_transport_failure(e)
+            else:
+                transport = (
+                    _is_rpc_failure(e) and not _is_rpc_rejection(e) and not _is_receipt_timeout(e)
+                )
+            if transport and not send_called:
+                raise ChainConnectionError(
+                    f"The RPC endpoint failed before the transaction was sent: {reason}",
+                    rpc_url=self._provider.rpc_url,
+                ) from e
+            if send_called and tx_hash is None and _is_duplicate_send(e):
+                # The node has this transaction, or its nonce is used: a
+                # repeated send of the same bytes gets this answer (#229)
+                message = (
+                    f"Outcome unknown: the RPC answered the send of transaction "
+                    f"{tx_hash_str or '(hash unknown)'} with \"{reason}\". It gives this "
+                    f"answer when it already has the transaction or its nonce is used, "
+                    f"so the transaction may have been sent and its outcome is unknown"
+                )
+            elif transport and send_called and tx_hash is None:
+                # send_raw_transaction itself failed: the request may or may
+                # not have reached the node
+                message = (
+                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} may "
+                    f"have been sent, but the connection to the RPC failed while it was "
+                    f"being sent, so its outcome is unknown: {reason}"
+                )
+            elif transport and tx_hash is not None:
+                message = (
+                    f"Outcome unknown: transaction {tx_hash_str} was sent, but the "
+                    f"connection to the RPC failed, so its outcome is unknown: {reason}"
+                )
+            elif tx_hash is not None and not _is_contract_revert(e):
+                # The send returned the hash, so the transaction was sent
+                # (#228). _await_receipt reports its own errors; this covers
+                # anything else after the send.
+                message = (
+                    f"Outcome unknown: transaction {tx_hash_str} was sent, but "
+                    f"confirming it failed, so its outcome is unknown: {reason}"
+                )
+            else:
+                message = None
+            if message is not None:
                 # The transaction may have been broadcast: do not sign or
                 # send a new one, and do not report it as failed
                 raise TransactionOutcomeUnknownError(
-                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} was "
-                    f"sent, but the connection to the RPC failed, so its outcome is "
-                    f"unknown: {reason}",
+                    message,
                     tx_hash=tx_hash_str,
                     event_name=expected_event,
                     expected_count=expected_count,
@@ -955,7 +1119,11 @@ class ChainClient:
 
         On a receipt timeout (web3 TimeExhausted), see _receipt_after_timeout.
         A timeout after the wait moved to a fallback is reported as
-        TransactionOutcomeUnknownError, without the nonce check.
+        TransactionOutcomeUnknownError, without the nonce check. Any other
+        error of the wait that is not a transport failure, such as a
+        JSON-RPC error answer, is TransactionOutcomeUnknownError too (#228).
+        A transport failure with no RPC left is raised unchanged, for the
+        caller to report.
 
         Args:
             tx_hash: The hash as passed to web3 (bytes or hex string).
@@ -974,6 +1142,9 @@ class ChainClient:
         """
         web3 = self._provider.web3
         waits = [0]
+        # A write knows that it sent the transaction; wait_for_transaction
+        # (no sender) only has a hash that the caller gave it
+        sent = "was sent" if sender is not None else "may have been sent"
 
         def wait_for_receipt():
             waits[0] += 1
@@ -982,17 +1153,36 @@ class ChainClient:
         try:
             receipt = _with_fallback(self._provider, wait_for_receipt)
         except Exception as e:
-            if not _is_receipt_timeout(e):
+            if _is_transport_failure(e):
+                # No RPC left: the caller reports it. A write raises
+                # TransactionOutcomeUnknownError (#181), and
+                # wait_for_transaction ChainConnectionError (#167)
                 raise
             reason = _error_reason(e)
             explorer_url = self._provider.get_explorer_tx_url(tx_hash_str) if tx_hash_str else None
+            if not _is_receipt_timeout(e):
+                # The node answered the receipt lookup with an error, such
+                # as a rate limit (-32005), or the wait failed in another
+                # way. The transaction was sent: do not report it as
+                # failed (#228)
+                raise TransactionOutcomeUnknownError(
+                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} {sent}, "
+                    f"but the RPC failed while waiting for its receipt, so its outcome "
+                    f"is unknown: {reason}",
+                    tx_hash=tx_hash_str,
+                    event_name=expected_event,
+                    expected_count=expected_count,
+                    contract_address=self._contract.address,
+                    explorer_url=explorer_url,
+                    reason=reason,
+                ) from e
             if waits[0] > 1:
                 # The RPC failed during the wait, and the fallback did not
                 # return a receipt in time. The transaction was sent and may
                 # be mined: do not report it as failed (#168 review)
                 raise TransactionOutcomeUnknownError(
-                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} was "
-                    f"sent, but the RPC failed while waiting for its receipt, and the "
+                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} {sent}, "
+                    f"but the RPC failed while waiting for its receipt, and the "
                     f"fallback RPC did not return the receipt in time, so its outcome "
                     f"is unknown: {reason}",
                     tx_hash=tx_hash_str,
@@ -1044,8 +1234,11 @@ class ChainClient:
         """
         web3 = self._provider.web3
         reason = _error_reason(error)
+        # A write knows that it sent the transaction; wait_for_transaction
+        # (no sender) only has a hash that the caller gave it
+        sent = "was sent" if sender is not None else "may have been sent"
         pending = ReceiptTimeoutError(
-            f"Not confirmed yet: transaction {tx_hash_str or '(hash unknown)'} was sent, "
+            f"Not confirmed yet: transaction {tx_hash_str or '(hash unknown)'} {sent}, "
             f"but no receipt arrived within {timeout} seconds. It may still be mined: "
             f"do not send it again. Wait for it with wait_for_transaction(), or check "
             f"it in the block explorer.",
@@ -1201,6 +1394,9 @@ class ChainClient:
             TransactionNotRecordedError, TransactionNotVerifiedError: As for
                 a write.
             ReceiptTimeoutError: If no receipt arrived within timeout.
+            TransactionOutcomeUnknownError: If the RPC answers the receipt
+                lookup with a JSON-RPC error, or the wait fails in another
+                way that is not a timeout or a connection failure (#228).
             TransactionReplacedError: If another transaction with the same
                 nonce was mined instead.
             TransactionNotFoundError: If the RPC does not know the hash after
