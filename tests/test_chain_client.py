@@ -7190,3 +7190,116 @@ class TestProvenanceChainProbeOtherError:
         # The cause is kept, in redacted form (redact_exception_chain)
         assert "Web3ValueError: unexpected answer" in str(exc_info.value.__cause__)
         client._provider._try_fallback.assert_not_called()
+
+
+class TestUnsyncedPrimaryFallsBackForWrites:
+    """An RPC with no code at the contract address leads to a fallback before a write (#230 review 5)."""
+
+    def test_transform_probe_moves_to_a_synced_fallback(self, real_web3_exceptions, mock_chain_deps):
+        """The case the probe's code check exists for: v2 is found on the fallback, the write is sent once."""
+        _inject_real_exceptions(real_web3_exceptions)
+        client = _fallback_client(mock_chain_deps, [_log("DataTransformed")])
+        client._provider._try_fallback = MagicMock(side_effect=[True, False, False])
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.get_code.side_effect = [b"", DUMMY_CODE, DUMMY_CODE, DUMMY_CODE]
+        links = mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call
+        links.side_effect = [
+            real_web3_exceptions.BadFunctionCallOutput("Could not decode contract function call"),
+            [],  # the probe, on the fallback
+            [],  # the duplicate check, on the fallback
+        ]
+
+        client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
+
+        assert client._contract._supports_v2 is True
+        assert links.call_count == 3
+        client._provider._try_fallback.assert_called_once()
+        mock_chain_deps["account"].sign_transaction.assert_called_once()
+        web3.eth.send_raw_transaction.assert_called_once()
+
+    @pytest.mark.parametrize("method, kwargs, event", [
+        ("anchor", {"swarm_hash": DUMMY_HASH}, "DataRegistered"),
+        ("access", {"swarm_hash": DUMMY_HASH}, "DataAccessed"),
+        ("set_status", {"swarm_hash": DUMMY_HASH, "status": 1}, "DataStatusChanged"),
+    ], ids=["anchor", "access", "status"])
+    def test_code_check_moves_to_a_synced_fallback(self, mock_chain_deps, method, kwargs, event):
+        client = _fallback_client(mock_chain_deps, [_log(event)])
+        client._provider._try_fallback = MagicMock(side_effect=[True, False, False])
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.get_code.side_effect = [b"", DUMMY_CODE]
+
+        getattr(client, method)(**kwargs)
+
+        client._provider._try_fallback.assert_called_once()
+        assert web3.eth.get_code.call_count == 2
+        mock_chain_deps["account"].sign_transaction.assert_called_once()
+        web3.eth.send_raw_transaction.assert_called_once()
+
+    @pytest.mark.parametrize("method, kwargs", [
+        ("anchor", {"swarm_hash": DUMMY_HASH}),
+        ("access", {"swarm_hash": DUMMY_HASH}),
+        ("set_status", {"swarm_hash": DUMMY_HASH, "status": 1}),
+    ], ids=["anchor", "access", "status"])
+    def test_no_code_on_any_rpc_sends_nothing(self, mock_chain_deps, method, kwargs):
+        from swarm_provenance_uploader.exceptions import ContractCodeNotFoundError
+
+        client = _fallback_client(mock_chain_deps, [])
+        client._provider._try_fallback = MagicMock(side_effect=[True, False, False])
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.get_code.return_value = b""
+
+        with pytest.raises(ContractCodeNotFoundError) as exc_info:
+            getattr(client, method)(**kwargs)
+
+        assert isinstance(exc_info.value, ChainConfigurationError)
+        assert str(exc_info.value) == (
+            f"No contract code at {DUMMY_CONTRACT} on base-sepolia: "
+            "wrong contract address or chain. Nothing was sent."
+        )
+        assert exc_info.value.contract_address == DUMMY_CONTRACT
+        assert client._provider._try_fallback.call_count == 2
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        web3.eth.send_raw_transaction.assert_not_called()
+
+
+class TestDuplicateCheckErrorMapping:
+    """_duplicate_check_error never relabels a ChainError as a connection error (#230 review 5)."""
+
+    def test_contract_code_not_found_kept(self):
+        from swarm_provenance_uploader.core.chain_client import _duplicate_check_error
+        from swarm_provenance_uploader.exceptions import ContractCodeNotFoundError
+
+        error = ContractCodeNotFoundError("No contract code at 0x1 on this RPC", contract_address="0x1")
+        assert _duplicate_check_error(error, "https://rpc.example") is error
+
+    def test_validation_error_kept(self):
+        from swarm_provenance_uploader.core.chain_client import _duplicate_check_error
+
+        error = ChainValidationError("bad hash")
+        assert _duplicate_check_error(error, None) is error
+
+    def test_connection_error_mapped(self):
+        from swarm_provenance_uploader.core.chain_client import _duplicate_check_error
+
+        mapped = _duplicate_check_error(ChainConnectionError("down", rpc_url="https://rpc.example"), None)
+        assert type(mapped) is ChainConnectionError
+        assert "duplicate transformation check" in str(mapped)
+        assert mapped.rpc_url == "https://rpc.example"
+
+    def test_transport_failure_mapped(self):
+        import requests
+        from swarm_provenance_uploader.core.chain_client import _duplicate_check_error
+
+        mapped = _duplicate_check_error(requests.exceptions.ConnectionError("down"), "https://rpc.example")
+        assert type(mapped) is ChainConnectionError
+        assert "Nothing was sent." in str(mapped)
+
+    def test_rejection_and_other_errors(self, real_web3_exceptions):
+        from swarm_provenance_uploader.core.chain_client import _duplicate_check_error
+        from swarm_provenance_uploader.exceptions import ChainError
+
+        rejected = _duplicate_check_error(real_web3_exceptions.Web3RPCError("rate limited"), None)
+        assert type(rejected) is ChainConfigurationError
+        other = _duplicate_check_error(ValueError("odd"), None)
+        assert type(other) is ChainError
+        assert str(other).endswith("odd. Nothing was sent.")
