@@ -2332,6 +2332,25 @@ class TestNotChargedBeforeSettlement503:
             paying_client.extend_stamp(DUMMY_STAMP, duration_hours=48)
         assert not isinstance(exc_info.value, PaymentOutcomeUnknownError)
 
+    def test_pool_allowance_unavailable_is_plain_failure(self, mock_x402, requests_mock):
+        """swarm_connect pool.py raises it for a paid acquire on a test network, before settle_payment."""
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        sent = []
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", [PAYMENT_REQUIRED, _gateway_503({
+            "code": "POOL_ALLOWANCE_UNAVAILABLE",
+            "message": "Free pooled stamps are paused until the operator restores the gateway's allowance records.",
+        })])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_on_payment_sent=sent.append)
+        try:
+            with pytest.raises(Exception) as exc_info:
+                client.acquire_stamp_from_pool()
+        finally:
+            patcher.stop()
+        assert not isinstance(exc_info.value, PaymentOutcomeUnknownError)
+        assert "POOL_ALLOWANCE_UNAVAILABLE" in str(exc_info.value)
+        assert sent == []
+
     def test_spend_ceiling_message_reaches_the_user(self, paying_client, requests_mock):
         requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, SPEND_CEILING_503])
         with pytest.raises(ConnectionError, match="daily spending limit"):
