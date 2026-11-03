@@ -317,6 +317,8 @@ swarm-prov-upload chain get <hash> --follow --depth 2     # limit depth
 swarm-prov-upload chain get <hash> --follow --json        # JSON output
 ```
 
+> **`--json`**: stdout carries exactly one JSON document, for a success or an error (`{"error": "<code>", "message": ...}`), so the output can be piped to `jq`. Progress, warnings, hints and `-v` debug lines go to stderr, and the exit codes do not change. See [docs/chain-setup.md](docs/chain-setup.md#json-output-for-scripting) for the error codes.
+
 > **Exit code 3: may still be mined**: when a write sent its transaction but no receipt arrived within 120 seconds, or the connection failed after the send, the command exits 3 and prints the transaction hash. Do not run the write again: wait with the printed `chain wait` command, or check the transaction in the explorer. A transaction that another one with the same nonce replaced is reported as "Replaced" (exit 1). See [docs/chain-workflows.md](docs/chain-workflows.md#exit-codes) for all exit codes.
 
 > **`chain get --follow` fails closed**: if any read fails during the walk, the command prints an error and exits with code 1 instead of printing a partial chain. In `--json` output, each record has a `parents` list (`null` for records at the depth limit).
@@ -485,7 +487,7 @@ swarm-prov-upload upload-collection /path/to/directory --stamp-id <id> --deferre
 | `--redundancy` | Erasure coding level from 0 to 4: `0` none, `1` medium, `2` strong, `3` insane, `4` paranoid. A higher level keeps the data retrievable when more chunks are lost, and uses more of the stamp. Without this option, the gateway uses level 2. |
 | `--stamp-retries` | Number of times to check that the stamp is usable before the upload (default: 12) |
 | `--stamp-interval` | Seconds between stamp usability checks (default: 20) |
-| `--json` | Output result as JSON (see example below) |
+| `--json` | Output result as JSON (see example below). stdout then carries only the JSON document; progress and the payment prompt go to stderr. An error is a JSON object too, for example `{"error": "stamp_not_usable", "message": ...}` (other codes: `invalid_input`, `configuration_error`, `payment_required`, `payment_outcome_unknown`, `upload_failed`) |
 
 **Example Output (text):**
 ```

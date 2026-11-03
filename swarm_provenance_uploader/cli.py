@@ -1,6 +1,8 @@
 import click
+import contextlib
 import functools
 import typer
+from typer.core import TyperGroup
 from typing import List, NoReturn, Optional
 from typing_extensions import Annotated
 from pathlib import Path
@@ -20,7 +22,86 @@ from .models import ProvenanceMetadata, ValidationError
 from . import exceptions
 from .chain.redact import redact_url, redact_urls
 
-app = typer.Typer(help="Swarm Provenance CLI - Wraps and uploads data to Swarm.")
+# --json (#211, #241): the stream that gets the command's JSON document (None
+# when JSON output is off), and whether the document has been written.
+_json_output = {"stream": None, "written": False}
+
+
+@contextlib.contextmanager
+def _json_mode(enabled: bool, redirect: bool = True):
+    """Run a command with JSON output on or off.
+
+    With JSON output on, stdout carries one JSON document: everything else
+    that is printed to stdout (progress, prompts, library debug lines) goes
+    to stderr while the command runs, and _echo_json writes the document to
+    the real stdout. sys.stdout is restored on exit, also when the command
+    raises. With JSON output off, _json_error does nothing.
+    """
+    previous = dict(_json_output)
+    _json_output.update(stream=sys.stdout if enabled else None, written=False)
+    try:
+        if enabled and redirect:
+            with contextlib.redirect_stdout(sys.stderr):
+                try:
+                    yield
+                finally:
+                    sys.stdout.flush()  # print() output that is still buffered
+        else:
+            yield
+    finally:
+        written = _json_output["written"]
+        _json_output.update(previous)
+        # An outer _json_mode (the command group's) must not print a second document
+        _json_output["written"] = previous["stream"] is not None and (previous["written"] or written)
+
+
+def _echo_json(text: str) -> None:
+    """Print the command's JSON document on stdout, also while stdout goes to stderr."""
+    typer.echo(text, file=_json_output["stream"])
+    _json_output["written"] = True
+
+
+def _json_error(error: str, message: str, **extra) -> None:
+    """With --json, print an error document on stdout: {"error": ..., "message": ..., **extra}.
+
+    Without --json, or when the command already printed its JSON document,
+    it does nothing, so stdout never carries two documents. The caller still
+    prints its text error (with --json it goes to stderr) and exits with its
+    own exit code.
+    """
+    if _json_output["stream"] is None or _json_output["written"]:
+        return
+    _echo_json(json.dumps({"error": error, "message": message, **extra}, indent=2))
+
+
+def _json_command(func):
+    """Run a command in _json_mode when its --json option (output_json) is set."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with _json_mode(bool(kwargs.get("output_json"))):
+            return func(*args, **kwargs)
+    return wrapper
+
+
+class _JsonErrorsGroup(TyperGroup):
+    """The top-level command group: with --json, errors before the command runs are JSON too.
+
+    The global option checks in main() and usage errors (exit 2) happen
+    before the command reads its own --json option, so here --json is
+    looked up in the command line.
+    """
+
+    def invoke(self, ctx):
+        args = [*ctx.protected_args, *ctx.args]
+        with _json_mode("--json" in args, redirect=False):
+            try:
+                return super().invoke(ctx)
+            except click.UsageError as e:
+                _json_error("invalid_input", e.format_message())
+                raise
+
+
+app = typer.Typer(help="Swarm Provenance CLI - Wraps and uploads data to Swarm.", cls=_JsonErrorsGroup)
 stamps_app = typer.Typer(help="Manage postage stamps.")
 app.add_typer(stamps_app, name="stamps")
 x402_app = typer.Typer(help="x402 payment configuration and status.")
@@ -113,6 +194,8 @@ def _get_chain_client(verbose: bool = False, require_wallet: bool = False):
     try:
         from .core.chain_client import ChainClient
     except ImportError:
+        _json_error("missing_dependencies", "Blockchain dependencies not installed.",
+                    install=INSTALL_SIGNING_DEPS)
         typer.secho(
             "ERROR: Blockchain dependencies not installed.",
             fg=typer.colors.RED, err=True,
@@ -131,8 +214,13 @@ def _get_chain_client(verbose: bool = False, require_wallet: bool = False):
             gas_limit=_chain_config.get("gas_limit"),
             require_wallet=require_wallet,
         )
-    except exceptions.ChainConfigurationError as e:
-        typer.secho(f"ERROR: Chain configuration invalid: {e}", fg=typer.colors.RED, err=True)
+    except (exceptions.ChainConfigurationError, ValueError) as e:
+        # ValueError: an invalid CHAIN_CONTRACT address (#241)
+        if isinstance(e.__cause__, ImportError):  # web3 or eth-account is not installed
+            _json_error("missing_dependencies", redact_urls(str(e)), install=INSTALL_SIGNING_DEPS)
+        else:
+            _json_error("configuration_error", f"Chain configuration invalid: {redact_urls(str(e))}")
+        typer.secho(f"ERROR: Chain configuration invalid: {redact_urls(str(e))}", fg=typer.colors.RED, err=True)
         if not isinstance(e, exceptions.ChainIdMismatchError):
             # The mismatch message carries its own advice (CHAIN_NAME=localhost)
             typer.echo("Check PROVENANCE_WALLET_KEY environment variable and chain settings.", err=True)
@@ -265,6 +353,8 @@ def _wait_for_stamp_usable(stamp_id: str, get_stamp_info, stamp_source: str,
 
 
     if not stamp_is_ready_for_upload:
+        _json_error("stamp_not_usable", f"Stamp {stamp_id.lower()} did not become USABLE after "
+                    f"{stamp_check_retries} retries.", stamp_id=stamp_id.lower())
         typer.secho(f"ERROR: Stamp {stamp_id.lower()} did not become USABLE after {stamp_check_retries} retries.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
@@ -360,6 +450,8 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
     for name, value in fields:
         if value is not None:
             typer.echo(f"  {name + ':':<17}{value}", err=True)
+    _json_error("payment_outcome_unknown", f"{headline} {e}", **{
+        name.lower().replace(" ", "_").replace("-", "_"): value for name, value in fields if value is not None})
 
     explorer = _X402_EXPLORERS.get(e.network or "")
     link = None
@@ -445,6 +537,7 @@ def _validated_stamp_id(stamp_id: Optional[str], name: str = "--stamp-id") -> Op
         return None
     stamp_id = file_utils.strip_hex_prefix(stamp_id)
     if not file_utils.is_stamp_id(stamp_id):
+        _json_error("invalid_input", f"{name} is not a stamp ID (64 hex characters): {stamp_id!r}")
         typer.secho(f"ERROR: {name} is not a stamp ID (64 hex characters): {stamp_id!r}",
                     fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -458,6 +551,8 @@ def _report_payment_required(e: exceptions.PaymentRequiredError):
     Raises:
         typer.Exit: Always, with code 1.
     """
+    _json_error("payment_required", f"Payment not made: {e}" if _x402_config["enabled"] else
+                f"Payment required: {e}", x402_enabled=bool(_x402_config["enabled"]))
     if _x402_config["enabled"]:
         typer.secho(f"\nERROR: Payment not made: {e}", fg=typer.colors.RED, err=True)
         typer.echo("Nothing was signed or paid. For non-interactive use, pass --auto-pay "
@@ -527,6 +622,9 @@ def _check_auto_pay_limit(source: str) -> None:
     """Exit 1 if the auto-pay limit is not a finite number of 0 or more (#152)."""
     if _auto_pay_limit() is None:
         limit = _x402_config["max_auto_pay_usd"]
+        _json_error("invalid_input" if source.startswith("--") else "configuration_error",
+                    f"Invalid auto-pay limit {limit!r} from {source}. "
+                    "Use a finite number of 0 or more, such as 1.00.")
         typer.secho(f"ERROR: Invalid auto-pay limit {limit!r} from {source}. "
                     "Use a finite number of 0 or more, such as 1.00.",
                     fg=typer.colors.RED, err=True)
@@ -1292,6 +1390,7 @@ def download(
 
 
 @app.command("upload-collection")
+@_json_command
 def upload_collection(
     directory: Annotated[str, typer.Argument(help="Path to the directory to upload as a collection.")],
     provenance_standard: Annotated[Optional[str], typer.Option("--std", help="Identifier for the provenance standard used (optional).")] = None,
@@ -1320,6 +1419,7 @@ def upload_collection(
 
     # Gateway-only check
     if _backend_config["backend"] != "gateway":
+        _json_error("configuration_error", "'upload-collection' requires gateway backend. Use --backend gateway")
         typer.secho(
             "ERROR: 'upload-collection' requires gateway backend. Use --backend gateway",
             fg=typer.colors.RED, err=True,
@@ -1329,12 +1429,14 @@ def upload_collection(
     # Validate directory
     dir_path = Path(directory).resolve()
     if not dir_path.is_dir():
+        _json_error("invalid_input", f"Not a directory: {directory}")
         typer.secho(f"ERROR: Not a directory: {directory}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     # Check non-empty
     all_files = [f for f in dir_path.rglob("*") if f.is_file()]
     if not all_files:
+        _json_error("invalid_input", f"Directory is empty: {directory}")
         typer.secho(f"ERROR: Directory is empty: {directory}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
@@ -1361,6 +1463,7 @@ def upload_collection(
     try:
         collection_hash, file_infos = file_utils.calculate_directory_hash_and_files(dir_path)
     except ValueError as e:
+        _json_error("invalid_input", str(e))
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
@@ -1383,6 +1486,7 @@ def upload_collection(
             if verbose:
                 typer.echo(f"    TAR archive created: {tar_size} bytes")
         except (ValueError, OSError) as e:
+            _json_error("upload_failed", f"Failed creating TAR archive: {e}", step="archive")
             typer.secho(f"ERROR: Failed creating TAR archive: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
 
@@ -1418,6 +1522,7 @@ def upload_collection(
                 typer.echo(f"Postage stamp purchased (ID: {stamp_id})")
 
         except exceptions.PoolNotEnabledError:
+            _json_error("configuration_error", "Stamp pool is not enabled on this gateway.")
             typer.secho("ERROR: Stamp pool is not enabled on this gateway.", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
         except exceptions.PaymentRequiredError as e:
@@ -1427,6 +1532,7 @@ def upload_collection(
         except typer.Exit:
             raise  # already reported, e.g. an invalid auto-pay limit (#152)
         except Exception as e:
+            _json_error("upload_failed", f"Failed acquiring stamp: {e}", step="stamp")
             typer.secho(f"ERROR: Failed acquiring stamp: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
 
@@ -1454,6 +1560,7 @@ def upload_collection(
             else:
                 _report_payment_outcome(e, "the collection upload", final_step=True)
         except Exception as e:
+            _json_error("upload_failed", f"Failed uploading collection: {e}", step="upload")
             typer.secho(f"ERROR: Failed uploading collection: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
     finally:
@@ -1482,10 +1589,10 @@ def upload_collection(
                 **metadata_fields, swarm_reference=None).model_dump(mode="json")
             document.update(status="delivered_not_stored", transaction=not_returned.transaction,
                             payer=not_returned.payer, idempotency_key=not_returned.idempotency_key)
-            typer.echo(json.dumps(document, indent=2))
+            _echo_json(json.dumps(document, indent=2))
             _report_delivered_not_stored(not_returned, "the collection upload", final_step=True)
         metadata = CollectionProvenanceMetadata(**metadata_fields, swarm_reference=result.reference)
-        typer.echo(metadata.model_dump_json(indent=2))
+        _echo_json(metadata.model_dump_json(indent=2))
     else:
         typer.secho(f"\nSUCCESS! Collection uploaded.", fg=typer.colors.GREEN, bold=True)
         typer.echo("Swarm Manifest Reference:")
@@ -2421,6 +2528,7 @@ def _report_unexpected_chain_error(e: Exception, verbose: bool = False) -> None:
     _print_chain_traceback(e, verbose)
     rejection = _rpc_rejection_message(e)
     if rejection is not None:
+        _json_error("chain_error", f"The RPC rejected the request: {redact_urls(rejection)}")
         typer.secho(f"ERROR: The RPC rejected the request: {redact_urls(rejection)}",
                     fg=typer.colors.RED, err=True)
         return
@@ -2430,27 +2538,33 @@ def _report_unexpected_chain_error(e: Exception, verbose: bool = False) -> None:
     except ImportError:
         rpc_failure = False
     if rpc_failure:
+        _json_error("connection_failed", f"Cannot connect to chain: {redact_urls(str(e))}")
         typer.secho(f"ERROR: Cannot connect to chain: {redact_urls(str(e))}",
                     fg=typer.colors.RED, err=True)
     else:
+        _json_error("chain_error", f"Chain command failed: {type(e).__name__}: {redact_urls(str(e))}")
         typer.secho(f"ERROR: Chain command failed: {type(e).__name__}: {redact_urls(str(e))}",
                     fg=typer.colors.RED, err=True)
 
 
 def _chain_command(name: str):
-    """Register a chain subcommand. Errors it does not handle exit 1 with redacted text."""
+    """Register a chain subcommand. Errors it does not handle exit 1 with redacted text.
+
+    With --json, the command runs in _json_mode, and those errors are JSON too.
+    """
     register = chain_app.command(name)
 
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            try:
-                return func(*args, **kwargs)
-            except (click.exceptions.Exit, click.exceptions.Abort, click.ClickException):
-                raise
-            except Exception as e:
-                _report_unexpected_chain_error(e, verbose=bool(kwargs.get("verbose")))
-                raise typer.Exit(code=1)
+            with _json_mode(bool(kwargs.get("output_json"))):
+                try:
+                    return func(*args, **kwargs)
+                except (click.exceptions.Exit, click.exceptions.Abort, click.ClickException):
+                    raise
+                except Exception as e:
+                    _report_unexpected_chain_error(e, verbose=bool(kwargs.get("verbose")))
+                    raise typer.Exit(code=1)
         return register(wrapper)
 
     return decorator
@@ -2471,7 +2585,7 @@ def _handle_insufficient_funds(
     cost_eth = (e.estimated_cost_wei or 0) / 1e18
 
     if output_json:
-        typer.echo(json.dumps(_insufficient_funds_json(e), indent=2))
+        _echo_json(json.dumps(_insufficient_funds_json(e), indent=2))
         return
 
     if label:
@@ -2585,7 +2699,7 @@ def _handle_not_recorded(
     """
     verified = isinstance(e, exceptions.TransactionNotRecordedError)
     if output_json:
-        typer.echo(json.dumps(_not_recorded_json(e), indent=2))
+        _echo_json(json.dumps(_not_recorded_json(e), indent=2))
         return
 
     prefix = f"ERROR: {label}. " if label else "ERROR: "
@@ -2711,6 +2825,14 @@ def _step_error_json(e: "exceptions.ChainError") -> dict:
     return {"error": "chain_error", "message": str(e)}
 
 
+def _json_chain_error(e: "exceptions.ChainError") -> None:
+    """With --json, print the error document for a chain error (codes as in _step_error_json)."""
+    data = _step_error_json(e)
+    if isinstance(e, exceptions.ChainConnectionError) and e.rpc_url:
+        data["rpc_url"] = redact_url(e.rpc_url)
+    _json_error(data.pop("error"), data.pop("message", str(e)), **data)
+
+
 def _composite_step_failed(
     e: "exceptions.ChainError",
     step: str,
@@ -2746,7 +2868,7 @@ def _composite_step_failed(
             output["unconfirmed"] = _not_recorded_json(e)
         else:
             output["error"] = error_json or _step_error_json(e)
-        typer.echo(json.dumps(output, indent=2))
+        _echo_json(json.dumps(output, indent=2))
         raise typer.Exit(code=_unconfirmed_exit_code(e))
 
     _print_completed_steps(steps)
@@ -2785,18 +2907,20 @@ def chain_balance(
     except typer.Exit:
         raise
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
         _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
         _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(result.model_dump(), indent=2))
+        _echo_json(json.dumps(result.model_dump(), indent=2))
         return
 
     typer.echo(f"\nChain Wallet:")
@@ -2858,12 +2982,14 @@ def chain_verify(
         typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
         _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
         _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -2919,17 +3045,20 @@ def chain_get(
         except typer.Exit:
             raise
         except exceptions.ChainConnectionError as e:
+            _json_chain_error(e)
             _print_chain_traceback(e, verbose)
             typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
             if e.rpc_url:
                 typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
             raise typer.Exit(code=1)
         except exceptions.ChainError as e:
+            _json_chain_error(e)
             _print_chain_traceback(e, verbose)
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
 
         if not chain_records:
+            _json_error("not_registered", f"{swarm_hash} is not registered on-chain.", data_hash=swarm_hash)
             typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
             raise typer.Exit(code=1)
 
@@ -2939,7 +3068,7 @@ def chain_get(
                 "depth": len(chain_records),
                 "root": swarm_hash,
             }
-            typer.echo(json.dumps(output, indent=2))
+            _echo_json(json.dumps(output, indent=2))
             return
 
         typer.echo(f"\nProvenance Chain ({len(chain_records)} records):")
@@ -2977,21 +3106,24 @@ def chain_get(
     except typer.Exit:
         raise
     except exceptions.DataNotRegisteredError:
+        _json_error("not_registered", f"{swarm_hash} is not registered on-chain.", data_hash=swarm_hash)
         typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
         _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
         _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(record.model_dump(), indent=2))
+        _echo_json(json.dumps(record.model_dump(), indent=2))
         return
 
     from datetime import datetime, timezone
@@ -3055,7 +3187,7 @@ def chain_anchor(
     except exceptions.DataAlreadyRegisteredError as e:
         if output_json:
             from datetime import datetime, timezone
-            typer.echo(json.dumps({
+            _echo_json(json.dumps({
                 "error": "already_registered",
                 "data_hash": e.data_hash,
                 "owner": e.owner,
@@ -3077,23 +3209,26 @@ def chain_anchor(
         _handle_not_recorded(e, output_json=output_json)
         raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
             typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
         _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
         _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(result.model_dump(), indent=2))
+        _echo_json(json.dumps(result.model_dump(), indent=2))
         return
 
     typer.secho(f"\nAnchored successfully!", fg=typer.colors.GREEN, bold=True)
@@ -3137,21 +3272,24 @@ def chain_set_storage_ref(
         _handle_not_recorded(e, output_json=output_json)
         raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
             typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(result.model_dump(), indent=2))
+        _echo_json(json.dumps(result.model_dump(), indent=2))
         return
 
     typer.secho(f"\nStorage reference linked!", fg=typer.colors.GREEN, bold=True)
@@ -3220,7 +3358,7 @@ def chain_wait(
         raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.TransactionNotFoundError as e:
         if output_json:
-            typer.echo(json.dumps({
+            _echo_json(json.dumps({
                 "error": "not_found",
                 "message": str(e),
                 "tx_hash": e.tx_hash,
@@ -3242,7 +3380,7 @@ def chain_wait(
         raise typer.Exit(code=1)
     except exceptions.ChainTransactionError as e:
         if output_json:
-            typer.echo(json.dumps(_step_error_json(e), indent=2))
+            _echo_json(json.dumps(_step_error_json(e), indent=2))
         else:
             typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
             if e.tx_hash:
@@ -3263,7 +3401,7 @@ def chain_wait(
             if count is not None and count != 1:
                 again += f" --count {count}"
         if output_json:
-            typer.echo(json.dumps({
+            _echo_json(json.dumps({
                 "error": "connection_failed",
                 "message": str(e),
                 "tx_hash": tx_hash,
@@ -3286,13 +3424,13 @@ def chain_wait(
     except exceptions.ChainError as e:
         _print_chain_traceback(e, verbose)
         if output_json:
-            typer.echo(json.dumps(_step_error_json(e), indent=2))
+            _echo_json(json.dumps(_step_error_json(e), indent=2))
         else:
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(result.model_dump(), indent=2))
+        _echo_json(json.dumps(result.model_dump(), indent=2))
         return
 
     typer.secho(f"\nConfirmed in block {result.block_number}", fg=typer.colors.GREEN, bold=True)
@@ -3319,21 +3457,24 @@ def chain_lookup(
     except typer.Exit:
         raise
     except exceptions.DataNotRegisteredError:
+        _json_error("not_registered", f"No record linked to storage ref {storage_ref}.", storage_ref=storage_ref)
         typer.secho(f"Not found: no record linked to storage ref {storage_ref}.", fg=typer.colors.YELLOW)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
         _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
         _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(record.model_dump(), indent=2))
+        _echo_json(json.dumps(record.model_dump(), indent=2))
         return
 
     from datetime import datetime, timezone
@@ -3380,21 +3521,24 @@ def chain_access(
         _handle_not_recorded(e, output_json=output_json)
         raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
             typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(result.model_dump(), indent=2))
+        _echo_json(json.dumps(result.model_dump(), indent=2))
         return
 
     typer.secho(f"\nAccess recorded!", fg=typer.colors.GREEN, bold=True)
@@ -3428,6 +3572,7 @@ def chain_status(
         # Set status mode
         status_name = set_status.lower()
         if status_name not in status_map:
+            _json_error("invalid_input", f"Invalid status '{set_status}'. Use: active, restricted, deleted.")
             typer.secho(
                 f"ERROR: Invalid status '{set_status}'. Use: active, restricted, deleted.",
                 fg=typer.colors.RED, err=True,
@@ -3440,6 +3585,7 @@ def chain_status(
         except typer.Exit:
             raise
         except exceptions.DataNotRegisteredError:
+            _json_error("not_registered", f"{swarm_hash} is not registered on-chain.", data_hash=swarm_hash)
             typer.secho(f"ERROR: {swarm_hash} is not registered on-chain.", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
         except exceptions.InsufficientFundsError as e:
@@ -3449,21 +3595,24 @@ def chain_status(
             _handle_not_recorded(e, output_json=output_json)
             raise typer.Exit(code=_unconfirmed_exit_code(e))
         except exceptions.ChainTransactionError as e:
+            _json_chain_error(e)
             typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
             if e.tx_hash:
                 typer.echo(f"  Transaction: {e.tx_hash}", err=True)
             raise typer.Exit(code=1)
         except exceptions.ChainConnectionError as e:
+            _json_chain_error(e)
             typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
             if e.rpc_url:
                 typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
             raise typer.Exit(code=1)
         except exceptions.ChainError as e:
+            _json_chain_error(e)
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
 
         if output_json:
-            typer.echo(json.dumps(result.model_dump(), indent=2))
+            _echo_json(json.dumps(result.model_dump(), indent=2))
             return
 
         typer.secho(f"\nStatus updated!", fg=typer.colors.GREEN, bold=True)
@@ -3482,21 +3631,24 @@ def chain_status(
         except typer.Exit:
             raise
         except exceptions.DataNotRegisteredError:
+            _json_error("not_registered", f"{swarm_hash} is not registered on-chain.", data_hash=swarm_hash)
             typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
             raise typer.Exit(code=1)
         except exceptions.ChainConnectionError as e:
+            _json_chain_error(e)
             _print_chain_traceback(e, verbose)
             typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
             if e.rpc_url:
                 typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
             raise typer.Exit(code=1)
         except exceptions.ChainError as e:
+            _json_chain_error(e)
             _print_chain_traceback(e, verbose)
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
 
         if output_json:
-            typer.echo(json.dumps({"hash": swarm_hash, "status": record.status.name}, indent=2))
+            _echo_json(json.dumps({"hash": swarm_hash, "status": record.status.name}, indent=2))
             return
 
         hash_short = f"{swarm_hash[:12]}...{swarm_hash[-8:]}" if len(swarm_hash) > 20 else swarm_hash
@@ -3529,21 +3681,24 @@ def chain_transfer(
         _handle_not_recorded(e, output_json=output_json)
         raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
             typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(result.model_dump(), indent=2))
+        _echo_json(json.dumps(result.model_dump(), indent=2))
         return
 
     to_short = f"{to[:10]}...{to[-4:]}" if len(to) > 14 else to
@@ -3575,6 +3730,7 @@ def chain_delegate(
     if gas is not None:
         _chain_config["gas_limit"] = gas
     if authorize == revoke:
+        _json_error("invalid_input", "Specify exactly one of --authorize or --revoke.")
         typer.secho(
             "ERROR: Specify exactly one of --authorize or --revoke.",
             fg=typer.colors.RED, err=True,
@@ -3593,21 +3749,24 @@ def chain_delegate(
         _handle_not_recorded(e, output_json=output_json)
         raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
             typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(result.model_dump(), indent=2))
+        _echo_json(json.dumps(result.model_dump(), indent=2))
         return
 
     action = "authorized" if authorize else "revoked"
@@ -3654,6 +3813,8 @@ def chain_transform(
     except typer.Exit:
         raise
     except exceptions.DataNotRegisteredError as e:
+        _json_error("not_registered", "Original hash is not registered on-chain.",
+                    data_hash=e.data_hash or original_hash)
         typer.secho(f"ERROR: Original hash is not registered on-chain.", fg=typer.colors.RED, err=True)
         typer.echo(f"  Anchor it first: swarm-prov-upload chain anchor {e.data_hash or original_hash}", err=True)
         raise typer.Exit(code=1)
@@ -3664,16 +3825,19 @@ def chain_transform(
         _handle_not_recorded(e, output_json=output_json)
         raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
             typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
@@ -3691,9 +3855,9 @@ def chain_transform(
     if output_json:
         if restrict_original:
             combined = _composite_json({"transform": result, "restrict": status_result})
-            typer.echo(json.dumps(combined, indent=2))
+            _echo_json(json.dumps(combined, indent=2))
         else:
-            typer.echo(json.dumps(result.model_dump(), indent=2))
+            _echo_json(json.dumps(result.model_dump(), indent=2))
         return
 
     typer.secho(f"\nTransformation recorded!", fg=typer.colors.GREEN, bold=True)
@@ -3811,7 +3975,7 @@ def chain_protect(
         )
 
     if output_json:
-        typer.echo(json.dumps(_composite_json(results), indent=2))
+        _echo_json(json.dumps(_composite_json(results), indent=2))
         return
 
     typer.secho(f"\nProtect complete!", fg=typer.colors.GREEN, bold=True)
@@ -3839,6 +4003,7 @@ def chain_merge(
     Example: swarm-prov-upload chain merge <hash1> <hash2> <new_hash> -d "Merged datasets"
     """
     if len(hashes) < 3:
+        _json_error("invalid_input", "Need at least 3 hashes: 2+ source hashes and 1 new hash.")
         typer.secho(
             "ERROR: Need at least 3 hashes: 2+ source hashes and 1 new hash.",
             fg=typer.colors.RED, err=True,
@@ -3863,12 +4028,14 @@ def chain_merge(
     except typer.Exit:
         raise
     except exceptions.DataNotRegisteredError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Source hash is not registered on-chain.", fg=typer.colors.RED, err=True)
         if e.data_hash:
             typer.echo(f"  Hash: {e.data_hash}", err=True)
         typer.echo(f"  Anchor source hashes first: swarm-prov-upload chain anchor <hash>", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainValidationError as e:
+        _json_error("invalid_input", f"Validation failed: {e}")
         typer.secho(f"ERROR: Validation failed: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     except exceptions.InsufficientFundsError as e:
@@ -3878,21 +4045,24 @@ def chain_merge(
         _handle_not_recorded(e, output_json=output_json)
         raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
             typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(result.model_dump(), indent=2))
+        _echo_json(json.dumps(result.model_dump(), indent=2))
         return
 
     typer.secho(f"\nMerge transformation recorded!", fg=typer.colors.GREEN, bold=True)
@@ -3983,6 +4153,7 @@ def main(
                          idempotency_key=None, idempotency_key_given=False)
     if idempotency_key is not None:
         if not is_valid_idempotency_key(idempotency_key):
+            _json_error("invalid_input", "--idempotency-key must be 1-255 printable ASCII characters.")
             typer.secho("ERROR: --idempotency-key must be 1-255 printable ASCII characters.",
                         fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -3996,6 +4167,7 @@ def main(
 
     if backend:
         if backend not in ("gateway", "local"):
+            _json_error("invalid_input", f"Invalid backend '{backend}'. Use 'gateway' or 'local'.")
             typer.secho(f"ERROR: Invalid backend '{backend}'. Use 'gateway' or 'local'.", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
         _backend_config["backend"] = backend
@@ -4013,6 +4185,8 @@ def main(
     if x402_network:
         network = normalize_network(x402_network)
         if network not in ("base-sepolia", "base"):
+            _json_error("invalid_input", f"Invalid x402 network '{x402_network}'. Use 'base-sepolia' or "
+                        "'base' (or 'eip155:84532' or 'eip155:8453').")
             typer.secho(f"ERROR: Invalid x402 network '{x402_network}'. Use 'base-sepolia' or 'base' "
                         "(or 'eip155:84532' or 'eip155:8453').", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -4031,6 +4205,7 @@ def main(
     # Chain configuration
     if chain:
         if chain not in ("base-sepolia", "base"):
+            _json_error("invalid_input", f"Invalid chain '{chain}'. Use 'base-sepolia' or 'base'.")
             typer.secho(f"ERROR: Invalid chain '{chain}'. Use 'base-sepolia' or 'base'.", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
         _chain_config["chain"] = chain
