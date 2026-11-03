@@ -207,13 +207,19 @@ def _duplicate_check_error(error: Exception, rpc_url: Optional[str]) -> ChainErr
     """The error for transform()'s duplicate check when it could not run (#168, #230).
 
     The write stops before anything is signed or sent: without the check, a
-    duplicate transformation could be recorded. A transport failure with no
-    endpoint left becomes ChainConnectionError, a JSON-RPC error answer
-    ChainConfigurationError (the node answered; no fallback), and any other
-    error ChainError.
+    duplicate transformation could be recorded. A ChainConnectionError, or a
+    transport failure that is not a ChainError, with no endpoint left becomes
+    ChainConnectionError; a JSON-RPC error answer ChainConfigurationError
+    (the node answered; no fallback); any other ChainError (for example
+    ChainValidationError or ContractCodeNotFoundError) is returned
+    unchanged; and any other error becomes ChainError.
     """
-    if _is_transport_failure(error):
+    if isinstance(error, ChainConnectionError) or (
+        not isinstance(error, ChainError) and _is_transport_failure(error)
+    ):
         return _duplicate_check_connection_error(error, rpc_url)
+    if isinstance(error, ChainError):
+        return error
     reason = _error_reason(error)
     if _is_rpc_rejection(error):
         return ChainConfigurationError(
@@ -228,14 +234,14 @@ def _duplicate_check_error(error: Exception, rpc_url: Optional[str]) -> ChainErr
 def _raise_duplicate_check_error(error: Exception, rpc_url: Optional[str]) -> NoReturn:
     """Raise the error for transform()'s duplicate check that could not run.
 
-    A ChainError other than ChainConnectionError (for example
-    ChainValidationError or ChainConfigurationError) is raised unchanged,
-    as in _traversal_error; everything else is mapped by
-    _duplicate_check_error and chained to the original error.
+    The error from _duplicate_check_error: a ChainError it keeps (other than
+    ChainConnectionError, as in _traversal_error) is raised unchanged; a
+    mapped one is chained to the original error.
     """
-    if isinstance(error, ChainError) and not isinstance(error, ChainConnectionError):
+    mapped = _duplicate_check_error(error, rpc_url)
+    if mapped is error:
         raise error
-    raise _duplicate_check_error(error, rpc_url) from error
+    raise mapped from error
 
 
 def _signed_tx_hash(raw_tx) -> Optional[str]:
@@ -579,9 +585,12 @@ class ChainClient:
         Raises:
             ChainIdMismatchError: If the RPC is on another chain than a named
                 network preset.
-            ChainConfigurationError: If the address has no contract code, the
-                RPC rejected the check (a JSON-RPC error answer), or the check
-                fails for a reason other than the RPC.
+            ContractCodeNotFoundError: If no RPC has code at the address (a
+                ChainConfigurationError). An RPC without the code may not be
+                synced, so the fallbacks are tried first (#230).
+            ChainConfigurationError: If the RPC rejected the check (a
+                JSON-RPC error answer), or the check fails for a reason other
+                than the RPC.
             ChainConnectionError: If the RPC cannot be reached.
         """
         _with_fallback(self._provider, self._provider.confirm_chain_id)
@@ -590,8 +599,24 @@ class ChainClient:
         # The checksummed address: web3 rejects a lowercase one, and the
         # event check compares against the same value.
         address = self._contract.address
+        def read_code():
+            code = self._provider.web3.eth.get_code(address)
+            if not code:
+                # The RPC may not be synced: _with_fallback tries the next one
+                raise ContractCodeNotFoundError(
+                    f"No contract code at {address} on this RPC", contract_address=address
+                )
+            return code
+
         try:
-            code = _with_fallback(self._provider, lambda: self._provider.web3.eth.get_code(address))
+            _with_fallback(self._provider, read_code)
+        except ContractCodeNotFoundError as e:
+            # No RPC left with the code (#230)
+            raise ContractCodeNotFoundError(
+                f"No contract code at {address} on {self._provider.chain}: "
+                f"wrong contract address or chain. Nothing was sent.",
+                contract_address=address,
+            ) from e
         except Exception as e:
             rejection = _rpc_rejection_message(e)
             if rejection is not None:
@@ -608,11 +633,6 @@ class ChainClient:
             raise ChainConfigurationError(
                 f"Could not check the contract code at {address}: {e}"
             ) from e
-        if not code:
-            raise ChainConfigurationError(
-                f"No contract code at {address} on {self._provider.chain}: "
-                f"wrong contract address or chain. Nothing was sent."
-            )
         self._contract_code_checked = True
 
     def _build_tx(self, build, *args, **kwargs) -> dict:

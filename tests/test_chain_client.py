@@ -3386,7 +3386,9 @@ class TestWriteConfirmation:
             client.access(swarm_hash=DUMMY_HASH)
 
         assert "no contract code" in str(exc_info.value).lower()
-        web3.eth.get_code.assert_called_once_with(DUMMY_CONTRACT)
+        # The primary and the two preset fallbacks (an RPC without the code
+        # may not be synced, so each is tried once, #230)
+        assert [c.args for c in web3.eth.get_code.call_args_list] == [(DUMMY_CONTRACT,)] * 3
         mock_chain_deps["account"].sign_transaction.assert_not_called()
         web3.eth.send_raw_transaction.assert_not_called()
 
