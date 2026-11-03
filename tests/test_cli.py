@@ -8899,7 +8899,20 @@ class TestChainWait:
         assert output["error"] == "connection_failed"
         assert output["tx_hash"] == self.TX
         assert output["explorer_url"] == self.EXPLORER
+        assert output["wait_command"] == f"swarm-prov-upload chain wait {self.TX}"
         assert RPC_KEY not in result.stdout
+
+    def test_connection_error_json_wait_command_with_event(self, mocker):
+        from swarm_provenance_uploader.exceptions import ChainConnectionError
+
+        self._client(mocker, error=ChainConnectionError("refused"))
+
+        result = runner.invoke(app, ["chain", "wait", self.TX, "--event", "DataRegistered", "--count", "2", "--json"])
+
+        assert result.exit_code == 3, result.output
+        assert json.loads(result.stdout)["wait_command"] == (
+            f"swarm-prov-upload chain wait {self.TX} --event DataRegistered --count 2"
+        )
 
     @pytest.mark.parametrize("error_name,error_key", [
         ("ChainConfigurationError", "chain_error"),
