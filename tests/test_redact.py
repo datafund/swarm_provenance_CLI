@@ -208,41 +208,141 @@ class TestMalformedRpcUrls:
         assert redact_urls(text) == text
 
 
-class TestRedactUrlsSpeed:
-    def test_long_run_of_trailing_punctuation(self):
-        """Trailing punctuation is stripped in linear time: a quadratic loop took 24 s here."""
-        import time
+class TestUrlAfterWordCharacter:
+    """A URL is redacted when a word character comes directly before it (#190).
 
-        text = f"failed {PATH_KEY_URL}" + ")" * 1_000_000
-        start = time.perf_counter()
-        out = redact_urls(text)
-        elapsed = time.perf_counter() - start
-        assert KEY not in out
-        assert out.endswith(")" * 1_000_000)
-        assert elapsed < 1.0, f"took {elapsed:.2f} s"
-
+    No secrets are registered here, so only the URL pattern can remove the key.
+    """
 
     @pytest.mark.parametrize(
-        "text",
-        [
-            "a." * 100_000,
-            "Could not decode '<html><body>" + "a-" * 50_000 + "</body></html>'",
-        ],
-        ids=["dotted-run", "hyphenated-html-body"],
+        "prefix",
+        ["1", "rpc_", "%22"],
+        ids=["digit", "underscore", "percent-encoded-quote"],
     )
-    def test_long_run_of_scheme_characters(self, text):
+    def test_prefix_before_url(self, prefix):
+        out = redact_urls(f"failed: {prefix}{PATH_KEY_URL}")
+        assert KEY not in out
+        assert out == f"failed: {prefix}https://base-sepolia.g.alchemy.com/{PLACEHOLDER}"
+
+    def test_long_run_of_scheme_characters_before_url(self):
+        """More than 31 scheme characters before "://" still let the URL match."""
+        out = redact_urls("failed: " + "x" * 40 + PATH_KEY_URL)
+        assert KEY not in out
+        assert out.endswith(f"https://base-sepolia.g.alchemy.com/{PLACEHOLDER}")
+
+
+def _assert_linear_time(func, build, size, factor=10, max_ratio=20, fail_ratio=50, attempts=3,
+                        min_total=0.1, deadline=5.0):
+    """Fail if func(build(size)) takes max_ratio times longer than func(build(size // factor)).
+
+    A linear scan takes about factor times longer on the larger input, and a
+    quadratic one about factor ** 2 times longer. A ratio, not a fixed time
+    limit, stays the same on a slow machine (#238). The time is the CPU time
+    of this thread, so other processes on the machine do not count. Each
+    input is run again until the calls took min_total seconds in total, and
+    the time per call is compared, the way timeit's autorange does: a clock
+    that ticks only every 15.6 ms (time.thread_time on Windows) then still
+    measures a call that takes less than a millisecond. A ratio of
+    fail_ratio or more fails at once. A ratio from max_ratio up to
+    fail_ratio is measured again, up to attempts times, so that one pause
+    does not fail the test. If thread_time has not reached min_total after
+    deadline seconds of wall-clock time, the test fails instead of looping.
+    """
+    import time
+
+    def timed(text):
+        calls = 0
+        start = time.thread_time()
+        give_up = time.perf_counter() + deadline
+        while True:
+            func(text)
+            calls += 1
+            total = time.thread_time() - start
+            if total >= min_total:
+                return total / calls
+            if time.perf_counter() >= give_up:
+                pytest.fail(f"time.thread_time did not reach {min_total} s after {calls} calls")
+
+    small, large = build(size // factor), build(size)
+    ratios = []
+    for _ in range(attempts):
+        small_time, large_time = timed(small), timed(large)
+        ratio = large_time / max(small_time, 1e-6)
+        if ratio < max_ratio:
+            return
+        ratios.append(f"{ratio:.1f} ({small_time:.3f} s, {large_time:.3f} s)")
+        if ratio >= fail_ratio:
+            break
+    pytest.fail(f"{factor}x the input took more than {max_ratio}x the time: {', '.join(ratios)}")
+
+
+class TestAssertLinearTime:
+    """The timing helper with a clock as coarse as time.thread_time on Windows (about 15.6 ms)."""
+
+    @pytest.fixture
+    def coarse_clock(self, monkeypatch):
+        import time
+
+        real = time.thread_time
+        tick = 0.0156
+        monkeypatch.setattr(time, "thread_time", lambda: (real() // tick) * tick)
+
+    @staticmethod
+    def _quadratic(text):
+        return sum(1 for _ in range(len(text)) for _ in range(len(text) // 100))
+
+    @pytest.mark.parametrize("size", [10_000, 100_000, 1_000_000])
+    def test_linear_passes_with_coarse_clock(self, coarse_clock, size):
+        _assert_linear_time(redact_urls, lambda n: "a" * n + f" {PATH_KEY_URL}", size)
+
+    def test_frozen_clock_fails_after_deadline(self, monkeypatch):
+        """A thread_time that never advances fails the test at the deadline instead of hanging."""
+        import time
+
+        monkeypatch.setattr(time, "thread_time", lambda: 0.0)
+        start = time.perf_counter()
+        with pytest.raises(pytest.fail.Exception, match=r"time\.thread_time did not reach 0\.1 s after \d+ calls"):
+            _assert_linear_time(len, lambda n: "a" * n, 1_000, deadline=0.5)
+        assert 0.4 <= time.perf_counter() - start < 3
+
+    def test_quadratic_fails_with_coarse_clock(self, coarse_clock):
+        with pytest.raises(pytest.fail.Exception, match="took more than 20x the time"):
+            _assert_linear_time(self._quadratic, lambda n: "a" * n, 10_000)
+
+
+class TestRedactUrlsSpeed:
+    """The time check runs first, on inputs small enough that a quadratic
+    scan fails it within seconds. The full-size call after it checks the
+    output."""
+
+    def test_long_run_of_trailing_punctuation(self):
+        """Trailing punctuation is stripped in linear time: a quadratic loop took 24 s here."""
+        _assert_linear_time(redact_urls, lambda n: f"failed {PATH_KEY_URL}" + ")" * n, 100_000)
+        text = f"failed {PATH_KEY_URL}" + ")" * 1_000_000
+        out = redact_urls(text)
+        assert KEY not in out
+        assert out.endswith(")" * 1_000_000)
+
+    @pytest.mark.parametrize(
+        "build, size, timed_size",
+        [
+            (lambda n: "a." * n, 100_000, 10_000),
+            (lambda n: "Could not decode '<html><body>" + "a-" * n + "</body></html>'", 50_000, 10_000),
+            (lambda n: "a" * n, 1_000_000, 10_000),
+        ],
+        ids=["dotted-run", "hyphenated-html-body", "letter-run"],
+    )
+    def test_long_run_of_scheme_characters(self, build, size, timed_size):
         """A long run of letters joined by dots or hyphens is scanned in linear time.
 
         An unbounded scheme pattern took about 58 s on "a." * 100000.
         """
-        import time
-
-        start = time.perf_counter()
+        _assert_linear_time(redact_urls, lambda n: build(n) + f" {PATH_KEY_URL}", timed_size)
+        text = build(size)
         out = redact_urls(text + f" {PATH_KEY_URL}")
-        elapsed = time.perf_counter() - start
         assert out.startswith(text)
         assert KEY not in out
-        assert elapsed < 1.0, f"took {elapsed:.2f} s"
+
 
 class TestRedactUrlNonString:
     def test_non_string_value_is_converted(self):
@@ -346,7 +446,7 @@ class TestCodeCheckRejection:
         from swarm_provenance_uploader.core.chain_client import ChainClient
 
         client = ChainClient.__new__(ChainClient)
-        client._contract_code_checked = False
+        client._contract_code_checked_url = None
         client._contract = MagicMock(address="0x" + "ab" * 20)
         client._provider = MagicMock(rpc_url=PATH_KEY_URL, chain="base-sepolia")
         return client
@@ -393,3 +493,173 @@ class TestCodeCheckRejection:
         with pytest.raises(ChainConnectionError) as exc_info:
             client._check_contract_code()
         assert KEY not in str(exc_info.value)
+
+
+def _linked(error):
+    """Every exception reachable from error through __cause__ and __context__, error first."""
+    seen, found, todo = set(), [], [error]
+    while todo:
+        exc = todo.pop(0)
+        if exc is None or id(exc) in seen:
+            continue
+        seen.add(id(exc))
+        found.append(exc)
+        todo.extend([exc.__cause__, exc.__context__])
+    return found
+
+
+def _raise(exc):
+    raise exc
+
+
+class TestRedactExceptionChain:
+    """redact_exception_chain replaces the raw exceptions linked to a ChainError (#187)."""
+
+    def test_cause_is_replaced_with_a_redacted_copy(self):
+        import traceback
+
+        from swarm_provenance_uploader.chain.exceptions import (
+            RedactedException,
+            redact_exception_chain,
+        )
+
+        original = ConnectionError(f"401 Client Error: Unauthorized for url: {PATH_KEY_URL}")
+        try:
+            try:
+                _raise(original)
+            except ConnectionError as e:
+                raise ChainConnectionError("The RPC endpoint failed") from e
+        except ChainConnectionError as e:
+            error = e
+
+        assert redact_exception_chain(error) is error
+        cause = error.__cause__
+        assert isinstance(cause, RedactedException)
+        assert cause.original_type == "builtins.ConnectionError"
+        assert str(cause) == (
+            "builtins.ConnectionError: 401 Client Error: Unauthorized for url: "
+            f"https://base-sepolia.g.alchemy.com/{PLACEHOLDER}"
+        )
+        # The original frames are kept, so the traceback still shows where it failed
+        assert cause.__traceback__ is original.__traceback__
+        text = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+        assert KEY not in text
+        assert "_raise" in text
+        assert error.__suppress_context__ is True
+        # The original object is not changed
+        assert KEY in str(original)
+
+    def test_context_and_nested_links(self):
+        from swarm_provenance_uploader.chain.exceptions import (
+            RedactedException,
+            redact_exception_chain,
+        )
+
+        register_url_secrets([PATH_KEY_URL])
+        inner = OSError(f"refused: /v2/{KEY}")
+        middle = ValueError(f"decode failed for {QUERY_KEY_URL}")
+        middle.__context__ = inner
+        error = ChainConnectionError("failed")
+        error.__context__ = middle
+
+        redact_exception_chain(error)
+
+        linked = _linked(error)
+        assert len(linked) == 3
+        assert all(isinstance(exc, RedactedException) for exc in linked[1:])
+        assert [exc.original_type for exc in linked[1:]] == ["builtins.ValueError", "builtins.OSError"]
+        for exc in linked:
+            assert KEY not in str(exc)
+            assert KEY not in repr(exc.args)
+        # An implicit context stays shown as a context, not as a cause
+        assert error.__suppress_context__ is False
+        assert error.__cause__ is None
+
+    def test_suppressed_context_stays_suppressed(self):
+        from swarm_provenance_uploader.chain.exceptions import (
+            RedactedException,
+            redact_exception_chain,
+        )
+
+        try:
+            try:
+                raise ConnectionError(f"for url: {PATH_KEY_URL}")
+            except ConnectionError:
+                raise ChainConnectionError("failed") from None
+        except ChainConnectionError as e:
+            error = e
+
+        redact_exception_chain(error)
+
+        assert error.__cause__ is None
+        assert error.__suppress_context__ is True
+        assert isinstance(error.__context__, RedactedException)
+        assert KEY not in str(error.__context__)
+
+    def test_chain_error_link_is_kept_and_its_chain_redacted(self):
+        from swarm_provenance_uploader.chain.exceptions import (
+            RedactedException,
+            redact_exception_chain,
+        )
+
+        raw = ConnectionError(f"for url: {PATH_KEY_URL}")
+        inner = ChainConnectionError(f"failed: {PATH_KEY_URL}")
+        inner.__cause__ = raw
+        error = ChainConfigurationError("outer")
+        error.__cause__ = inner
+
+        redact_exception_chain(error)
+
+        assert error.__cause__ is inner
+        assert isinstance(inner.__cause__, RedactedException)
+        assert all(KEY not in str(exc) for exc in _linked(error))
+
+    def test_cycle_and_second_pass(self):
+        from swarm_provenance_uploader.chain.exceptions import (
+            RedactedException,
+            redact_exception_chain,
+        )
+
+        first = ValueError(f"a {PATH_KEY_URL}")
+        second = ValueError(f"b {PATH_KEY_URL}")
+        first.__context__ = second
+        second.__context__ = first
+        error = ChainConnectionError("failed")
+        error.__cause__ = first
+
+        redact_exception_chain(error)
+        copy = error.__cause__
+        redact_exception_chain(error)
+
+        assert error.__cause__ is copy
+        linked = _linked(error)
+        assert len(linked) == 3
+        assert all(isinstance(exc, RedactedException) for exc in linked[1:])
+        assert all(KEY not in str(exc) for exc in linked)
+
+    def test_error_without_chain_is_unchanged(self):
+        from swarm_provenance_uploader.chain.exceptions import redact_exception_chain
+
+        error = ChainConnectionError("failed")
+        assert redact_exception_chain(error) is error
+        assert error.__cause__ is None
+        assert error.__context__ is None
+        assert error.__suppress_context__ is False
+
+    def test_exception_whose_str_fails(self):
+        from swarm_provenance_uploader.chain.exceptions import (
+            RedactedException,
+            redact_exception_chain,
+        )
+
+        class Broken(Exception):
+            def __str__(self):
+                raise RuntimeError("no text")
+
+        error = ChainConnectionError("failed")
+        error.__cause__ = Broken()
+
+        redact_exception_chain(error)
+
+        assert isinstance(error.__cause__, RedactedException)
+        assert error.__cause__.original_type.endswith("Broken")

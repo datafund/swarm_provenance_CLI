@@ -131,11 +131,12 @@ class X402NetworkError(X402Error):
 
 
 class PaymentTransactionFailedError(X402Error):
-    """Payment was signed but the on-chain transaction failed.
+    """No longer raised; kept so existing imports keep working (#143).
 
-    This occurs when the x402 facilitator could not execute the
-    TransferWithAuthorization on-chain. The gateway may have fallen
-    back to free tier.
+    It was raised for a success whose X-PAYMENT-RESPONSE receipt said
+    the payment failed. The gateway sends that receipt only after a
+    successful settlement and never falls back to the free tier, so such
+    an answer is now reported as PaymentOutcomeUnknownError.
     """
 
     def __init__(self, message: str, error_reason: str = None, payer: str = None):
@@ -222,6 +223,22 @@ class PaymentSettledNotDeliveredError(PaymentOutcomeUnknownError):
     """
 
     settled = True
+
+
+class PaymentResultUnreadableError(PaymentSettledNotDeliveredError):
+    """A paid request was answered 2xx, but the answer could not be read (#216).
+
+    The gateway answers 2xx only after it has settled the payment and done
+    the work, so the request most likely succeeded; only its result (for
+    example the batch ID or Swarm reference) is missing. Check the result
+    before contacting the operator. Re-running pays again.
+
+    After a stamp purchase, `label_prefix` is how the new batch's label
+    starts (the gateway adds a random suffix to the label of a paid
+    purchase); None otherwise.
+    """
+
+    label_prefix = None
 
 
 class PaymentDeliveredNotStoredError(PaymentSettledNotDeliveredError):
@@ -360,6 +377,9 @@ class SignatureVerificationError(NotaryError):
 _CHAIN_EXCEPTIONS = frozenset({
     "ChainError",
     "ChainConfigurationError",
+    "ChainIdMismatchError",
+    "ContractCodeNotFoundError",
+    "DeployBlockError",
     "ChainConnectionError",
     "ChainTransactionError",
     "ChainValidationError",
@@ -367,6 +387,10 @@ _CHAIN_EXCEPTIONS = frozenset({
     "TransactionUnconfirmedError",
     "TransactionNotRecordedError",
     "TransactionNotVerifiedError",
+    "TransactionOutcomeUnknownError",
+    "ReceiptTimeoutError",
+    "TransactionReplacedError",
+    "TransactionNotFoundError",
     "DataNotRegisteredError",
     "DataAlreadyRegisteredError",
     "TransformationAlreadyExistsError",

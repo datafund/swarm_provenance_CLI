@@ -8,9 +8,15 @@ Requires optional dependencies (the `blockchain` extra): web3 and eth-account.
 """
 
 import logging
-from typing import List, Optional
+import re
+from typing import List, Optional, Union
 
-from .exceptions import ChainConfigurationError, ChainConnectionError
+from .exceptions import (
+    ChainConfigurationError,
+    ChainConnectionError,
+    ChainIdMismatchError,
+    DeployBlockError,
+)
 from .redact import redact_url, register_url_secrets
 from .._requirements import INSTALL_SIGNING_DEPS
 
@@ -33,6 +39,44 @@ def _import_web3():
                 f"Run: {INSTALL_SIGNING_DEPS}"
             ) from e
     return _Web3
+
+
+def _http_provider(Web3, url: str, timeout: int):
+    """An HTTPProvider for url that never repeats eth_sendRawTransaction (#229).
+
+    web3 retries the methods on its REQUEST_RETRY_ALLOWLIST, including
+    eth_sendRawTransaction, after an HTTP error answer or a read timeout. If
+    the first request reached the node, the repeat gets "already known" or
+    "nonce too low", which hides that the transaction was sent. Every other
+    method keeps web3's default retry (the same errors, retries and
+    backoff). The list set is never empty, because web3 replaces an empty
+    list with its default.
+
+    If the installed web3 does not take the configuration, its default is
+    kept; ChainClient then still reports those answers to a send as
+    "outcome unknown".
+    """
+    provider = Web3.HTTPProvider(url, request_kwargs={"timeout": timeout})
+    try:
+        from web3.providers.rpc.utils import ExceptionRetryConfiguration
+
+        default = provider.exception_retry_configuration
+        if default is None:
+            return provider  # no retry at all
+        allowlist = [m for m in default.method_allowlist if m != "eth_sendRawTransaction"]
+        provider.exception_retry_configuration = (
+            ExceptionRetryConfiguration(
+                errors=default.errors,
+                retries=default.retries,
+                backoff_factor=default.backoff_factor,
+                method_allowlist=allowlist,
+            )
+            if allowlist
+            else None
+        )
+    except Exception as e:
+        logger.debug("Kept web3's default request retry: %s", type(e).__name__)
+    return provider
 
 
 # Network presets for supported chains
@@ -79,6 +123,11 @@ CHAIN_PRESETS = {
 }
 
 
+# Presets for public networks: a custom or fallback RPC must report the
+# preset's chain ID. "localhost" takes the chain ID the node reports.
+STRICT_CHAIN_ID_PRESETS = ("base-sepolia", "base")
+
+
 def _preset_strings() -> List[str]:
     """Chain names and the string values of CHAIN_PRESETS: public, never redacted."""
     strings = list(CHAIN_PRESETS)
@@ -91,11 +140,41 @@ def _preset_strings() -> List[str]:
     return strings
 
 
+def _parse_deploy_block(value) -> Optional[int]:
+    """The deploy block from CHAIN_DEPLOY_BLOCK or the deploy_block argument (#231).
+
+    None or a blank string means not set. An int of 0 or more, or a string
+    of ASCII digits (surrounding spaces are ignored), is the block number.
+
+    Raises:
+        DeployBlockError: For any other value (a ChainConfigurationError).
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if re.fullmatch(r"[0-9]+", text):
+            return int(text)
+    elif isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    raise DeployBlockError(
+        "CHAIN_DEPLOY_BLOCK (deploy_block) must be a non-negative integer, "
+        f"the block the contract was deployed in; got {value!r}"
+    )
+
+
 class ChainProvider:
     """Provider for Web3 connections to supported EVM chains.
 
     Handles RPC connection management, health checks, and block explorer
     URL generation for Base Sepolia and Base mainnet.
+
+    The fallback state (``_fallback_active``, ``_fallback_tried``, the
+    active endpoint) is per instance, so a ChainProvider, and the
+    ChainClient that uses it, is not safe to call from several threads at
+    once. Use one client per thread.
     """
 
     SUPPORTED_CHAINS = list(CHAIN_PRESETS.keys())
@@ -108,6 +187,7 @@ class ChainProvider:
         explorer_url: Optional[str] = None,
         rpc_fallbacks: Optional[List[str]] = None,
         request_timeout: int = 30,
+        deploy_block: Optional[Union[int, str]] = None,
     ):
         """
         Initialize the chain provider.
@@ -120,6 +200,11 @@ class ChainProvider:
             rpc_fallbacks: Fallback RPC URLs tried in order on failure.
                 If None and no custom rpc_url, uses preset fallbacks.
             request_timeout: HTTP request timeout in seconds (default 30).
+            deploy_block: Block the contract was deployed in, where event
+                scans start (CHAIN_DEPLOY_BLOCK): an int of 0 or more, or a
+                string of digits. If None, the preset's deploy block is
+                used for the preset's own contract; a custom contract
+                address then has no known deploy block (#231).
 
         Raises:
             ChainConfigurationError: If chain is unsupported or web3 not installed.
@@ -136,9 +221,30 @@ class ChainProvider:
         self.rpc_url = rpc_url or preset["rpc_url"]
         self.explorer_url = explorer_url or preset["explorer_url"]
         self.contract_address = contract_address or preset["contract_address"]
-        self.deploy_block = preset.get("deploy_block")
+        # The preset's deploy block belongs to the preset's contract. For a
+        # custom contract it is unknown unless given: a contract deployed
+        # before the preset block would lose its older events (#231)
+        deploy_block = _parse_deploy_block(deploy_block)
+        preset_contract = preset["contract_address"]
+        if deploy_block is not None:
+            self.deploy_block = deploy_block
+        elif (
+            preset_contract
+            and self.contract_address
+            and self.contract_address.lower() == preset_contract.lower()
+        ):
+            self.deploy_block = preset.get("deploy_block")
+        else:
+            self.deploy_block = None
         self._custom_rpc = rpc_url is not None
         self._request_timeout = request_timeout
+        # True while ChainClient's fallback loop (_with_fallback) runs: the
+        # loops below then leave the fallback to it, so one call tries each
+        # endpoint at most once
+        self._fallback_active = False
+        # Endpoints tried during one public ChainClient call, shared by all
+        # its steps (set by ChainClient's method decorators); None otherwise
+        self._fallback_tried = None
 
         # Build ordered list of RPC URLs to try
         if rpc_fallbacks is not None:
@@ -161,22 +267,73 @@ class ChainProvider:
             )
 
         # Initialize Web3 connection
-        self._web3 = Web3(
-            Web3.HTTPProvider(
-                self.rpc_url,
-                request_kwargs={"timeout": self._request_timeout},
-            )
-        )
+        self._web3 = Web3(_http_provider(Web3, self.rpc_url, self._request_timeout))
 
-        # When a custom RPC is provided, auto-detect chain ID from the node
-        # (e.g. local Hardhat uses chain ID 31337, not the preset chain ID)
+        # When a custom RPC is provided, read the chain ID from the node.
+        # The localhost preset takes whatever the node reports (a local node
+        # may use 31337, 1337 or a fork's ID). A named network preset must
+        # match: otherwise a "base-sepolia" config with a mainnet RPC would
+        # sign mainnet transactions.
+        self.chain_id = preset["chain_id"]
+        # Set once the node's chain ID has been read and accepted;
+        # confirm_chain_id() reads it before the first signature otherwise
+        self._chain_id_confirmed = False
         if self._custom_rpc:
             try:
-                self.chain_id = self._web3.eth.chain_id
+                detected = self._web3.eth.chain_id
             except Exception:
-                self.chain_id = preset["chain_id"]
-        else:
-            self.chain_id = preset["chain_id"]
+                # Unreachable now: keep the preset ID; confirm_chain_id()
+                # checks again before anything is signed
+                detected = None
+            if detected is not None:
+                self._accept_chain_id(detected)
+
+    def _accept_chain_id(self, detected: int) -> None:
+        """Accept the chain ID a node reports, or raise ChainIdMismatchError.
+
+        A named network preset must match its own chain ID. The localhost
+        preset takes whatever the node reports.
+        """
+        if self.chain in STRICT_CHAIN_ID_PRESETS and detected != self.chain_id:
+            raise ChainIdMismatchError(
+                f"Chain ID mismatch: chain '{self.chain}' has chain ID "
+                f"{self.chain_id}, but the RPC endpoint "
+                f"{redact_url(self.rpc_url)} reports chain ID {detected}. "
+                "Use an RPC for that network. For a local development "
+                "node, set CHAIN_NAME=localhost and CHAIN_RPC_URL to the "
+                "node's URL.",
+                chain=self.chain,
+                expected_chain_id=self.chain_id,
+                actual_chain_id=detected,
+            )
+        self.chain_id = detected
+        self._chain_id_confirmed = True
+
+    def confirm_chain_id(self) -> None:
+        """
+        Read the node's chain ID once, before the first signature.
+
+        The check in __init__ only runs for a custom RPC that answers at that
+        moment. This one runs for the RPC in use, so a node on another chain
+        that comes up later at the same URL gets nothing signed. Fallback
+        switches keep the confirmation: _try_fallback only switches to an
+        endpoint with the same chain ID.
+
+        Raises:
+            ChainIdMismatchError: If the node is on another chain than a
+                named network preset.
+            ChainConnectionError: If the chain ID cannot be read.
+        """
+        if self._chain_id_confirmed:
+            return
+        try:
+            detected = self._web3.eth.chain_id
+        except Exception as e:
+            raise ChainConnectionError(
+                f"Could not read the chain ID before signing: {e}. Nothing was sent.",
+                rpc_url=self.rpc_url,
+            ) from e
+        self._accept_chain_id(detected)
 
     @property
     def web3(self):
@@ -189,8 +346,14 @@ class ChainProvider:
 
         Iterates through remaining URLs in ``_rpc_urls`` (skipping the
         current ``rpc_url`` and any in ``tried``), attempts
-        ``is_connected()``, and switches ``_web3`` and ``rpc_url`` on the
-        first success.
+        ``is_connected()``, and switches to the first one that connects and
+        reports the expected chain ID. An endpoint on another chain is
+        skipped.
+
+        The switch replaces the provider of the existing Web3 object
+        (``web3.provider``) and updates ``rpc_url``. The Web3 object itself
+        stays the same, so everything built on it, such as the contract
+        object, uses the new endpoint (#200).
 
         Args:
             tried: URLs already tried by the caller in this attempt. Every
@@ -211,19 +374,25 @@ class ChainProvider:
                 continue
             tried.add(url)
             try:
-                candidate = Web3(
-                    Web3.HTTPProvider(
-                        url,
-                        request_kwargs={"timeout": self._request_timeout},
-                    )
-                )
+                candidate = Web3(_http_provider(Web3, url, self._request_timeout))
                 if candidate.is_connected():
+                    # Never switch to an endpoint on another chain
+                    candidate_chain_id = candidate.eth.chain_id
+                    if candidate_chain_id != self.chain_id:
+                        logger.warning(
+                            "RPC fallback: skipped %s, which reports chain ID %s, not %s",
+                            redact_url(url),
+                            candidate_chain_id,
+                            self.chain_id,
+                        )
+                        continue
                     logger.info(
                         "RPC fallback: switched from %s to %s",
                         redact_url(self.rpc_url),
                         redact_url(url),
                     )
-                    self._web3 = candidate
+                    # Keep the Web3 object: the contract holds a reference to it
+                    self._web3.provider = candidate.provider
                     self.rpc_url = url
                     return True
             except Exception:
@@ -238,6 +407,9 @@ class ChainProvider:
             True if connected and chain ID matches.
 
         Raises:
+            ChainIdMismatchError: If the RPC in use reports another chain ID.
+                No fallback is tried: an endpoint on the wrong chain is a
+                configuration error, as in reads and writes.
             ChainConnectionError: If connection fails (after trying fallbacks).
         """
         tried = set()
@@ -250,15 +422,21 @@ class ChainProvider:
                     )
                 actual_chain_id = self._web3.eth.chain_id
                 if actual_chain_id != self.chain_id:
-                    raise ChainConnectionError(
-                        f"Chain ID mismatch: expected {self.chain_id}, got {actual_chain_id}",
-                        rpc_url=self.rpc_url,
+                    raise ChainIdMismatchError(
+                        f"Chain ID mismatch: chain '{self.chain}' has chain ID "
+                        f"{self.chain_id}, but the RPC endpoint "
+                        f"{redact_url(self.rpc_url)} reports chain ID {actual_chain_id}",
+                        chain=self.chain,
+                        expected_chain_id=self.chain_id,
+                        actual_chain_id=actual_chain_id,
                     )
                 return True
+            except ChainIdMismatchError:
+                raise
             except Exception as e:
                 # Each URL is tried at most once per call
                 tried.add(self.rpc_url)
-                if self._try_fallback(tried):
+                if not self._fallback_active and self._try_fallback(tried):
                     continue
                 if isinstance(e, ChainConnectionError):
                     raise
@@ -276,14 +454,21 @@ class ChainProvider:
 
         Raises:
             ChainConnectionError: If RPC call fails (after trying fallbacks).
+            Exception: A JSON-RPC error answer (web3's Web3RPCError) is raised
+                unchanged and does not cause a fallback: the node answered,
+                so another endpoint would give the same answer (#168).
         """
+        from ..core.chain_client import _is_rpc_rejection
+
         tried = set()
         while True:
             try:
                 return self._web3.eth.block_number
             except Exception as e:
+                if _is_rpc_rejection(e):
+                    raise
                 tried.add(self.rpc_url)
-                if self._try_fallback(tried):
+                if not self._fallback_active and self._try_fallback(tried):
                     continue
                 raise ChainConnectionError(
                     f"Failed to get block number: {e}",

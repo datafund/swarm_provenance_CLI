@@ -133,7 +133,7 @@ The USDC contract on Base Sepolia is: `0x036CbD53842c5426634e7929541eC2318f3dCF7
 
 ### Private key
 
-The CLI reads the payment key from the `X402_PRIVATE_KEY` environment variable. Do not type the key into your shell, for example with `export X402_PRIVATE_KEY=0x...`: it stays in your shell history. Instead, read it from your password manager's command-line tool (such as 1Password `op read`, `pass`, or macOS `security`) into the variable for one command:
+The CLI reads the payment key from the `X402_PRIVATE_KEY` environment variable (or the variable that `X402_PRIVATE_KEY_ENV` names; see the lookup order below). Do not type the key into your shell, for example with `export X402_PRIVATE_KEY=0x...`: it stays in your shell history. Instead, read it from your password manager's command-line tool (such as 1Password `op read`, `pass`, or macOS `security`) into the variable for one command:
 
 ```bash
 X402_PRIVATE_KEY="$(op read 'op://<vault>/<item>/<field>')" swarm-prov-upload x402 status
@@ -151,18 +151,34 @@ X402_ENABLED=true
 
 # Wallet private key: not stored here, see "Private key" above
 
-# Network: base-sepolia (testnet) or base (mainnet)
+# Network: base-sepolia (testnet) or base (mainnet).
+# The CAIP-2 ids eip155:84532 and eip155:8453 also work.
 X402_NETWORK=base-sepolia
 
 # Optional: Auto-pay without prompts
 X402_AUTO_PAY=false
 
-# Optional: Maximum auto-pay amount per request in USD
+# Optional: Maximum auto-pay amount per request in USD (a finite number of 0 or more)
 X402_MAX_AUTO_PAY_USD=1.00
 
 # Optional: Only pay this recipient (the gateway operator's published pay-to address)
 X402_EXPECTED_PAY_TO=0x...
+
+# Optional: Custom RPC for the USDC balance and EIP-712 domain checks
+# X402_RPC_URL=https://your-rpc-provider.com
 ```
+
+`X402_RPC_URL` applies whichever `X402_NETWORK` is selected, the same way `CHAIN_RPC_URLS` does. If you switch networks, change the URL too.
+
+The CLI reads the `.env` of the folder you run it in, or the nearest `.env` in a parent folder. Variables already set in your environment take precedence.
+
+The key is looked up in this order, for both signing and `x402 status`:
+
+1. If `X402_PRIVATE_KEY_ENV` names another variable, only that variable. If it is not a valid variable name, or it contains a run of 32 or more hex digits (it looks like a key), no key is read at all, and the CLI says "X402_PRIVATE_KEY_ENV is not a valid variable name" without repeating the value.
+2. Otherwise `X402_PRIVATE_KEY`.
+3. Otherwise the legacy `SWARM_X402_PRIVATE_KEY`.
+
+Spaces and line breaks around the key are removed. A variable that is empty or blank counts as not set.
 
 ### Verify configuration
 
@@ -280,9 +296,19 @@ The paid request timed out, dropped, or failed with a server error after the pay
 
 Pressing Ctrl-C while a paid request is in progress is reported the same way, because the gateway finishes the request regardless.
 
+A server error that the gateway sends before it collects the payment is shown as an ordinary error instead, because nothing was charged: `PURCHASE_CAPACITY`, `GATEWAY_DAILY_SPEND_CEILING`, `SPEND_BUDGET_UNAVAILABLE`, `POOL_ALLOWANCE_UNAVAILABLE`, a Bee node that has not reported a stamp price yet, a price that the gateway could not calculate, and a payment that the gateway could not verify with the facilitator. A failed settlement (`PAYMENT_SETTLEMENT_UNAVAILABLE`) is still reported as possibly charged. So are the gateway's generic server errors, such as "Could not purchase stamp. The Bee node may be unavailable.": the gateway sends the same text before and after it collects the payment. A current gateway marks the second case with `X-Payment-Status: settled_not_delivered`, but nothing in the answer shows that the gateway adds this header, or that no proxy removed it, so the CLI cannot tell the two cases apart.
+
 ### "Payment was taken, but ... failed"
 
-The gateway confirmed it collected the payment, but the request failed afterwards (or it answered success with a response the CLI could not read). Contact the gateway operator with the transaction hash shown; they can deliver the result or refund it. Re-running pays again.
+The gateway confirmed it collected the payment, but the request failed afterwards. Contact the gateway operator with the transaction hash shown; they can deliver the result or refund it. Re-running pays again.
+
+### "... most likely succeeded, but its result could not be read"
+
+The gateway answered success, but the CLI could not read the answer (for example, a proxy page or a missing batch ID or Swarm reference). The gateway answers success only after it has collected the payment and done the work, so the request most likely worked. The CLI prints this as a warning, but still exits with code 1. Check before you contact the gateway operator: for `stamps extend`, the message shows `swarm-prov-upload stamps info <id>`, and the extension worked if the Amount it shows is higher and the TTL is longer than before the extension (with `--amount`, the message names the amount it should have grown by). The new values may take a few minutes to show.
+
+For a stamp purchase or a stamp from the pool, the message shows `swarm-prov-upload stamps list --wallet <payer> --full`. The new stamp may show `Usable: No`, or not be listed yet, for a few minutes after the purchase. After a stamp purchase, the message also shows how the new stamp's label starts. The gateway adds a random suffix to the label of a paid purchase. The CLI sends no label, so stamps the CLI buys have a label that starts with `paid-` (most stamps from the pool start with `pool-`). The new one has 0% utilization. Only a library call of `purchase_stamp(label=...)` gives a label that starts with `<label>-`.
+
+For an upload, or a stamp purchase whose payer is not known, there is no command to check with, and the message names what is missing (the Swarm reference or the batch ID). When the request had an Idempotency-Key, the message also shows the command that re-runs it with the same key: a gateway that supports Idempotency-Key answers that re-run from the first request (for 24 hours), without charging again, so it returns the first answer again. That gives the missing result when a proxy or the connection broke the answer; if the gateway's own answer lacked it, the replay lacks it too, but the re-run is still free. Otherwise, ask the gateway operator for it with the transaction hash shown. A re-run without the key pays again.
 
 ### "Payment received, but the stamp purchase is not confirmed yet"
 
@@ -312,7 +338,7 @@ The gateway's payment request names a different USDC signing domain than the tok
 
 ### "No matching network option"
 
-The gateway doesn't support your configured network. Check that `X402_NETWORK` matches what the gateway accepts.
+The gateway doesn't support your configured network. Check that `X402_NETWORK` matches what the gateway accepts. The client treats the x402 v1 names and their CAIP-2 chain ids as the same network: `base-sepolia` is `eip155:84532` and `base` is `eip155:8453`.
 
 ## Security best practices
 

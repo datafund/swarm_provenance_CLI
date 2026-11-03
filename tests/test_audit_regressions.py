@@ -297,6 +297,21 @@ class TestStampIdValidation:
             getattr(GatewayClient(base_url="https://gw.test"), method)(stamp_id, *args)
         assert requests_mock.call_count == 0
 
+    @pytest.mark.parametrize("stamp_id", ["../../wallet", "a" * 63, "x" * 64, "0x" + STAMP])
+    def test_local_bee_refuses_bad_stamp_id(self, requests_mock, stamp_id):
+        from swarm_provenance_uploader.core import swarm_client
+
+        with pytest.raises(ValueError, match="Not a stamp ID"):
+            swarm_client.get_stamp_info("http://localhost:1633", stamp_id)
+        assert requests_mock.call_count == 0
+
+    def test_local_bee_accepts_stamp_id(self, requests_mock):
+        from swarm_provenance_uploader.core import swarm_client
+
+        requests_mock.get(f"http://localhost:1633/stamps/{STAMP}",
+                          json={"batchID": STAMP, "usable": True, "depth": 17, "amount": "1"})
+        assert swarm_client.get_stamp_info("http://localhost:1633", STAMP.upper())["batchID"] == STAMP
+
     @pytest.mark.parametrize("command", [["upload", "--file", "f.txt"], ["upload-collection", "d"]])
     def test_cli_refuses_bad_stamp_id_up_front(self, mocker, tmp_path, monkeypatch, command):
         monkeypatch.chdir(tmp_path)
@@ -306,7 +321,7 @@ class TestStampIdValidation:
         constructor = mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
         result = runner.invoke(app, [*command, "--stamp-id", "../../x"])
         assert result.exit_code == 1
-        assert "not a stamp ID" in result.output
+        assert "--stamp-id is not a stamp ID (64 hex characters)" in result.output
         constructor.assert_not_called()
 
     def test_cli_accepts_0x_prefixed_stamp_id(self, mocker, tmp_path, monkeypatch):

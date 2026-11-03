@@ -24,7 +24,7 @@ Postage stamps are the payment mechanism for Swarm storage. Understanding how to
 
 1. Install the CLI: `pip install -e .`
 2. Gateway access (default, no setup needed)
-3. For `stamps extend`: a funded wallet with BZZ tokens (optional)
+3. For `stamps extend`: an x402 wallet with USDC, used with `--x402` (optional)
 
 ## Quick start
 
@@ -82,10 +82,10 @@ swarm-prov-upload stamps check <stamp_id>
 ### 6. Extend a stamp (optional)
 
 ```bash
-swarm-prov-upload stamps extend <stamp_id> --amount 1000000
+swarm-prov-upload --x402 stamps extend <stamp_id> --duration-hours 48
 ```
 
-Requires a funded wallet. This tops up the stamp to extend its lifetime.
+The gateway charges for an extension like a purchase. A stamp you bought can be extended only with a paid request (`--x402`) from the wallet that bought it. Without `--duration-hours`, the gateway adds 25 hours.
 
 ## Stamp lifecycle helper
 

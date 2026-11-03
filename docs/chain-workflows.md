@@ -200,8 +200,9 @@ swarm-prov-upload chain get aaa... --follow --depth 1
 from swarm_provenance_uploader.core.chain_client import ChainClient
 
 client = ChainClient()
-chain = client.get_provenance_chain("aaa...")
+chain = client.get_provenance_chain("aaa...")  # max_depth: 0 to 50, default 10
 # Returns [record_aaa, record_bbb, record_ccc]
+# Raises ChainConnectionError or ChainError if a read fails during the walk
 
 for record in chain:
     print(f"{record.data_hash[:12]}... ({record.data_type})")
@@ -591,17 +592,19 @@ The `--follow` flag on `chain get` walks the full transformation chain using bre
 
   Chain: A ──> B ──> C ──> D
 
-  --follow              Returns: [A, B, C, D]     (all records)
+  --follow              Returns: [A, B, C, D]     (up to 10 levels)
   --follow --depth 2    Returns: [A, B, C]         (stops at depth 2)
   --follow --depth 1    Returns: [A, B]            (stops at depth 1)
-  --follow --depth 0    Returns: [A]               (root only)
   (no --follow)         Returns: A                 (single record, no chain)
 ```
 
 **Default behavior:**
-- Without `--depth`: traverses up to 50 levels (safety cap)
+- `--depth` accepts 1 to 50. Other values are rejected with a usage error (exit code 2).
+- Without `--depth`: traverses up to 10 levels
 - `--depth` without `--follow`: warns and is ignored
 - Cycles are detected and skipped (visited set prevents infinite loops)
+- The walk fails closed: if any read fails during the walk (an RPC error, or a linked hash that reads as not registered), the command prints an error and exits with code 1. It never prints a partial chain.
+- Each record in `--json` output has a `parents` list with the hashes it was derived from. Records at the depth limit are not expanded, so their `parents` is `null`.
 
 **CLI commands:**
 ```bash
@@ -614,6 +617,7 @@ swarm-prov-upload chain get aaa... --follow --depth 2
 # JSON output includes chain array, depth count, and root hash
 swarm-prov-upload chain get aaa... --follow --json
 # Output: {"chain": [...], "depth": 4, "root": "aaa..."}
+# Each record in "chain" has "parents": [...], or null at the depth limit
 ```
 
 ## Error recovery
@@ -627,24 +631,55 @@ The `chain protect` command runs multiple operations sequentially. If a later st
 | Step 1 (verify) | Nothing committed | Fix preconditions and retry |
 | Step 2 (anchor new) | Nothing committed | Fix anchor issue and retry |
 | Step 3 (transform) | New hash may be anchored | Record transform manually |
-| Step 4 (restrict) | Transform recorded, original still ACTIVE | Restrict manually |
+| Step 4 (restrict) | Transform recorded, original still ACTIVE (or the restrict transaction may still be mined, exit 3) | Restrict manually; after exit 3, run the printed `chain wait` command first |
 
-**If restrict fails after transform:**
+If a step fails, the command lists the steps that were recorded before it, with their transaction hashes, and prints the error of the failed step. It exits 1, or 3 when the failed step's transaction may still be mined (see [Exit codes](#exit-codes)).
+
+**If restrict fails after transform (exit 1):**
 ```bash
-# The CLI shows a WARNING with the manual command:
-# WARNING: Transform succeeded but failed to restrict original: ...
-#   Restrict manually: swarm-prov-upload chain status <hash> --set restricted
+# Transformation recorded.
+#
+# Completed before the failure:
+#   Transform: tx 0xb2b2...
+#     Explorer: https://...
+# ERROR: Failed to restrict original: Transaction reverted (status=0)
+#   Transaction: 0xe5e5...
+#   Restrict manually: swarm-prov-upload chain status aaa... --set restricted
 
 # Run the suggested command:
 swarm-prov-upload chain status aaa... --set restricted
 ```
 
-**JSON output for partial failures:**
+**If the restrict transaction may still be mined (exit 3):** do not restrict manually yet. Run the printed `chain wait` command first. If it confirms the transaction (exit 0), the original is restricted and nothing else is needed. Restrict manually only when `chain wait` reports that the transaction reverted, was not recorded or was replaced.
+```bash
+# ERROR: Failed to restrict original. Not confirmed yet. The transaction was sent, but no receipt
+#   arrived within 120 seconds. It may still be mined: do not run the write again.
+#   Wait for it: swarm-prov-upload chain wait 0xe5e5... --event DataStatusChanged
+#   Transaction: 0xe5e5...
+#   ...
+#   After you have checked the transaction, restrict manually: swarm-prov-upload chain status aaa... --set restricted
+
+swarm-prov-upload chain wait 0xe5e5... --event DataStatusChanged
+```
+
+**JSON output for partial failures:** `failed_step` names the step. A step whose transaction was sent but is not confirmed has its error under `unconfirmed`; any other failure has it under `error`.
 ```json
 {
   "transform": { "tx_hash": "0x...", ... },
   "restrict": null,
-  "partial_failure": true
+  "partial_failure": true,
+  "failed_step": "restrict",
+  "unconfirmed": {
+    "error": "receipt_timeout",
+    "tx_hash": "0x...",
+    "explorer_url": "https://...",
+    "contract_address": "0x...",
+    "event": "DataStatusChanged",
+    "expected_count": 1,
+    "reason": "...",
+    "timeout": 120,
+    "wait_command": "swarm-prov-upload chain wait 0x... --event DataStatusChanged"
+  }
 }
 ```
 
@@ -656,10 +691,44 @@ swarm-prov-upload chain status aaa... --set restricted
 | `expected ACTIVE` | Original is RESTRICTED/DELETED | Set to ACTIVE first or use different hash |
 | `Transaction failed: reverted` | Not the owner or not authorized | Check owner with `chain get <hash>` |
 | `Cannot connect to chain` | RPC node unreachable | Check `CHAIN_RPC_URL` or network config |
+| `Outcome unknown` | The transaction may have been sent, and it is not known whether it was mined: the RPC connection failed after the send, the RPC answered the send with "already known", "Known transaction" or "nonce too low", or the RPC answered the receipt lookup with an error | Wait with the printed `chain wait` command, or check the transaction in the explorer, before you run the command again |
+| `Not confirmed yet` | No receipt arrived within 120 seconds; the transaction may still be mined | Run the printed `chain wait <tx_hash> --event <name>` command. Do not run the write again |
+| `Replaced` | Another transaction with the same nonce from the same address was mined instead | Check the record with `chain get <hash>` before you run the command again. For `chain delegate`, check the delegate state or the transaction in the explorer |
 
 ### Exit codes
 
-| Exit Code | Meaning |
-|-----------|---------|
-| 0 | Success (also for protect with partial restrict failure) |
-| 1 | Error: hash not found, transaction failed, connection error |
+These exit codes apply to every chain command, including the composite commands `chain protect` and `chain transform --restrict-original`, where the code is that of the step that failed.
+
+| Exit code | Meaning | JSON `error` (with `--json`) |
+|-----------|---------|------------------------------|
+| 0 | Success | (no error) |
+| 1 | Error: hash not found, transaction reverted, not recorded, not verified, replaced, transaction not found (`chain wait`), connection error, a `CHAIN_GAS_LIMIT` that is not a whole number of at least 21000 (chain writes run without `--gas`) | `transaction_failed`, `not_recorded`, `not_verified`, `replaced`, `not_found`, `invalid_gas_limit`, and others |
+| 2 | Usage error: an option or argument is not valid, for example `--gas` below 21000 | (no JSON) |
+| 3 | The transaction may have been sent and may still be mined: receipt timeout, or outcome unknown. Do not run the command again; wait with `chain wait`, or check the transaction in the explorer. `chain wait` also exits 3 when the RPC answers the receipt lookup with an error (`outcome_unknown`), and when it cannot reach any RPC, because the transaction may still be pending | `receipt_timeout`, `outcome_unknown`, `connection_failed` (`chain wait` only) |
+
+In the JSON output of a composite command, the error object of an unconfirmed step is under `unconfirmed`.
+
+### Resume a wait: `chain wait`
+
+```bash
+swarm-prov-upload chain wait <tx_hash>                                  # receipt status only
+swarm-prov-upload chain wait <tx_hash> --event DataRegistered           # also require the event
+swarm-prov-upload chain wait <tx_hash> --event DataRegistered --count 3 # batch write
+swarm-prov-upload chain wait <tx_hash> --timeout 300 --json
+```
+
+`chain wait` waits for the receipt of a sent transaction and runs the same checks as a write: the receipt status, the contract's events when `--event` is given, and the replaced check after a timeout. It sends nothing and needs no wallet key, and it uses the fallback RPCs. For a hash the RPC does not know, it waits until `--timeout`, and then reports `not_found` (exit 1). If the RPC answers the receipt lookup with an error, such as a rate limit (-32005), it reports "Outcome unknown" (`outcome_unknown`) and exits 3. If no RPC can be reached during the wait, it exits 3, because the transaction may still be pending, and with `--json` prints `{"error": "connection_failed", "message": ..., "tx_hash": ..., "explorer_url": ..., "wait_command": "swarm-prov-upload chain wait 0x... --event ..."}`. Success output in JSON:
+
+```json
+{
+  "tx_hash": "0x...",
+  "block_number": 12345679,
+  "gas_used": 95000,
+  "status": 1,
+  "explorer_url": "https://...",
+  "event": "DataRegistered",
+  "emitted_count": 1
+}
+```
+
+`event` and `emitted_count` are `null` without `--event`.

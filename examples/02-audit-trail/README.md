@@ -18,7 +18,7 @@ Audit trails must show that a record was not changed after it was written. By up
 
 No one — not even the data owner — can alter a record after upload without changing its hash.
 
-**Retention:** a record stays on Swarm only while its postage stamp is valid. Without `--duration`, the gateway buys a 25-hour stamp, so the record can expire about a day after upload. For records you must keep, buy a longer stamp with `--duration <hours>` or extend it with `stamps extend`, and keep your own copy. Swarm storage alone does not make an audit trail compliant with a regulation.
+**Retention:** a record stays on Swarm only while its postage stamp is valid. Without `--duration`, the gateway buys a 25-hour stamp, so the record can expire about a day after upload. For records you must keep, buy a longer stamp with `--duration <hours>` or extend it with `stamps extend --duration-hours <hours>` (paid; a stamp you bought needs `--x402` from the same wallet), and keep your own copy. Swarm storage alone does not make an audit trail compliant with a regulation.
 
 ## Prerequisites
 

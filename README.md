@@ -71,6 +71,7 @@ swarm-prov-upload download <swarm_hash> --output-dir ./downloads --no-verify
    ```bash
    cp .env.example .env
    ```
+   The CLI reads the `.env` of the folder you run it in. If there is none, it uses the nearest `.env` in a parent folder (up to the root, including your home folder). The folder the package is installed in does not matter. Variables already set in your environment take precedence over `.env`. Versions up to 0.12.0 searched from the folder the package was installed in, so with an editable install the repository's `.env` applied everywhere. If you relied on that, copy the `.env` to the folder you work in, or export the variables.
 3. Install in editable mode, including testing dependencies:
    ```bash
    pip install -e .[testing]
@@ -195,11 +196,14 @@ swarm-prov-upload x402 info
 |---------------------|-------------|---------|
 | `X402_ENABLED` | Enable x402 payments | `false` |
 | `X402_PRIVATE_KEY` | Wallet private key (keep secret!) | - |
-| `X402_NETWORK` | `base-sepolia` (testnet) or `base` (mainnet) | `base-sepolia` |
+| `X402_PRIVATE_KEY_ENV` | Name of the variable that holds the key. When set to another name, only that variable is read. A value that is not a valid variable name, or that looks like a key, is rejected and not printed | `X402_PRIVATE_KEY` |
+| `X402_NETWORK` | `base-sepolia` (testnet) or `base` (mainnet). The CAIP-2 ids `eip155:84532` and `eip155:8453` also work | `base-sepolia` |
 | `X402_AUTO_PAY` | Auto-pay without prompts | `false` |
-| `X402_MAX_AUTO_PAY_USD` | Maximum auto-pay amount per request | `1.00` |
+| `X402_MAX_AUTO_PAY_USD` | Maximum auto-pay amount per request. A finite number of 0 or more; `inf`, `nan`, negative and non-numeric values are rejected | `1.00` |
 | `X402_EXPECTED_PAY_TO` | Only pay this recipient address (optional) | not set |
-| `X402_RPC_URL` | Custom RPC URL (optional) | Uses default |
+| `X402_RPC_URL` | Custom RPC URL for the USDC balance and EIP-712 domain checks (optional). Like `CHAIN_RPC_URLS`, applies whichever `X402_NETWORK` is selected | Uses the network preset |
+
+The signing key and `x402 status` use the same lookup: the variable named by `X402_PRIVATE_KEY_ENV` if that is set to another name (and nothing else), otherwise `X402_PRIVATE_KEY`, then the legacy `SWARM_X402_PRIVATE_KEY`.
 
 ### Global flags
 
@@ -208,8 +212,8 @@ swarm-prov-upload x402 info
 | `--free` / `--no-free` | Enable/disable free tier mode |
 | `--x402` / `--no-x402` | Enable/disable x402 for this command |
 | `--auto-pay` / `--no-auto-pay` | Enable/disable auto-pay |
-| `--max-pay FLOAT` | Maximum auto-pay amount in USD |
-| `--x402-network TEXT` | Network: `base-sepolia` or `base` |
+| `--max-pay FLOAT` | Maximum auto-pay amount in USD. A finite number of 0 or more; `inf` is rejected |
+| `--x402-network TEXT` | Network: `base-sepolia` or `base` (or the CAIP-2 ids `eip155:84532` and `eip155:8453`) |
 | `--idempotency-key TEXT` | Idempotency-Key for this command's paid requests; pass the key printed by a failed run to repeat it without paying twice (on a gateway that supports it) |
 
 ### Testnet setup
@@ -260,7 +264,7 @@ swarm-prov-upload chain anchor <swarm_hash>
 swarm-prov-upload chain anchor <swarm_hash> --type "dataset"
 swarm-prov-upload chain anchor <swarm_hash> --owner <address>  # anchor as delegate
 swarm-prov-upload chain anchor <swarm_hash> --storage-ref <ref>  # anchor with Swarm storage reference
-swarm-prov-upload chain anchor <swarm_hash> --gas 500000      # explicit gas limit
+swarm-prov-upload chain anchor <swarm_hash> --gas 500000      # explicit gas limit, at least 21000; a transaction that would revert is still sent (see CHAIN_GAS_LIMIT below)
 
 # Record data access
 swarm-prov-upload chain access <swarm_hash>
@@ -276,10 +280,12 @@ swarm-prov-upload chain merge <hash1> <hash2> [<hash3>...] <new_hash> --descript
 swarm-prov-upload chain get <swarm_hash>
 swarm-prov-upload chain get <swarm_hash> --json
 swarm-prov-upload chain get <swarm_hash> --follow           # walk transformation chain
-swarm-prov-upload chain get <swarm_hash> --follow --depth 3 # limit traversal depth
+swarm-prov-upload chain get <swarm_hash> --follow --depth 3 # limit traversal depth (1-50, default 10)
 
-# Verify a hash is registered on-chain (exit code 0=yes, 1=no)
+# Verify a hash is registered on-chain (exit code 0=yes, 1=no); prints its status and owner
 swarm-prov-upload chain verify <swarm_hash>
+swarm-prov-upload chain verify <swarm_hash> --require-active   # exit 1 if RESTRICTED or DELETED
+swarm-prov-upload chain verify <swarm_hash> --owner <address>  # exit 1 if another address owns it
 
 # Query or set data status
 swarm-prov-upload chain status <swarm_hash>                 # show current status
@@ -303,13 +309,23 @@ swarm-prov-upload chain set-storage-ref <data_hash> <storage_ref>
 # Look up data hash by storage reference
 swarm-prov-upload chain lookup <storage_ref>
 
+# Wait for a sent transaction, after a write reported "Not confirmed yet" or "Outcome unknown" (exit 3)
+swarm-prov-upload chain wait <tx_hash> --event DataRegistered
+swarm-prov-upload chain wait <tx_hash> --timeout 300 --json
+
 # Walk transformation chain (follow lineage)
 swarm-prov-upload chain get <hash> --follow               # full chain
 swarm-prov-upload chain get <hash> --follow --depth 2     # limit depth
 swarm-prov-upload chain get <hash> --follow --json        # JSON output
 ```
 
-> **`chain protect` vs separate commands**: `chain protect` combines verify + anchor + transform + restrict into one command. If the restrict step fails, the command shows a warning (transform already succeeded) and exits 0 with `partial_failure: true` in JSON output. Use `chain transform --restrict-original` for the two-step version without the pre-flight ACTIVE check.
+> **`--json`**: stdout carries exactly one JSON document, for a success or an error (`{"error": "<code>", "message": ...}`), so the output can be piped to `jq`. Progress, warnings, hints and `-v` debug lines go to stderr, and the exit codes do not change. See [docs/chain-setup.md](docs/chain-setup.md#json-output-for-scripting) for the error codes.
+
+> **Exit code 3: may still be mined**: when a write sent its transaction but no receipt arrived within 120 seconds, the command exits 3 and prints the transaction hash. It also exits 3 with "Outcome unknown" when the connection to the RPC fails while or after the transaction is sent; when the RPC answers the send with "already known", "Known transaction" or "nonce too low", which a node gives when it already has the transaction or a transaction with its nonce is mined; or when, after the send, the RPC answers the receipt lookup with a JSON-RPC error, such as a rate limit (-32005). Do not run the write again: wait with the printed `chain wait` command, or check the transaction in the explorer. A transaction that another one with the same nonce replaced is reported as "Replaced" (exit 1). See [docs/chain-workflows.md](docs/chain-workflows.md#exit-codes) for all exit codes.
+
+> **`chain get --follow` fails closed**: if any read fails during the walk, the command prints an error and exits with code 1 instead of printing a partial chain. This includes a chain that may be incomplete: on a v1 contract (no transformation links) whose deploy block is unknown, only the last 50,000 blocks can be scanned, so on a longer chain the command asks you to set `CHAIN_DEPLOY_BLOCK`. In `--json` output, each record has a `parents` list (`null` for records at the depth limit).
+
+> **`chain protect` vs separate commands**: `chain protect` combines verify + anchor + transform + restrict into one command. If the restrict step fails, the command lists the steps that were recorded (the transform transaction), prints the error and the command to restrict the original manually, and exits 1, or 3 when the restrict transaction may still be mined. The JSON output then has `partial_failure: true` and `failed_step: "restrict"`. Use `chain transform --restrict-original` for the two-step version without the pre-flight ACTIVE check.
 
 ### Global flags
 
@@ -322,20 +338,22 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
-| `CHAIN_ENABLED` | Enable blockchain features | `false` |
-| `CHAIN_NAME` | `base-sepolia` (testnet) or `base` (mainnet) | `base-sepolia` |
+| `CHAIN_NAME` | `base-sepolia` (testnet), `base` (mainnet), or `localhost` (local development node; takes the chain ID the node reports) | `base-sepolia` |
 | `PROVENANCE_WALLET_KEY` | Wallet private key (keep secret!) | - |
-| `CHAIN_RPC_URL` | Custom RPC URL (optional) | Uses preset |
+| `CHAIN_RPC_URL` | Custom RPC URL (optional). With `base` or `base-sepolia`, it must report the preset chain ID | Uses preset |
 | `CHAIN_CONTRACT` | Custom contract address (optional) | Uses preset |
+| `CHAIN_DEPLOY_BLOCK` | Block the contract was deployed in, where event scans start (optional, a non-negative integer). Needed for `chain get --follow` on a v1 contract with a custom `CHAIN_CONTRACT`: a custom contract does not use the preset's deploy block. It also turns on the duplicate check of `chain transform` and `chain protect` on a v1 contract when the chain has more than 50,000 blocks (on a shorter chain the check runs without it). The value must not be later than the block the contract was deployed in: events before it are not read. A value above the chain head is an error | Preset's, for the preset contract only |
 | `CHAIN_EXPLORER_URL` | Custom block explorer URL (optional) | Uses preset |
-| `CHAIN_GAS_LIMIT` | Explicit gas limit (optional, skips RPC estimation) | Auto-estimated |
-| `CHAIN_RPC_URLS` | Comma-separated fallback RPC URLs (optional) | Uses preset fallbacks |
+| `CHAIN_GAS_LIMIT` | Explicit gas limit (optional, skips RPC estimation, so a transaction that would revert is still sent and costs gas). A whole number of at least 21000, like `--gas`; a chain write exits 1 with an error for another value | Auto-estimated |
+| `CHAIN_RPC_URLS` | Comma-separated fallback RPC URLs, tried in order after the main RPC (optional, replaces the preset fallbacks). Like `CHAIN_RPC_URL`, applies whatever chain is selected | Uses preset fallbacks |
+
+When the RPC in use cannot be reached, times out, or does not answer with JSON-RPC, reads and the steps of a write before the transaction is sent (chain ID and contract code checks, gas estimate, nonce, gas price, balance check) move to the next fallback RPC that reports the same chain ID. Sending the transaction never moves to a fallback, so a write is never sent twice; waiting for the receipt may move to a fallback for the same transaction hash. See [docs/chain-setup.md](docs/chain-setup.md#which-operations-use-the-fallback-rpcs).
 
 ### Testnet setup
 
 1. **Get testnet ETH** (for gas): https://www.alchemy.com/faucets/base-sepolia
 2. **Get testnet USDC** (if using x402): https://faucet.circle.com/
-3. **Configure wallet**: Set `PROVENANCE_WALLET_KEY` with your wallet's private key
+3. **Configure wallet**: Set `PROVENANCE_WALLET_KEY` with your wallet's private key. Only commands that write to the chain, and `chain balance`, need it. `chain get`, `verify`, `lookup` and `status` (without `--set`) work without a key
 
 See [docs/chain-setup.md](docs/chain-setup.md) for detailed setup instructions and [docs/chain-workflows.md](docs/chain-workflows.md) for workflow diagrams.
 
@@ -362,12 +380,16 @@ print(f"TX: {result.explorer_url}")
 - `set_delegate(delegate, authorized)` - Authorize/revoke a delegate
 - `set_storage_ref(swarm_hash, storage_ref)` - Set the storage reference for an anchored hash (set-once)
 
+`ChainClient(gas_limit=N)` sets an explicit gas limit for every write and skips gas estimation, so a transaction that would revert is still sent and costs gas. `N` must be an `int` of at least 21000; another value (including `True`, `1.5` or `"50000"`) raises `ChainConfigurationError`.
+
+To read without a wallet key, create the client with `ChainClient(require_wallet=False)`. The key is then read on first use, so write operations, `balance()` and `address` raise `ChainConfigurationError` if no key is configured.
+
 **Read operations** (no gas required):
 - `get(swarm_hash)` - Get full provenance record
 - `verify(swarm_hash)` - Check if hash is registered
 - `get_provenance_chain(swarm_hash)` - Follow transformation lineage
 - `get_by_storage_ref(storage_ref)` - Look up data hash by storage reference
-- `balance()` - Get wallet balance and chain info
+- `balance()` - Get wallet balance and chain info (needs the wallet key)
 - `health_check()` - Check RPC connectivity
 
 ## Run tests
@@ -450,10 +472,12 @@ swarm-prov-upload upload-collection /path/to/directory --std "PROV-STD-V1" --dur
 swarm-prov-upload upload-collection /path/to/directory --usePool
 
 # JSON output with provenance metadata
+# (if the gateway uploaded and charged but could not return the result, swarm_reference is null,
+#  status is "delivered_not_stored", and transaction identifies the payment)
 swarm-prov-upload upload-collection /path/to/directory --json
 
-# With existing stamp, deferred upload, and redundancy
-swarm-prov-upload upload-collection /path/to/directory --stamp-id <id> --deferred --redundancy
+# With existing stamp, deferred upload, and redundancy level 3
+swarm-prov-upload upload-collection /path/to/directory --stamp-id <id> --deferred --redundancy 3
 ```
 
 **Collection Options:**
@@ -465,8 +489,10 @@ swarm-prov-upload upload-collection /path/to/directory --stamp-id <id> --deferre
 | `--stamp-id`, `-s` | Use existing stamp (skip purchase) |
 | `--usePool` | Acquire stamp from pool (faster) |
 | `--deferred` | Deferred upload — the gateway returns immediately and processes the upload in the background. Useful for large collections. |
-| `--redundancy` | Stores data on multiple nodes for higher availability. Increases upload cost. |
-| `--json` | Output result as JSON (see example below) |
+| `--redundancy` | Erasure coding level from 0 to 4: `0` none, `1` medium, `2` strong, `3` insane, `4` paranoid. A higher level keeps the data retrievable when more chunks are lost, and uses more of the stamp. Without this option, the gateway uses level 2. |
+| `--stamp-retries` | Number of times to check that the stamp is usable before the upload (default: 12) |
+| `--stamp-interval` | Seconds between stamp usability checks (default: 20) |
+| `--json` | Output result as JSON (see example below). stdout then carries only the JSON document; progress and the payment prompt go to stderr. An error is a JSON object too, for example `{"error": "stamp_not_usable", "message": ...}` (other codes: `invalid_input`, `configuration_error`, `payment_required`, `payment_outcome_unknown`, `delivered_not_stored`, `upload_failed`, `interrupted`, `aborted`). After the command bought a stamp or took one from the pool, an error document has `unused_stamp_id` |
 
 **Example Output (text):**
 ```
@@ -540,7 +566,7 @@ You can also use any Swarm gateway or a local Bee node to access the files.
 | `--sign` | Sign document with notary service (value: `notary`, gateway only) |
 | `--amount` | Legacy: PLUR amount (local backend) |
 
-**How long data stays on Swarm:** an upload stays available only while its postage stamp is valid. Without `--duration`, the gateway buys a 25-hour stamp, so the data can expire about a day after the upload. The gateway buys its pool stamps (`--usePool`) for 169 hours, counted from when the pool bought them. To keep data longer, pass `--duration <hours>` or add funds with `stamps extend`.
+**How long data stays on Swarm:** an upload stays available only while its postage stamp is valid. Without `--duration`, the gateway buys a 25-hour stamp, so the data can expire about a day after the upload. The gateway buys its pool stamps (`--usePool`) for 169 hours, counted from when the pool bought them. To keep data longer, pass `--duration <hours>` or extend the stamp with `stamps extend --duration-hours <hours>`, which the gateway charges for like a purchase (a stamp you bought needs `--x402` from the same wallet).
 
 ### Stamp management (gateway only)
 
@@ -554,8 +580,10 @@ swarm-prov-upload stamps list --full --wallet 0xYourPayerAddress
 # Get stamp details
 swarm-prov-upload stamps info <stamp_id>
 
-# Extend stamp TTL
-swarm-prov-upload stamps extend <stamp_id> --amount 1000000
+# Extend stamp TTL by 48 hours (paid; a stamp you bought needs --x402 from the same wallet)
+# Prints the batch ID and the expiry the gateway reports: an estimate read right after the top-up,
+# which may not include the extension yet (check it with stamps info)
+swarm-prov-upload --x402 stamps extend <stamp_id> --duration-hours 48
 
 # Check stamp health (can it be used for uploads?)
 swarm-prov-upload stamps check <stamp_id>
@@ -904,12 +932,12 @@ See [examples/README.md](examples/README.md) for the full guide with walkthrough
 │  │                                 │  │ • X402_MAX_AUTO_PAY_USD             │  │
 │  │ Chain Models:                   │  │                                     │  │
 │  │ • ChainProvenanceRecord         │  │ Chain Configuration:                │  │
-│  │ • AnchorResult                  │  │ • CHAIN_ENABLED                     │  │
-│  │ • TransformResult               │  │ • CHAIN_NAME                        │  │
-│  │ • MergeTransformResult          │  │ • PROVENANCE_WALLET_KEY             │  │
-│  │ • AccessResult                  │  │ • CHAIN_RPC_URL                     │  │
-│  │ • ChainWalletInfo               │  │ • CHAIN_RPC_URLS (fallbacks)        │  │
-│  │                                 │  │ • CHAIN_EXPLORER_URL                │  │
+│  │ • AnchorResult                  │  │ • CHAIN_NAME                        │  │
+│  │ • TransformResult               │  │ • PROVENANCE_WALLET_KEY             │  │
+│  │ • MergeTransformResult          │  │ • CHAIN_RPC_URL                     │  │
+│  │ • AccessResult                  │  │ • CHAIN_RPC_URLS (fallbacks)        │  │
+│  │ • ChainWalletInfo               │  │ • CHAIN_EXPLORER_URL                │  │
+│  │                                 │  │                                     │  │
 │  └─────────────────────────────────┘  └─────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                         │
@@ -1092,6 +1120,7 @@ swarm_provenance_uploader/
 │   ├── __init__.py
 │   ├── cli.py
 │   ├── config.py
+│   ├── constants.py             # Constants without side effects (MIN_GAS_LIMIT)
 │   ├── exceptions.py            # Custom exception classes
 │   ├── models.py
 │   ├── chain/                   # Blockchain subpackage (optional)

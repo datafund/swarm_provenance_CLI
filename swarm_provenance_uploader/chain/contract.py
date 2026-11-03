@@ -9,11 +9,12 @@ Requires optional dependencies (the `blockchain` extra): web3 and eth-account.
 
 import json
 import logging
+import re
 from enum import IntEnum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .exceptions import ChainConfigurationError, ChainValidationError
+from .exceptions import ChainConfigurationError, ChainValidationError, ContractCodeNotFoundError
 from .redact import redact_urls
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,10 @@ MAX_BATCH_ACCESS = 100
 MIN_MERGE_SOURCES = 2
 MAX_MERGE_SOURCES = 50
 
+# Blocks the per-node event queries scan back from the latest block
+# (get_transformations_from / get_transformations_to)
+EVENT_LOOKBACK_BLOCKS = 50_000
+
 # Note: the contract also defines on-chain constants MAX_TRANSFORMATIONS (100)
 # and MAX_ACCESSORS readable via contract.functions.MAX_TRANSFORMATIONS().call().
 # These limit how many transformations/accessors can be stored per data record.
@@ -41,6 +46,23 @@ class DataStatus(IntEnum):
     ACTIVE = 0
     RESTRICTED = 1
     DELETED = 2
+
+
+def _is_revert(error: Exception) -> bool:
+    """True if web3 reports a revert (ContractLogicError, including
+    ContractCustomError and ContractPanicError). Matched by class name, so
+    web3 is not imported here."""
+    return any(cls.__name__ == "ContractLogicError" for cls in type(error).__mro__)
+
+
+def _is_empty_result(error: Exception) -> bool:
+    """True if web3 reports an empty call result (BadFunctionCallOutput).
+
+    web3 raises it both when the function is missing and when the address
+    has no code on the RPC, so the caller must check the code. Matched by
+    class name.
+    """
+    return any(cls.__name__ == "BadFunctionCallOutput" for cls in type(error).__mro__)
 
 
 # --- Validation helpers ---
@@ -144,6 +166,14 @@ def _load_abi() -> list:
         ) from e
 
 
+def abi_event_names() -> List[str]:
+    """The names of the events in the bundled DataProvenance ABI, sorted (#167)."""
+    return sorted(
+        entry["name"] for entry in _load_abi()
+        if entry.get("type") == "event" and entry.get("name")
+    )
+
+
 class DataProvenanceContract:
     """Wrapper around the DataProvenance smart contract.
 
@@ -177,13 +207,46 @@ class DataProvenanceContract:
 
     # --- Build transaction methods (return tx dicts) ---
 
+    def _validate_address(self, address: str, name: str) -> str:
+        """The checksummed form of an address argument, checked offline (#230).
+
+        40 hex digits, with or without 0x (as web3's to_checksum_address
+        accepts them); to_checksum_address makes no RPC call.
+
+        Raises:
+            ChainValidationError: If the address is not in that form.
+        """
+        if not isinstance(address, str) or not re.fullmatch(r"(0x)?[0-9a-fA-F]{40}", address):
+            raise ChainValidationError(
+                f"Invalid {name} address: {address!r} (expected 40 hex digits)"
+            )
+        try:
+            return self._web3.to_checksum_address(address)
+        except Exception as e:
+            raise ChainValidationError(f"Invalid {name} address: {address!r}: {e}") from e
+
+    def _tx_params(self, sender: str, gas: Optional[int]) -> dict:
+        """
+        Transaction parameters for build_transaction.
+
+        web3 runs eth_estimateGas only when the parameters have no "gas",
+        so an explicit gas limit skips the estimate. web3 still fills in
+        the fee fields.
+        """
+        params = {"from": self._web3.to_checksum_address(sender)}
+        if gas is not None:
+            params["gas"] = gas
+        return params
+
     def build_register_data_tx(
         self,
         data_hash: str,
         data_type: str,
         sender: str,
         storage_ref: Optional[str] = None,
-    ) -> dict:
+        gas: Optional[int] = None,
+        validate_only: bool = False,
+    ) -> Optional[dict]:
         """
         Build transaction to register a data hash on-chain.
 
@@ -192,18 +255,26 @@ class DataProvenanceContract:
             data_type: Category/type string (max 64 chars).
             sender: Address of the transaction sender.
             storage_ref: Optional 64-char hex storage reference (e.g. Swarm hash).
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
+            validate_only: Only check the arguments (no RPC call) and
+                return None. ChainClient does this before its first RPC
+                call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
         """
         hash_bytes = _normalize_hash(data_hash)
         _validate_data_type(data_type)
-        tx_params = {"from": self._web3.to_checksum_address(sender)}
+        tx_params = self._tx_params(sender, gas)
         if storage_ref is not None:
             ref_bytes = _normalize_hash(storage_ref)
+            if validate_only:
+                return None
             return self._contract.functions.registerData(
                 hash_bytes, data_type, ref_bytes
             ).build_transaction(tx_params)
+        if validate_only:
+            return None
         return self._contract.functions.registerData(
             hash_bytes, data_type
         ).build_transaction(tx_params)
@@ -215,7 +286,9 @@ class DataProvenanceContract:
         actual_owner: str,
         sender: str,
         storage_ref: Optional[str] = None,
-    ) -> dict:
+        gas: Optional[int] = None,
+        validate_only: bool = False,
+    ) -> Optional[dict]:
         """
         Build transaction to register data on behalf of another owner.
 
@@ -227,19 +300,27 @@ class DataProvenanceContract:
             actual_owner: Address of the actual data owner.
             sender: Address of the delegate sending the transaction.
             storage_ref: Optional 64-char hex storage reference (e.g. Swarm hash).
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
+            validate_only: Only check the arguments (no RPC call) and
+                return None. ChainClient does this before its first RPC
+                call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
         """
         hash_bytes = _normalize_hash(data_hash)
         _validate_data_type(data_type)
-        owner_addr = self._web3.to_checksum_address(actual_owner)
-        tx_params = {"from": self._web3.to_checksum_address(sender)}
+        owner_addr = self._validate_address(actual_owner, "owner")
+        tx_params = self._tx_params(sender, gas)
         if storage_ref is not None:
             ref_bytes = _normalize_hash(storage_ref)
+            if validate_only:
+                return None
             return self._contract.functions.registerDataFor(
                 hash_bytes, data_type, owner_addr, ref_bytes
             ).build_transaction(tx_params)
+        if validate_only:
+            return None
         return self._contract.functions.registerDataFor(
             hash_bytes, data_type, owner_addr,
         ).build_transaction(tx_params)
@@ -250,7 +331,9 @@ class DataProvenanceContract:
         data_types: List[str],
         sender: str,
         storage_refs: Optional[List[str]] = None,
-    ) -> dict:
+        gas: Optional[int] = None,
+        validate_only: bool = False,
+    ) -> Optional[dict]:
         """
         Build transaction to register multiple data hashes in one call.
 
@@ -260,9 +343,13 @@ class DataProvenanceContract:
             sender: Address of the transaction sender.
             storage_refs: Optional list of 64-char hex storage references
                 (same length as hashes). Pass None to omit storage refs.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
+            validate_only: Only check the arguments (no RPC call) and
+                return None. ChainClient does this before its first RPC
+                call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
 
         Raises:
             ChainValidationError: If arrays have different lengths or exceed batch limit.
@@ -281,7 +368,7 @@ class DataProvenanceContract:
         for dt in data_types:
             _validate_data_type(dt)
 
-        tx_params = {"from": self._web3.to_checksum_address(sender)}
+        tx_params = self._tx_params(sender, gas)
         if storage_refs is not None:
             if len(storage_refs) != len(data_hashes):
                 raise ChainValidationError(
@@ -289,9 +376,13 @@ class DataProvenanceContract:
                     f"data_hashes ({len(data_hashes)}) length"
                 )
             ref_bytes_list = [_normalize_hash(r) for r in storage_refs]
+            if validate_only:
+                return None
             return self._contract.functions.batchRegisterData(
                 hash_bytes_list, data_types, ref_bytes_list
             ).build_transaction(tx_params)
+        if validate_only:
+            return None
         return self._contract.functions.batchRegisterData(
             hash_bytes_list, data_types
         ).build_transaction(tx_params)
@@ -302,7 +393,9 @@ class DataProvenanceContract:
         new_hash: str,
         description: str,
         sender: str,
-    ) -> dict:
+        gas: Optional[int] = None,
+        validate_only: bool = False,
+    ) -> Optional[dict]:
         """
         Build transaction to record a data transformation.
 
@@ -311,55 +404,71 @@ class DataProvenanceContract:
             new_hash: Hash of the transformed data.
             description: Description of the transformation (max 256 chars).
             sender: Address of the transaction sender.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
+            validate_only: Only check the arguments (no RPC call) and
+                return None. ChainClient does this before its first RPC
+                call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
         """
         orig_bytes = _normalize_hash(original_hash)
         new_bytes = _normalize_hash(new_hash)
         _validate_transformation(description)
+        if validate_only:
+            return None
         return self._contract.functions.recordTransformation(
             orig_bytes, new_bytes, description
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(self._tx_params(sender, gas))
 
     def build_record_access_tx(
         self,
         data_hash: str,
         sender: str,
-    ) -> dict:
+        gas: Optional[int] = None,
+        validate_only: bool = False,
+    ) -> Optional[dict]:
         """
         Build transaction to record that data was accessed.
 
         Args:
             data_hash: Hash of the accessed data.
             sender: Address of the accessor.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
+            validate_only: Only check the arguments (no RPC call) and
+                return None. ChainClient does this before its first RPC
+                call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
         """
         hash_bytes = _normalize_hash(data_hash)
+        if validate_only:
+            return None
         return self._contract.functions.recordAccess(
             hash_bytes
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(self._tx_params(sender, gas))
 
     def build_batch_record_access_tx(
         self,
         data_hashes: List[str],
         sender: str,
-    ) -> dict:
+        gas: Optional[int] = None,
+        validate_only: bool = False,
+    ) -> Optional[dict]:
         """
         Build transaction to record access to multiple data hashes.
 
         Args:
             data_hashes: List of data hashes accessed.
             sender: Address of the accessor.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
+            validate_only: Only check the arguments (no RPC call) and
+                return None. ChainClient does this before its first RPC
+                call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
 
         Raises:
             ChainValidationError: If batch size exceeds limit.
@@ -369,18 +478,20 @@ class DataProvenanceContract:
                 f"Batch size {len(data_hashes)} exceeds maximum of {MAX_BATCH_ACCESS}"
             )
         hash_bytes_list = [_normalize_hash(h) for h in data_hashes]
+        if validate_only:
+            return None
         return self._contract.functions.batchRecordAccess(
             hash_bytes_list
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(self._tx_params(sender, gas))
 
     def build_set_data_status_tx(
         self,
         data_hash: str,
         status: int,
         sender: str,
-    ) -> dict:
+        gas: Optional[int] = None,
+        validate_only: bool = False,
+    ) -> Optional[dict]:
         """
         Build transaction to change the status of registered data.
 
@@ -388,23 +499,29 @@ class DataProvenanceContract:
             data_hash: Hash of the data.
             status: New status (0=ACTIVE, 1=RESTRICTED, 2=DELETED).
             sender: Address of the data owner.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
+            validate_only: Only check the arguments (no RPC call) and
+                return None. ChainClient does this before its first RPC
+                call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
         """
         hash_bytes = _normalize_hash(data_hash)
+        if validate_only:
+            return None
         return self._contract.functions.setDataStatus(
             hash_bytes, status
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(self._tx_params(sender, gas))
 
     def build_batch_set_data_status_tx(
         self,
         data_hashes: List[str],
         statuses: List[int],
         sender: str,
-    ) -> dict:
+        gas: Optional[int] = None,
+        validate_only: bool = False,
+    ) -> Optional[dict]:
         """
         Build transaction to change the status of multiple data hashes.
 
@@ -412,9 +529,13 @@ class DataProvenanceContract:
             data_hashes: List of data hashes.
             statuses: List of new statuses (0=ACTIVE, 1=RESTRICTED, 2=DELETED).
             sender: Address of the data owner.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
+            validate_only: Only check the arguments (no RPC call) and
+                return None. ChainClient does this before its first RPC
+                call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
 
         Raises:
             ChainValidationError: If arrays have different lengths or exceed batch limit.
@@ -429,18 +550,20 @@ class DataProvenanceContract:
                 f"Batch size {len(data_hashes)} exceeds maximum of {MAX_BATCH_REGISTER}"
             )
         hash_bytes_list = [_normalize_hash(h) for h in data_hashes]
+        if validate_only:
+            return None
         return self._contract.functions.batchSetDataStatus(
             hash_bytes_list, statuses
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(self._tx_params(sender, gas))
 
     def build_transfer_ownership_tx(
         self,
         data_hash: str,
         new_owner: str,
         sender: str,
-    ) -> dict:
+        gas: Optional[int] = None,
+        validate_only: bool = False,
+    ) -> Optional[dict]:
         """
         Build transaction to transfer data ownership.
 
@@ -448,24 +571,31 @@ class DataProvenanceContract:
             data_hash: Hash of the data.
             new_owner: Address of the new owner.
             sender: Address of the current owner.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
+            validate_only: Only check the arguments (no RPC call) and
+                return None. ChainClient does this before its first RPC
+                call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
         """
         hash_bytes = _normalize_hash(data_hash)
+        owner_addr = self._validate_address(new_owner, "new owner")
+        if validate_only:
+            return None
         return self._contract.functions.transferDataOwnership(
             hash_bytes,
-            self._web3.to_checksum_address(new_owner),
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+            owner_addr,
+        ).build_transaction(self._tx_params(sender, gas))
 
     def build_set_delegate_tx(
         self,
         delegate: str,
         authorized: bool,
         sender: str,
-    ) -> dict:
+        gas: Optional[int] = None,
+        validate_only: bool = False,
+    ) -> Optional[dict]:
         """
         Build transaction to authorize or revoke a delegate.
 
@@ -473,23 +603,30 @@ class DataProvenanceContract:
             delegate: Address of the delegate.
             authorized: True to authorize, False to revoke.
             sender: Address of the data owner.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
+            validate_only: Only check the arguments (no RPC call) and
+                return None. ChainClient does this before its first RPC
+                call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
         """
+        delegate_addr = self._validate_address(delegate, "delegate")
+        if validate_only:
+            return None
         return self._contract.functions.setDelegate(
-            self._web3.to_checksum_address(delegate),
+            delegate_addr,
             authorized,
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(self._tx_params(sender, gas))
 
     def build_set_storage_ref_tx(
         self,
         data_hash: str,
         storage_ref: str,
         sender: str,
-    ) -> dict:
+        gas: Optional[int] = None,
+        validate_only: bool = False,
+    ) -> Optional[dict]:
         """
         Build transaction to set the storage reference for an existing record.
 
@@ -499,17 +636,21 @@ class DataProvenanceContract:
             data_hash: 64-char hex hash of the registered data.
             storage_ref: 64-char hex storage reference (e.g. Swarm hash).
             sender: Address of the data owner.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
+            validate_only: Only check the arguments (no RPC call) and
+                return None. ChainClient does this before its first RPC
+                call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
         """
         hash_bytes = _normalize_hash(data_hash)
         ref_bytes = _normalize_hash(storage_ref)
+        if validate_only:
+            return None
         return self._contract.functions.setStorageRef(
             hash_bytes, ref_bytes
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(self._tx_params(sender, gas))
 
     # --- Read methods (direct contract calls) ---
 
@@ -674,17 +815,42 @@ class DataProvenanceContract:
         """Check if the deployed contract supports v2 TransformationLink functions.
 
         Performs a trial call on first invocation and caches the result.
-        Returns False for v1 contracts where the function reverts.
+        Returns False, and caches it, only when the contract answers that
+        the function does not exist: a revert (web3 ContractLogicError), or
+        an empty result (BadFunctionCallOutput) while the address has code
+        on the RPC. Any other error, such as a connection failure, a timeout
+        or a JSON-RPC error answer, says nothing about the contract: it is
+        raised and not cached, so the next call probes again (#230).
+
+        Raises:
+            ContractCodeNotFoundError: If the result was empty and the
+                address has no code on the RPC in use (for example an RPC
+                that is not synced). ChainClient tries the fallbacks.
+            Exception: Any error of the call other than a revert or an
+                empty result, or of the code read (eth_getCode).
         """
         if self._supports_v2 is not None:
             return self._supports_v2
         try:
             test_hash = b"\x00" * 32
             self._contract.functions.getTransformationLinks(test_hash).call()
-            self._supports_v2 = True
-        except Exception:
+        except Exception as e:
+            if _is_empty_result(e):
+                # web3 also answers this way when the address has no code:
+                # only a contract that has code but lacks the function is v1
+                if not self._web3.eth.get_code(self._address):
+                    raise ContractCodeNotFoundError(
+                        f"No contract code at {self._address} on this RPC: it may "
+                        "not be synced, or the contract address or chain is wrong.",
+                        contract_address=self._address,
+                    ) from e
+            elif not _is_revert(e):
+                raise
+            logger.debug("getTransformationLinks not available, using v1 reads: %s", redact_urls(str(e)))
             self._supports_v2 = False
-        return self._supports_v2
+            return False
+        self._supports_v2 = True
+        return True
 
     def get_transformation_links(self, data_hash: str) -> List[Tuple[bytes, str]]:
         """
@@ -744,7 +910,9 @@ class DataProvenanceContract:
         description: str,
         new_data_type: str,
         sender: str,
-    ) -> dict:
+        gas: Optional[int] = None,
+        validate_only: bool = False,
+    ) -> Optional[dict]:
         """
         Build tx for N-to-1 merge transformation (v2+).
 
@@ -754,9 +922,13 @@ class DataProvenanceContract:
             description: Transformation description (max 256 chars).
             new_data_type: Data type for the merged result (max 64 chars).
             sender: Address of the transaction sender.
+            gas: Explicit gas limit. When set, web3 does not estimate gas.
+            validate_only: Only check the arguments (no RPC call) and
+                return None. ChainClient does this before its first RPC
+                call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
 
         Raises:
             ChainValidationError: If source count or formats are invalid.
@@ -775,14 +947,14 @@ class DataProvenanceContract:
         new_bytes = _normalize_hash(new_hash)
         _validate_transformation(description)
         _validate_data_type(new_data_type)
+        if validate_only:
+            return None
         return self._contract.functions.recordMergeTransformation(
             source_bytes,
             new_bytes,
             description,
             new_data_type,
-        ).build_transaction({
-            "from": self._web3.to_checksum_address(sender),
-        })
+        ).build_transaction(self._tx_params(sender, gas))
 
     # --- Event queries ---
 
@@ -837,20 +1009,22 @@ class DataProvenanceContract:
     def get_transformations_from(
         self,
         data_hash: str,
-        lookback_blocks: int = 50_000,
+        lookback_blocks: int = EVENT_LOOKBACK_BLOCKS,
+        to_block: Optional[int] = None,
     ) -> List[Tuple[bytes, bytes, str]]:
         """
         Query DataTransformed events where data_hash is the original.
 
         Args:
             data_hash: 64-char hex hash.
-            lookback_blocks: How many blocks to scan backwards from latest.
+            lookback_blocks: How many blocks to scan backwards from to_block.
+            to_block: Last block scanned. Defaults to the latest block.
 
         Returns:
             List of (originalDataHash, newDataHash, description) tuples.
         """
         hash_bytes = _normalize_hash(data_hash)
-        latest = self._web3.eth.block_number
+        latest = to_block if to_block is not None else self._web3.eth.block_number
         from_block = max(0, latest - lookback_blocks)
         events = self._get_logs_chunked(
             self._contract.events.DataTransformed,
@@ -866,20 +1040,22 @@ class DataProvenanceContract:
     def get_transformations_to(
         self,
         data_hash: str,
-        lookback_blocks: int = 50_000,
+        lookback_blocks: int = EVENT_LOOKBACK_BLOCKS,
+        to_block: Optional[int] = None,
     ) -> List[Tuple[bytes, bytes, str]]:
         """
         Query DataTransformed events where data_hash is the new (reverse lookup).
 
         Args:
             data_hash: 64-char hex hash.
-            lookback_blocks: How many blocks to scan backwards from latest.
+            lookback_blocks: How many blocks to scan backwards from to_block.
+            to_block: Last block scanned. Defaults to the latest block.
 
         Returns:
             List of (originalDataHash, newDataHash, description) tuples.
         """
         hash_bytes = _normalize_hash(data_hash)
-        latest = self._web3.eth.block_number
+        latest = to_block if to_block is not None else self._web3.eth.block_number
         from_block = max(0, latest - lookback_blocks)
         events = self._get_logs_chunked(
             self._contract.events.DataTransformed,
@@ -937,20 +1113,20 @@ class DataProvenanceContract:
 
         Returns:
             List of event objects with args: newDataHash, sourceDataHashes,
-            transformation, newDataType.  Returns empty list if the
-            contract does not emit DataMerged events.
+            transformation, newDataType.  A v1 contract emits no DataMerged
+            events, so its scan returns an empty list.
+
+        Raises:
+            Exception: A failed log query is raised, not read as "no
+                merges" (#230).
         """
         latest = to_block if to_block is not None else self._web3.eth.block_number
-        try:
-            return self._get_logs_chunked(
-                self._contract.events.DataMerged,
-                None,
-                from_block,
-                latest,
-            )
-        except Exception:
-            # Contract may not have DataMerged event (v1)
-            return []
+        return self._get_logs_chunked(
+            self._contract.events.DataMerged,
+            None,
+            from_block,
+            latest,
+        )
 
     # --- Receipt events ---
 

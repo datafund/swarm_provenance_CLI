@@ -20,7 +20,7 @@ CI/CD pipelines produce build artifacts that need tamper-evident archival for:
 
 By archiving artifacts to Swarm with a provenance standard, each build gets a content-addressed record.
 
-**Retention:** an artifact stays on Swarm only while its postage stamp is valid. Without `--duration`, the gateway buys a 25-hour stamp, so the artifact can expire about a day after upload. For artifacts you must keep, buy a longer stamp with `--duration <hours>` or extend it with `stamps extend`, and keep your own copy.
+**Retention:** an artifact stays on Swarm only while its postage stamp is valid. Without `--duration`, the gateway buys a 25-hour stamp, so the artifact can expire about a day after upload. For artifacts you must keep, buy a longer stamp with `--duration <hours>` or extend it with `stamps extend --duration-hours <hours>` (paid; a stamp you bought needs `--x402` from the same wallet), and keep your own copy.
 
 ## Prerequisites
 

@@ -1,6 +1,8 @@
 import click
+import contextlib
 import functools
 import typer
+from typer.core import TyperGroup
 from typing import List, NoReturn, Optional
 from typing_extensions import Annotated
 from pathlib import Path
@@ -15,11 +17,212 @@ from . import config, __version__
 from ._requirements import INSTALL_ETH_ACCOUNT, INSTALL_SIGNING_DEPS
 from .core import file_utils, swarm_client, metadata_builder
 from .core.gateway_client import GatewayClient, is_insecure_gateway_url, is_valid_idempotency_key
+from .core.x402_client import normalize_network
 from .models import ProvenanceMetadata, ValidationError
 from . import exceptions
 from .chain.redact import redact_url, redact_urls
 
-app = typer.Typer(help="Swarm Provenance CLI - Wraps and uploads data to Swarm.")
+# --json (#211, #241): the stream that gets the command's JSON document (None
+# when JSON output is off), and whether the document has been written.
+_json_output = {"stream": None, "written": False}
+
+
+@contextlib.contextmanager
+def _json_mode(enabled: bool, redirect: bool = True):
+    """Run a command with JSON output on or off.
+
+    With JSON output on, stdout carries one JSON document: everything else
+    that is printed to stdout (progress, prompts, library debug lines) goes
+    to stderr while the command runs, and _echo_json writes the document to
+    the real stdout. sys.stdout is restored on exit, also when the command
+    raises. The redirect is process-wide: it replaces sys.stdout for every
+    thread while the command runs. With JSON output off, _json_error does
+    nothing.
+    """
+    previous = dict(_json_output)
+    _json_output.update(stream=sys.stdout if enabled else None, written=False)
+    try:
+        if enabled and redirect:
+            with contextlib.redirect_stdout(sys.stderr):
+                try:
+                    yield
+                finally:
+                    sys.stdout.flush()  # print() output that is still buffered
+        else:
+            yield
+    finally:
+        written = _json_output["written"]
+        _json_output.update(previous)
+        # An outer _json_mode (the command group's) must not print a second document
+        _json_output["written"] = previous["stream"] is not None and (previous["written"] or written)
+
+
+def _echo_json(text: str) -> None:
+    """Print the command's JSON document on stdout, also while stdout goes to stderr."""
+    typer.echo(text, file=_json_output["stream"])
+    _json_output["written"] = True
+
+
+def _json_error(error: str, message: str, **extra) -> None:
+    """With --json, print an error document on stdout: {"error": ..., "message": ..., **extra}.
+
+    Without --json, or when the command already printed its JSON document,
+    it does nothing, so stdout never carries two documents. The caller still
+    prints its text error (with --json it goes to stderr) and exits with its
+    own exit code.
+    """
+    if _json_output["stream"] is None or _json_output["written"]:
+        return
+    if _unused_stamp["id"] and "unused_stamp_id" not in extra:
+        # A stamp this command bought or took from the pool: reuse it with --stamp-id
+        extra["unused_stamp_id"] = _unused_stamp["id"]
+    _echo_json(json.dumps({"error": error, "message": message, **extra}, indent=2))
+
+
+def _upload_collection_command(func):
+    """The upload-collection wrapper: runs it in _json_mode when --json (output_json) is set.
+
+    An error the command does not handle exits 1 with an upload_failed
+    document (with --json) and a redacted text error; with -v, the redacted
+    traceback is printed to stderr first, as for the chain commands.
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with _json_mode(bool(kwargs.get("output_json"))):
+            try:
+                return func(*args, **kwargs)
+            except (click.exceptions.Exit, click.exceptions.Abort, click.ClickException):
+                raise
+            except Exception as e:
+                _print_chain_traceback(e, bool(kwargs.get("verbose")))
+                detail = redact_urls(str(e))
+                message = f"Upload failed: {type(e).__name__}" + (f": {detail}" if detail else "")
+                _json_error("upload_failed", message)
+                typer.secho(f"ERROR: {message}", fg=typer.colors.RED, err=True)
+                raise typer.Exit(code=1)
+    return wrapper
+
+
+class _JsonErrorsGroup(TyperGroup):
+    """The top-level command group: with --json, errors before the command runs are JSON too.
+
+    The global option checks in main() and usage errors (exit 2) happen
+    before the command reads its own --json option. Group JSON mode is on
+    only when the command line names a command that has a --json option,
+    and that option is set (not an option value, not after "--").
+    """
+
+    @staticmethod
+    def _drop_flag_values(command, args, help_names=("--help",)):
+        """--flag=value becomes --flag for a boolean flag of command (help included).
+
+        A value for a flag is a usage error, and click's resilient parsing
+        stops at it, before the tokens that follow (such as --json). The
+        tokens are walked as the parser reads them:
+        - a long option that takes a value and has no "=" skips its value
+          (which can be "--" or a command name);
+        - a short-option cluster such as -vt is read letter by letter: at the
+          first letter whose option takes a value, the value is the rest of
+          the token if letters follow, otherwise the next token(s);
+        - a "--" that is not a value ends the options;
+        - a bare "-" is a positional, as for click;
+        - for a group, the first token that is neither an option nor a value
+          is its subcommand.
+
+        Returns the rewritten tokens and the index of the "--" that ended the
+        options, or None.
+        """
+        options = [p for p in command.params if isinstance(p, click.Option)]
+        flags = {name for p in options if p.is_flag
+                 for name in (*p.opts, *p.secondary_opts) if name.startswith("--")}
+        flags.update(name for name in help_names if name.startswith("--"))
+        takes_value = {name: p.nargs for p in options if not p.is_flag and not p.count
+                       for name in p.opts}
+        is_group = isinstance(command, click.Group)
+        out = list(args)
+        i = 0
+        while i < len(out):
+            token = out[i]
+            if token == "--":
+                return out, i
+            if token.startswith("--"):
+                name, has_value, _ = token.partition("=")
+                if has_value and name in flags:
+                    out[i] = name
+                elif not has_value and token in takes_value:
+                    i += takes_value[token]  # skip the option's value
+            elif token.startswith("-") and token != "-":
+                for position, letter in enumerate(token[1:], start=2):
+                    if "-" + letter in takes_value:
+                        if position == len(token):
+                            i += takes_value["-" + letter]  # the value is the next token
+                        break  # otherwise the rest of the token is the value
+            elif is_group:
+                break  # the subcommand: the rest are its tokens
+            i += 1
+        return out, None
+
+    def _json_requested(self, args) -> bool:
+        """True if the command that args name has a --json option, and args set it.
+
+        --json=<value> counts as set: the usage error is then a JSON document.
+        """
+        try:
+            help_names = self.context_settings.get("help_option_names") or ["--help"]
+            tokens, end = self._drop_flag_values(self, args, help_names)
+            # click's parser consumes the list it is given: pass copies
+            ctx = self.make_context(self.name or "swarm-prov-upload", list(tokens),
+                                    resilient_parsing=True, ignore_unknown_options=True)
+            command, rest = self, [*ctx.protected_args, *ctx.args]
+            while isinstance(command, click.Group):
+                if end is not None:
+                    rest = tokens[end + 1:]  # after "--", the next token is the command name
+                else:
+                    while rest and rest[0].startswith("-") and rest[0] != "-":
+                        rest.pop(0)  # an unknown option before the subcommand ("-" is a name)
+                if not rest:
+                    return False
+                name, command, rest = command.resolve_command(ctx, rest)
+                if command is None:
+                    return False
+                tokens, end = self._drop_flag_values(command, rest, ctx.help_option_names)
+                ctx = command.make_context(name, list(tokens), parent=ctx,
+                                           resilient_parsing=True, ignore_unknown_options=True)
+                rest = [*ctx.protected_args, *ctx.args]
+            return any(p.name == "output_json" for p in command.params) and bool(ctx.params.get("output_json"))
+        except Exception:
+            return False
+
+    def main(self, args=None, *main_args, **kwargs):
+        requested = self._json_requested(sys.argv[1:] if args is None else args)
+        with _json_mode(requested, redirect=False):
+            return super().main(args, *main_args, **kwargs)
+
+    def parse_args(self, ctx, args):
+        try:
+            return super().parse_args(ctx, args)
+        except click.UsageError as e:
+            _json_error("invalid_input", e.format_message())
+            raise
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except click.UsageError as e:
+            _json_error("invalid_input", e.format_message())
+            raise
+        except click.ClickException as e:  # for example click.FileError; keeps its exit code
+            _json_error("invalid_input", e.format_message())
+            raise
+        except KeyboardInterrupt:
+            _json_error("interrupted", "Interrupted.")
+            raise
+        except click.exceptions.Abort:
+            _json_error("aborted", "Aborted.")
+            raise
+
+
+app = typer.Typer(help="Swarm Provenance CLI - Wraps and uploads data to Swarm.", cls=_JsonErrorsGroup)
 stamps_app = typer.Typer(help="Manage postage stamps.")
 app.add_typer(stamps_app, name="stamps")
 x402_app = typer.Typer(help="x402 payment configuration and status.")
@@ -30,9 +233,9 @@ chain_app = typer.Typer(help="On-chain provenance anchoring (optional).")
 app.add_typer(chain_app, name="chain")
 
 
-def _version_callback(value: bool):
+def _version_callback(ctx: typer.Context, value: bool):
     """Print version and exit."""
-    if value:
+    if value and not ctx.resilient_parsing:
         typer.echo(f"swarm-prov-upload {__version__}")
         raise typer.Exit()
 
@@ -65,7 +268,7 @@ _x402_config = {
     "enabled": config.X402_ENABLED,
     "auto_pay": config.X402_AUTO_PAY,
     "max_auto_pay_usd": config.X402_MAX_AUTO_PAY_USD,
-    "network": config.X402_NETWORK,
+    "network": normalize_network(config.X402_NETWORK),
     "expected_pay_to": config.X402_EXPECTED_PAY_TO,
 }
 
@@ -82,22 +285,45 @@ _unused_stamp = {"id": None, "how": None}
 
 # Global state for chain / blockchain configuration
 _chain_config = {
-    "enabled": config.CHAIN_ENABLED,
     "chain": config.CHAIN_NAME,
     "rpc_url": config.CHAIN_RPC_URL,
+    "rpc_fallbacks": config.CHAIN_RPC_URLS,
     "contract": config.CHAIN_CONTRACT,
     "wallet_key_env": config.CHAIN_WALLET_KEY_ENV,
     "explorer_url": config.CHAIN_EXPLORER_URL,
     "gas_limit": config.CHAIN_GAS_LIMIT,
+    "deploy_block": config.CHAIN_DEPLOY_BLOCK,
+    "gas_limit_error": config.CHAIN_GAS_LIMIT_ERROR,
 }
 
 
-def _get_chain_client(verbose: bool = False):
+def _check_gas_limit_setting() -> None:
+    """Exit 1 if this chain write would use a bad CHAIN_GAS_LIMIT (#226).
+
+    Only a command with --gas uses the setting, and --gas replaces it.
+    """
+    error = _chain_config.get("gas_limit_error")
+    ctx = click.get_current_context(silent=True)
+    if not error or ctx is None or "gas" not in ctx.params or ctx.params["gas"] is not None:
+        return
+    if ctx.params.get("output_json"):
+        # Under _json_mode typer.echo goes to stderr; _json_error writes the one document to stdout
+        _json_error("invalid_gas_limit", error)
+    else:
+        typer.secho(f"ERROR: {error}", fg=typer.colors.RED, err=True)
+    raise typer.Exit(code=1)
+
+
+def _get_chain_client(verbose: bool = False, require_wallet: bool = False):
     """
     Create a ChainClient with current chain configuration.
 
     Args:
         verbose: Enable verbose output.
+        require_wallet: Load the wallet key now and exit with the
+            configuration hint if it is missing. Commands that write, and
+            chain balance, pass True. Read-only commands leave it False, so
+            they work without a key (#140).
 
     Returns:
         Configured ChainClient instance.
@@ -105,9 +331,13 @@ def _get_chain_client(verbose: bool = False):
     Raises:
         typer.Exit: If dependencies are missing or config is invalid.
     """
+    if require_wallet:
+        _check_gas_limit_setting()
     try:
         from .core.chain_client import ChainClient
     except ImportError:
+        _json_error("missing_dependencies", "Blockchain dependencies not installed.",
+                    install=INSTALL_SIGNING_DEPS)
         typer.secho(
             "ERROR: Blockchain dependencies not installed.",
             fg=typer.colors.RED, err=True,
@@ -119,14 +349,34 @@ def _get_chain_client(verbose: bool = False):
         return ChainClient(
             chain=_chain_config["chain"],
             rpc_url=_chain_config["rpc_url"],
+            rpc_fallbacks=_chain_config.get("rpc_fallbacks"),
             contract_address=_chain_config["contract"],
             private_key_env=_chain_config["wallet_key_env"],
             explorer_url=_chain_config["explorer_url"],
             gas_limit=_chain_config.get("gas_limit"),
+            deploy_block=_chain_config.get("deploy_block"),
+            require_wallet=require_wallet,
         )
-    except exceptions.ChainConfigurationError as e:
-        typer.secho(f"ERROR: Chain configuration invalid: {e}", fg=typer.colors.RED, err=True)
-        typer.echo("Check PROVENANCE_WALLET_KEY environment variable and chain settings.", err=True)
+    except (exceptions.ChainConfigurationError, ValueError) as e:
+        # ValueError: an invalid CHAIN_CONTRACT address (#241)
+        if isinstance(e.__cause__, ImportError):  # web3 or eth-account is not installed
+            _json_error("missing_dependencies", redact_urls(str(e)), install=INSTALL_SIGNING_DEPS)
+        else:
+            _json_error("configuration_error", f"Chain configuration invalid: {redact_urls(str(e))}")
+        typer.secho(f"ERROR: Chain configuration invalid: {redact_urls(str(e))}", fg=typer.colors.RED, err=True)
+        if not isinstance(e, (exceptions.ChainIdMismatchError, exceptions.DeployBlockError)):
+            # The mismatch message carries its own advice (CHAIN_NAME=localhost),
+            # and a DeployBlockError message names CHAIN_DEPLOY_BLOCK.
+            # Only commands that sign need the key, so only they name it (#219)
+            settings = "CHAIN_NAME, CHAIN_CONTRACT, CHAIN_RPC_URL"
+            if require_wallet:
+                typer.echo(
+                    f"Check {_chain_config['wallet_key_env']} environment variable and "
+                    f"chain settings ({settings}).",
+                    err=True,
+                )
+            else:
+                typer.echo(f"Check chain settings ({settings}).", err=True)
         raise typer.Exit(code=1)
 
 
@@ -188,6 +438,80 @@ def _record_x402_payment(payment: dict):
     _x402_session["payments"] += 1
 
 
+def _gateway_stamp_info(gw_client, stamp_id: str, verbose: bool) -> Optional[dict]:
+    """The gateway's stamp details as the dict the usability check reads."""
+    stamp_details = gw_client.get_stamp(stamp_id, verbose=verbose)
+    if not stamp_details:
+        return None
+    return {
+        "usable": stamp_details.usable,
+        "batchTTL": stamp_details.batchTTL,
+    }
+
+
+def _wait_for_stamp_usable(stamp_id: str, get_stamp_info, stamp_source: str,
+                           stamp_check_retries: int, stamp_check_interval: int, verbose: bool):
+    """Poll until the stamp is usable; exit 1 if it is not usable after all retries.
+
+    stamp_source is "existing", "pool" or "bought" and picks the first message.
+    get_stamp_info() returns a dict with "usable" and "batchTTL", or None.
+    """
+    if stamp_source == "existing":
+        typer.echo(f"Verifying stamp is usable...")
+    elif stamp_source == "pool":
+        typer.echo(f"Verifying pooled stamp is usable...")
+    else:
+        typer.echo(f"Waiting for stamp to become usable (up to {stamp_check_retries * stamp_check_interval // 60} minutes)...")
+    stamp_is_ready_for_upload = False
+    for i in range(stamp_check_retries):
+        if not verbose:
+            # Simple progress indicator for non-verbose mode
+            typer.echo(f"Checking stamp usability (attempt {i+1}/{stamp_check_retries})... ", nl=False)
+
+        try:
+            stamp_info = get_stamp_info()
+
+            if stamp_info:
+                usable = stamp_info.get("usable", False)
+                batch_ttl_seconds = stamp_info.get("batchTTL")  # TTL in seconds
+
+                if verbose:
+                    ttl_str = f"{batch_ttl_seconds // 60}m {batch_ttl_seconds % 60}s" if batch_ttl_seconds is not None else "N/A"
+                    typer.echo(f"    Attempt {i+1}: Stamp found - Usable={usable}, TTL={ttl_str}")
+
+                # Only the usable flag decides; the gateway may send it as null
+                if usable:
+                    stamp_is_ready_for_upload = True
+                    if not verbose: typer.echo(typer.style("OK", fg=typer.colors.GREEN))
+                    else: typer.secho(f"    Stamp {stamp_id.lower()} is now USABLE!", fg=typer.colors.GREEN)
+                    break
+                else:
+                    if not verbose: typer.echo("retrying...")
+            else:
+                if not verbose: typer.echo("not found, retrying...")
+
+        except typer.Exit:
+            raise  # already reported, e.g. an invalid auto-pay limit (#152)
+        except Exception as e:
+            if not verbose: typer.echo(typer.style("error checking, retrying...", fg=typer.colors.YELLOW))
+            else: typer.echo(f"    Warning: Error during stamp info check on attempt {i+1}: {e}")
+
+
+        if i < stamp_check_retries - 1:
+            if verbose:
+                typer.echo(f"    Waiting {stamp_check_interval}s before next check...")
+            time.sleep(stamp_check_interval)
+        elif not stamp_is_ready_for_upload and not verbose:  # Last attempt failed, print newline
+            typer.echo(typer.style("failed.", fg=typer.colors.RED))
+
+
+    if not stamp_is_ready_for_upload:
+        _json_error("stamp_not_usable", f"Stamp {stamp_id.lower()} did not become USABLE after "
+                    f"{stamp_check_retries} retries.", stamp_id=stamp_id.lower())
+        typer.secho(f"ERROR: Stamp {stamp_id.lower()} did not become USABLE after {stamp_check_retries} retries.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
 def _hold_unused_stamp(stamp_id: str, how: str):
     """Remember a stamp this command acquired until the upload that uses it succeeds."""
     _unused_stamp.update(id=stamp_id, how=how)
@@ -224,8 +548,22 @@ _X402_EXPLORERS = {
 }
 
 
+# A hedge, not a measured fact: swarm_connect models about 120 s of stamp
+# propagation after a purchase (STAMP_PROPAGATION_SECONDS).
+_PURCHASE_TIMING_NOTE = ("It may show Usable: No, or not be listed yet, for a few minutes "
+                         "after the purchase.")
+
+
+def _wallet_stamps_command(e: exceptions.PaymentOutcomeUnknownError) -> Optional[str]:
+    """The command that lists the payer's stamps, or None when the payer is not known."""
+    return f"swarm-prov-upload stamps list --wallet {e.payer} --full" if e.payer else None
+
+
 def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: str,
-                            final_step: bool = False):
+                            final_step: bool = False, final_note: Optional[str] = None,
+                            final_stdout: Optional[List[str]] = None,
+                            check: Optional[str] = None, missing: str = "result",
+                            check_note: Optional[str] = None):
     """
     Explain a paid request whose payment may have been taken, then exit.
 
@@ -238,20 +576,38 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
         action: What was being paid for, e.g. "the stamp purchase".
         final_step: The paid request is the command's last step, so its
             success (IDEMPOTENCY_KEY_DELIVERED_NOT_STORED) is the command's.
+        final_note: For a final step that is not an upload: what to print
+            when it succeeded but its result cannot be returned.
+        final_stdout: With final_note: the command's normal success lines,
+            printed to stdout in that case, so a script sees them with exit 0.
+        check: For a paid 2xx answer that could not be read
+            (PaymentResultUnreadableError): a command that shows whether the
+            request worked, for example `stamps info <id>` (#216).
+        missing: For that case without `check`: what the answer should have
+            given, for example "Swarm reference" or "batch ID".
+        check_note: For that case with `check`: how to read its output.
 
     Raises:
         typer.Exit: Always; code 0 when the final step is known to have
             succeeded, 1 otherwise.
     """
     if isinstance(e, exceptions.PaymentDeliveredNotStoredError):
-        _report_delivered_not_stored(e, action, final_step)
+        _report_delivered_not_stored(e, action, final_step, final_note, final_stdout)
+    unreadable = isinstance(e, exceptions.PaymentResultUnreadableError)
     if isinstance(e, exceptions.StampPurchasePendingError):
         headline = f"Payment received, but {action} is not confirmed yet."
+    elif unreadable:
+        # The gateway answers 2xx only after it has done the work (#216)
+        headline = f"{action[:1].upper()}{action[1:]} most likely succeeded, but its result could not be read."
     elif e.settled:
         headline = f"Payment was taken, but {action} failed."
     else:
         headline = f"The payment may have been taken: {action} did not complete."
-    typer.secho(f"\nERROR: {headline}", fg=typer.colors.RED, err=True)
+    if unreadable:
+        # Most likely worked, so a warning in the style of the others; still exit 1
+        typer.secho(f"\nWARNING: {headline}", fg=typer.colors.YELLOW, err=True)
+    else:
+        typer.secho(f"\nERROR: {headline}", fg=typer.colors.RED, err=True)
     typer.echo(f"  {e}", err=True)
 
     valid_until = None
@@ -271,9 +627,16 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
     ]
     if isinstance(e, exceptions.StampPurchasePendingError):
         fields += [("Stamp label", e.label), ("Depth", e.depth)]
+    elif unreadable and e.label_prefix:
+        fields += [("Stamp label", f"{e.label_prefix}<suffix>")]
     for name, value in fields:
         if value is not None:
             typer.echo(f"  {name + ':':<17}{value}", err=True)
+    json_fields = {
+        name.lower().replace(" ", "_").replace("-", "_"): value for name, value in fields if value is not None}
+    if unreadable and check:
+        json_fields["check"] = check  # the command that shows whether it worked (#216)
+    _json_error("payment_outcome_unknown", f"{headline} {e}", **json_fields)
 
     explorer = _X402_EXPLORERS.get(e.network or "")
     link = None
@@ -293,6 +656,43 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
                        "supports Idempotency-Key answers with the stamp, without charging again:",
                        err=True)
             typer.echo(f"  {_rerun_with_key(e.idempotency_key)}", err=True)
+    elif unreadable:
+        typer.echo("The gateway answered success, so the request was most likely done.", err=True)
+        if check:
+            typer.echo("Check the result before you contact the gateway operator:", err=True)
+            typer.echo(f"  {check}", err=True)
+            if e.label_prefix == "paid-":
+                # The CLI sends no label: the gateway names a paid batch
+                # paid-<suffix> and a pool batch pool-<depth>-<time>. No depth
+                # or TTL: a size preset can win over --depth, and --amount
+                # sets the TTL, so neither holds for every invocation.
+                typer.echo("Stamps the CLI buys have a label that starts with paid- (most stamps from "
+                           "the pool start with pool-). The new one has utilization 0%.", err=True)
+            elif e.label_prefix:
+                typer.echo(f"In that list, look for the stamp whose label starts with {e.label_prefix}.",
+                           err=True)
+            if check_note:
+                typer.echo(check_note, err=True)
+        else:
+            typer.echo(f"The {missing} was not received.", err=True)
+        if e.idempotency_key:
+            # swarm_connect answers it from the stored 2xx result for 24 h and
+            # does not settle the new authorization.
+            typer.echo("A gateway that supports Idempotency-Key answers a re-run with the same key "
+                       "from the first request, without charging again. It returns the first answer, "
+                       "which includes the result if a proxy or the connection lost it; if the "
+                       "gateway's own answer lacked it, the replay lacks it too:", err=True)
+            typer.echo(f"  {_rerun_with_key(e.idempotency_key)}", err=True)
+        if check:
+            typer.echo("If it did not work, contact the gateway operator with the transaction above.",
+                       err=True)
+        else:
+            typer.echo(f"Otherwise, contact the gateway operator with the transaction above for the "
+                       f"{missing}." if e.idempotency_key else
+                       f"Contact the gateway operator with the transaction above for the {missing}.",
+                       err=True)
+        typer.echo("A re-run without the key pays again." if e.idempotency_key
+                   else "Re-running pays again.", err=True)
     elif e.settled:
         typer.echo("Contact the gateway operator with the transaction above for the "
                    "result or a refund. Re-running pays again.", err=True)
@@ -350,13 +750,17 @@ def _command_idempotency_key() -> str:
     return _x402_session["idempotency_key"]
 
 
-def _validated_stamp_id(stamp_id: Optional[str]) -> Optional[str]:
-    """--stamp-id as 64 hex characters (a 0x prefix is dropped), or exit 1."""
+def _validated_stamp_id(stamp_id: Optional[str], name: str = "--stamp-id") -> Optional[str]:
+    """A stamp ID as 64 hex characters (a 0x prefix is dropped), or exit 1.
+
+    name is the option or argument the error message names.
+    """
     if stamp_id is None:
         return None
     stamp_id = file_utils.strip_hex_prefix(stamp_id)
     if not file_utils.is_stamp_id(stamp_id):
-        typer.secho(f"ERROR: --stamp-id is not a stamp ID (64 hex characters): {stamp_id!r}",
+        _json_error("invalid_input", f"{name} is not a stamp ID (64 hex characters): {stamp_id!r}")
+        typer.secho(f"ERROR: {name} is not a stamp ID (64 hex characters): {stamp_id!r}",
                     fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     return stamp_id
@@ -369,6 +773,8 @@ def _report_payment_required(e: exceptions.PaymentRequiredError):
     Raises:
         typer.Exit: Always, with code 1.
     """
+    _json_error("payment_required", f"Payment not made: {e}" if _x402_config["enabled"] else
+                f"Payment required: {e}", x402_enabled=bool(_x402_config["enabled"]))
     if _x402_config["enabled"]:
         typer.secho(f"\nERROR: Payment not made: {e}", fg=typer.colors.RED, err=True)
         typer.echo("Nothing was signed or paid. For non-interactive use, pass --auto-pay "
@@ -392,12 +798,16 @@ def _report_payment_required(e: exceptions.PaymentRequiredError):
 
 
 def _report_delivered_not_stored(e: exceptions.PaymentDeliveredNotStoredError, action: str,
-                                 final_step: bool):
+                                 final_step: bool, final_note: Optional[str] = None,
+                                 final_stdout: Optional[List[str]] = None):
     """
     The paid request succeeded and was paid once, but its result cannot be returned.
 
     Not a failure (#124): exits 0 when it was the command's last step.
     """
+    _json_error("delivered_not_stored", f"{action[0].upper() + action[1:]} succeeded and was paid once, "
+                "but the gateway could not return its result.", transaction=e.transaction,
+                payer=e.payer, idempotency_key=e.idempotency_key)
     typer.secho(f"\n{action[0].upper() + action[1:]} succeeded and was paid once, but the gateway "
                 "could not return its result (it was too large to keep for a retry).",
                 fg=typer.colors.YELLOW, err=True)
@@ -405,6 +815,11 @@ def _report_delivered_not_stored(e: exceptions.PaymentDeliveredNotStoredError, a
                         ("Idempotency-Key", e.idempotency_key)):
         if value:
             typer.echo(f"  {name + ':':<17}{value}", err=True)
+    if final_step and final_note:
+        typer.echo(final_note, err=True)
+        for line in final_stdout or ():
+            typer.echo(line)
+        raise typer.Exit(code=0)
     if final_step:
         _unused_stamp.update(id=None, how=None)  # the upload used it
         typer.echo("No Swarm reference is printed: the gateway could not return it. Ask the "
@@ -416,6 +831,50 @@ def _report_delivered_not_stored(e: exceptions.PaymentDeliveredNotStoredError, a
         typer.echo(f"  swarm-prov-upload stamps list --wallet {e.payer} --full", err=True)
     typer.echo("then run the command again with --stamp-id <id> instead of buying another.", err=True)
     raise typer.Exit(code=1)
+
+
+def _auto_pay_limit():
+    """The auto-pay limit as an exact Decimal, or None if it is not a finite number of 0 or more (#152)."""
+    from .core.gateway_client import parse_auto_pay_limit
+
+    try:
+        return parse_auto_pay_limit(_x402_config["max_auto_pay_usd"])
+    except ValueError:
+        return None
+
+
+def _format_max_pay(max_pay) -> str:
+    """The auto-pay limit as x402 status shows it, without the dollar sign."""
+    from decimal import Decimal
+    from .core.gateway_client import format_auto_pay_limit
+
+    # Two decimals when they are exact, else as the refusal message shows it
+    # (no round(): it fails above 28 digits)
+    max_pay_str = format_auto_pay_limit(max_pay)
+    if max_pay.adjusted() < 15 and Decimal(f"{max_pay:.2f}") == max_pay:
+        max_pay_str = f"{max_pay:.2f}"
+    return max_pay_str
+
+
+def _max_pay_help_default() -> str:
+    """The configured auto-pay limit for --help: formatted, or as written if invalid (#144)."""
+    max_pay = _auto_pay_limit()
+    if max_pay is None:
+        return str(_x402_config["max_auto_pay_usd"])
+    return _format_max_pay(max_pay)
+
+
+def _check_auto_pay_limit(source: str) -> None:
+    """Exit 1 if the auto-pay limit is not a finite number of 0 or more (#152)."""
+    if _auto_pay_limit() is None:
+        limit = _x402_config["max_auto_pay_usd"]
+        _json_error("invalid_input" if source.startswith("--") else "configuration_error",
+                    f"Invalid auto-pay limit {limit!r} from {source}. "
+                    "Use a finite number of 0 or more, such as 1.00.")
+        typer.secho(f"ERROR: Invalid auto-pay limit {limit!r} from {source}. "
+                    "Use a finite number of 0 or more, such as 1.00.",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
 
 
 def _get_gateway_client_with_x402(gateway_url: str, verbose: bool = False) -> GatewayClient:
@@ -430,6 +889,8 @@ def _get_gateway_client_with_x402(gateway_url: str, verbose: bool = False) -> Ga
         Configured GatewayClient
     """
     if _x402_config["enabled"]:
+        # An invalid --max-pay already stopped the command in main().
+        _check_auto_pay_limit("X402_MAX_AUTO_PAY_USD")
         if verbose:
             typer.echo(f"    x402 payments enabled ({_x402_config['network']})")
 
@@ -482,8 +943,8 @@ def upload(
     size: Annotated[Optional[str], typer.Option("--size", help="Stamp size preset: 'small', 'medium', 'large' (gateway only).")] = None,
     stamp_depth: Annotated[Optional[int], typer.Option("--depth", help="Postage stamp depth (16-32).")] = None,
     stamp_amount: Annotated[Optional[int], typer.Option("--amount", help="Legacy: PLUR amount (local backend or deprecated).")] = None,
-    stamp_check_retries: Annotated[int, typer.Option("--stamp-retries", help="Number of times to check for stamp usability.")] = 12,
-    stamp_check_interval: Annotated[int, typer.Option("--stamp-interval", help="Seconds to wait between stamp usability checks.")] = 20,
+    stamp_check_retries: Annotated[int, typer.Option("--stamp-retries", min=1, help="Number of times to check for stamp usability.")] = 12,
+    stamp_check_interval: Annotated[int, typer.Option("--stamp-interval", min=0, help="Seconds to wait between stamp usability checks.")] = 20,
     use_pool: Annotated[bool, typer.Option("--usePool", help="Acquire stamp from pool instead of purchasing (gateway only, faster ~5s vs >1min).")] = False,
     sign: Annotated[Optional[str], typer.Option("--sign", help="Sign document with notary service. Value: 'notary' (gateway only).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False
@@ -641,7 +1102,13 @@ def upload(
         except exceptions.PaymentRequiredError as e:
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
-            _report_payment_outcome(e, "the pool stamp acquisition")
+            _report_payment_outcome(e, "the pool stamp acquisition", check=_wallet_stamps_command(e),
+                                    missing="batch ID", check_note=_PURCHASE_TIMING_NOTE)
+        except typer.Exit:
+            # The availability check above already printed its error and chose
+            # the exit code; the catch-all would re-report it as an empty
+            # "Failed acquiring stamp from pool:" line (#164).
+            raise
         except Exception as e:
             typer.secho(f"ERROR: Failed acquiring stamp from pool: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -679,79 +1146,33 @@ def upload(
         except exceptions.PaymentRequiredError as e:
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
-            _report_payment_outcome(e, "the stamp purchase")
+            _report_payment_outcome(e, "the stamp purchase", check=_wallet_stamps_command(e),
+                                    missing="batch ID", check_note=_PURCHASE_TIMING_NOTE)
         except exceptions.StampPurchaseError as e:
             typer.secho(f"ERROR: Failed purchasing stamp: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
+        except typer.Exit:
+            raise  # already reported, e.g. an invalid auto-pay limit (#152)
         except Exception as e:
             typer.secho(f"ERROR: Failed purchasing stamp: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
 
     # Poll for stamp existence and usability
     if used_existing_stamp:
-        typer.echo(f"Verifying stamp is usable...")
+        stamp_source = "existing"
     elif acquired_from_pool:
-        typer.echo(f"Verifying pooled stamp is usable...")
+        stamp_source = "pool"
     else:
-        typer.echo(f"Waiting for stamp to become usable (up to {stamp_check_retries * stamp_check_interval // 60} minutes)...")
-    stamp_is_ready_for_upload = False
-    for i in range(stamp_check_retries):
-        if not verbose:
-            # Simple progress indicator for non-verbose mode
-            typer.echo(f"Checking stamp usability (attempt {i+1}/{stamp_check_retries})... ", nl=False)
+        stamp_source = "bought"
 
-        try:
-            # Get stamp info using appropriate backend
-            if use_gateway:
-                gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
-                stamp_details = gw_client.get_stamp(stamp_id, verbose=verbose)
-                if stamp_details:
-                    stamp_info = {
-                        "exists": stamp_details.exists,
-                        "usable": stamp_details.usable,
-                        "batchTTL": stamp_details.batchTTL,
-                    }
-                else:
-                    stamp_info = None
-            else:
-                stamp_info = swarm_client.get_stamp_info(local_bee_url, stamp_id, verbose=verbose)
+    def _get_stamp_info():
+        if use_gateway:
+            gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
+            return _gateway_stamp_info(gw_client, stamp_id, verbose)
+        return swarm_client.get_stamp_info(local_bee_url, stamp_id, verbose=verbose)
 
-            if stamp_info:
-                exists = stamp_info.get("exists")
-                usable = stamp_info.get("usable", False)
-                batch_ttl_seconds = stamp_info.get("batchTTL")  # TTL in seconds
-
-                if verbose:
-                    ttl_str = f"{batch_ttl_seconds // 60}m {batch_ttl_seconds % 60}s" if batch_ttl_seconds is not None else "N/A"
-                    typer.echo(f"    Attempt {i+1}: Stamp found - Exists={exists}, Usable={usable}, TTL={ttl_str}")
-
-                # Check usable flag - exists may be None from gateway API
-                if usable:
-                    stamp_is_ready_for_upload = True
-                    if not verbose: typer.echo(typer.style("OK", fg=typer.colors.GREEN))
-                    else: typer.secho(f"    Stamp {stamp_id.lower()} is now USABLE!", fg=typer.colors.GREEN)
-                    break
-                else:
-                    if not verbose: typer.echo("retrying...")
-            else:
-                if not verbose: typer.echo("not found, retrying...")
-
-        except Exception as e:
-            if not verbose: typer.echo(typer.style("error checking, retrying...", fg=typer.colors.YELLOW))
-            else: typer.echo(f"    Warning: Error during stamp info check on attempt {i+1}: {e}")
-
-
-        if i < stamp_check_retries - 1:
-            if verbose:
-                typer.echo(f"    Waiting {stamp_check_interval}s before next check...")
-            time.sleep(stamp_check_interval)
-        elif not stamp_is_ready_for_upload and not verbose:  # Last attempt failed, print newline
-            typer.echo(typer.style("failed.", fg=typer.colors.RED))
-
-
-    if not stamp_is_ready_for_upload:
-        typer.secho(f"ERROR: Stamp {stamp_id.lower()} did not become USABLE after {stamp_check_retries} retries.", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+    _wait_for_stamp_usable(stamp_id, _get_stamp_info, stamp_source,
+                           stamp_check_retries, stamp_check_interval, verbose)
 
     # 7. (Final) Construct "Provenance Metadata" JSON object
     final_metadata_obj = metadata_builder.create_provenance_metadata_object(
@@ -799,7 +1220,9 @@ def upload(
     except exceptions.PaymentRequiredError as e:
         _report_payment_required(e)
     except exceptions.PaymentOutcomeUnknownError as e:
-        _report_payment_outcome(e, "the upload", final_step=True)
+        _report_payment_outcome(e, "the upload", final_step=True, missing="Swarm reference")
+    except typer.Exit:
+        raise  # already reported, e.g. an invalid auto-pay limit (#152)
     except Exception as e:
         typer.secho(f"ERROR: Failed uploading data: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -1215,6 +1638,7 @@ def download(
 
 
 @app.command("upload-collection")
+@_upload_collection_command
 def upload_collection(
     directory: Annotated[str, typer.Argument(help="Path to the directory to upload as a collection.")],
     provenance_standard: Annotated[Optional[str], typer.Option("--std", help="Identifier for the provenance standard used (optional).")] = None,
@@ -1223,7 +1647,9 @@ def upload_collection(
     stamp_id: Annotated[Optional[str], typer.Option("--stamp-id", "-s", help="Existing stamp ID to reuse (skips stamp purchase).")] = None,
     use_pool: Annotated[bool, typer.Option("--usePool", help="Acquire stamp from pool instead of purchasing (faster ~5s vs >1min).")] = False,
     deferred: Annotated[bool, typer.Option("--deferred", help="Use deferred upload mode.")] = False,
-    redundancy: Annotated[bool, typer.Option("--redundancy", help="Enable redundancy for the upload.")] = False,
+    redundancy: Annotated[Optional[int], typer.Option("--redundancy", min=0, max=4, help="Erasure coding level 0-4 (0 none, 1 medium, 2 strong, 3 insane, 4 paranoid). Default: the gateway's default, level 2.")] = None,
+    stamp_check_retries: Annotated[int, typer.Option("--stamp-retries", min=1, help="Number of times to check for stamp usability.")] = 12,
+    stamp_check_interval: Annotated[int, typer.Option("--stamp-interval", min=0, help="Seconds to wait between stamp usability checks.")] = 20,
     output_json: Annotated[bool, typer.Option("--json", help="Output result as JSON.")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output for debugging.")] = False,
 ):
@@ -1241,6 +1667,7 @@ def upload_collection(
 
     # Gateway-only check
     if _backend_config["backend"] != "gateway":
+        _json_error("configuration_error", "'upload-collection' requires gateway backend. Use --backend gateway")
         typer.secho(
             "ERROR: 'upload-collection' requires gateway backend. Use --backend gateway",
             fg=typer.colors.RED, err=True,
@@ -1250,12 +1677,14 @@ def upload_collection(
     # Validate directory
     dir_path = Path(directory).resolve()
     if not dir_path.is_dir():
+        _json_error("invalid_input", f"Not a directory: {directory}")
         typer.secho(f"ERROR: Not a directory: {directory}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     # Check non-empty
     all_files = [f for f in dir_path.rglob("*") if f.is_file()]
     if not all_files:
+        _json_error("invalid_input", f"Directory is empty: {directory}")
         typer.secho(f"ERROR: Directory is empty: {directory}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
@@ -1273,8 +1702,8 @@ def upload_collection(
             typer.echo(f"    Size: {size}")
         if deferred:
             typer.echo(f"    Deferred: Yes")
-        if redundancy:
-            typer.echo(f"    Redundancy: Yes")
+        if redundancy is not None:
+            typer.echo(f"    Redundancy level: {redundancy}")
     else:
         typer.echo(f"Processing directory: {dir_path.name}/ ({len(all_files)} files)...")
 
@@ -1282,7 +1711,12 @@ def upload_collection(
     try:
         collection_hash, file_infos = file_utils.calculate_directory_hash_and_files(dir_path)
     except ValueError as e:
+        _json_error("invalid_input", str(e))
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except OSError as e:  # for example a file that cannot be read
+        _json_error("upload_failed", f"Failed reading the directory: {redact_urls(str(e))}", step="scan")
+        typer.secho(f"ERROR: Failed reading the directory: {redact_urls(str(e))}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     total_size = sum(f["size"] for f in file_infos)
@@ -1294,99 +1728,125 @@ def upload_collection(
             typer.echo(f"    File: {fi['path']} ({fi['size']} bytes) hash={fi['content_hash'][:16]}...")
 
     # Create TAR in temp directory
+    tmp_dir = None
     try:
-        tmp_dir = tempfile.mkdtemp()
-        tar_path = Path(tmp_dir) / "collection.tar"
-        file_utils.create_tar_from_directory(dir_path, tar_path)
-        tar_size = tar_path.stat().st_size
-        if verbose:
-            typer.echo(f"    TAR archive created: {tar_size} bytes")
-    except (ValueError, OSError) as e:
-        typer.secho(f"ERROR: Failed creating TAR archive: {e}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+        try:
+            tmp_dir = tempfile.mkdtemp()
+            tar_path = Path(tmp_dir) / "collection.tar"
+            file_utils.create_tar_from_directory(dir_path, tar_path)
+            tar_size = tar_path.stat().st_size
+            if verbose:
+                typer.echo(f"    TAR archive created: {tar_size} bytes")
+        except (ValueError, OSError) as e:
+            _json_error("upload_failed", f"Failed creating TAR archive: {redact_urls(str(e))}", step="archive")
+            typer.secho(f"ERROR: Failed creating TAR archive: {redact_urls(str(e))}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
 
-    # Acquire stamp
-    try:
-        gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
+        # Acquire stamp
+        stamp_source = "existing" if stamp_id else ("pool" if use_pool else "bought")
+        try:
+            gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
 
-        if stamp_id:
-            ignored = [flag for flag, value in (("--usePool", use_pool), ("--size", size),
-                                                ("--duration", duration)) if value]
-            if ignored:
-                typer.secho(f"Note: {', '.join(ignored)} ignored with --stamp-id (no stamp is bought).",
-                            fg=typer.colors.YELLOW, err=True)
-            typer.echo(f"Using existing stamp: {stamp_id}")
-        elif use_pool:
-            typer.echo("Acquiring stamp from pool...")
-            acquire_result = gw_client.acquire_stamp_from_pool(size=size, verbose=verbose)
-            stamp_id = acquire_result.batch_id
-            _hold_unused_stamp(stamp_id, "acquired from the pool")
-            msg = f"Stamp acquired from pool (ID: {stamp_id})"
-            if acquire_result.fallback_used:
-                msg += " [fallback size]"
-            typer.echo(msg)
-        else:
-            typer.echo("Purchasing postage stamp...")
-            stamp_id = gw_client.purchase_stamp(
-                duration_hours=duration,
-                size=size,
+            if stamp_id:
+                ignored = [flag for flag, value in (("--usePool", use_pool), ("--size", size),
+                                                    ("--duration", duration)) if value]
+                if ignored:
+                    typer.secho(f"Note: {', '.join(ignored)} ignored with --stamp-id (no stamp is bought).",
+                                fg=typer.colors.YELLOW, err=True)
+                typer.echo(f"Using existing stamp: {stamp_id}")
+            elif use_pool:
+                typer.echo("Acquiring stamp from pool...")
+                acquire_result = gw_client.acquire_stamp_from_pool(size=size, verbose=verbose)
+                stamp_id = acquire_result.batch_id
+                _hold_unused_stamp(stamp_id, "acquired from the pool")
+                msg = f"Stamp acquired from pool (ID: {stamp_id})"
+                if acquire_result.fallback_used:
+                    msg += " [fallback size]"
+                typer.echo(msg)
+            else:
+                typer.echo("Purchasing postage stamp...")
+                stamp_id = gw_client.purchase_stamp(
+                    duration_hours=duration,
+                    size=size,
+                    verbose=verbose,
+                )
+                _hold_unused_stamp(stamp_id, "bought")
+                typer.echo(f"Postage stamp purchased (ID: {stamp_id})")
+
+        except exceptions.PoolNotEnabledError:
+            _json_error("configuration_error", "Stamp pool is not enabled on this gateway.")
+            typer.secho("ERROR: Stamp pool is not enabled on this gateway.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        except exceptions.PaymentRequiredError as e:
+            _report_payment_required(e)
+        except exceptions.PaymentOutcomeUnknownError as e:
+            _report_payment_outcome(e, "getting the stamp", check=_wallet_stamps_command(e),
+                                    missing="batch ID", check_note=_PURCHASE_TIMING_NOTE)
+        except typer.Exit:
+            raise  # already reported, e.g. an invalid auto-pay limit (#152)
+        except Exception as e:
+            _json_error("upload_failed", f"Failed acquiring stamp: {redact_urls(str(e))}", step="stamp")
+            typer.secho(f"ERROR: Failed acquiring stamp: {redact_urls(str(e))}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+
+        # Wait until the stamp is usable: the gateway cannot upload to it before that
+        _wait_for_stamp_usable(stamp_id, lambda: _gateway_stamp_info(gw_client, stamp_id, verbose),
+                               stamp_source, stamp_check_retries, stamp_check_interval, verbose)
+
+        # Upload manifest
+        typer.echo("Uploading collection to Swarm...")
+        not_returned = None  # with --json: the upload worked but its result cannot be returned
+        try:
+            result = gw_client.upload_manifest(
+                tar_path=str(tar_path),
+                stamp_id=stamp_id,
+                deferred=deferred,
+                include_timing=verbose,
+                redundancy=redundancy,
                 verbose=verbose,
             )
-            _hold_unused_stamp(stamp_id, "bought")
-            typer.echo(f"Postage stamp purchased (ID: {stamp_id})")
-
-    except exceptions.PoolNotEnabledError:
-        typer.secho("ERROR: Stamp pool is not enabled on this gateway.", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-    except exceptions.PaymentRequiredError as e:
-        _report_payment_required(e)
-    except exceptions.PaymentOutcomeUnknownError as e:
-        _report_payment_outcome(e, "getting the stamp")
-    except Exception as e:
-        typer.secho(f"ERROR: Failed acquiring stamp: {e}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-
-    # Upload manifest
-    typer.echo("Uploading collection to Swarm...")
-    try:
-        result = gw_client.upload_manifest(
-            tar_path=str(tar_path),
-            stamp_id=stamp_id,
-            deferred=deferred,
-            include_timing=verbose,
-            redundancy=redundancy,
-            verbose=verbose,
-        )
-    except exceptions.PaymentRequiredError as e:
-        _report_payment_required(e)
-    except exceptions.PaymentOutcomeUnknownError as e:
-        _report_payment_outcome(e, "the collection upload", final_step=True)
-    except Exception as e:
-        typer.secho(f"ERROR: Failed uploading collection: {e}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+        except exceptions.PaymentRequiredError as e:
+            _report_payment_required(e)
+        except exceptions.PaymentOutcomeUnknownError as e:
+            if output_json and isinstance(e, exceptions.PaymentDeliveredNotStoredError):
+                not_returned = e
+            else:
+                _report_payment_outcome(e, "the collection upload", final_step=True,
+                                        missing="Swarm reference")
+        except Exception as e:
+            _json_error("upload_failed", f"Failed uploading collection: {redact_urls(str(e))}", step="upload")
+            typer.secho(f"ERROR: Failed uploading collection: {redact_urls(str(e))}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
     finally:
-        # Cleanup temp TAR
-        try:
+        # Remove the temp folder with the TAR on every exit
+        if tmp_dir:
             import shutil
             shutil.rmtree(tmp_dir, ignore_errors=True)
-        except Exception:
-            pass
 
     _unused_stamp.update(id=None, how=None)  # used: nothing to reuse
 
     # Output
     if output_json:
         from .models import CollectionFileInfo, CollectionProvenanceMetadata
-        metadata = CollectionProvenanceMetadata(
+        metadata_fields = dict(
             collection_hash=collection_hash,
             files=[CollectionFileInfo(**fi) for fi in file_infos],
             total_size=total_size,
             file_count=len(file_infos),
             stamp_id=stamp_id,
-            swarm_reference=result.reference,
             provenance_standard=provenance_standard,
         )
-        typer.echo(metadata.model_dump_json(indent=2))
+        if not_returned is not None:
+            # Still a JSON document for scripts (#153): the same fields with no reference
+            # (model_construct, because the model requires one), plus what identifies the payment
+            document = CollectionProvenanceMetadata.model_construct(
+                **metadata_fields, swarm_reference=None).model_dump(mode="json")
+            document.update(status="delivered_not_stored", transaction=not_returned.transaction,
+                            payer=not_returned.payer, idempotency_key=not_returned.idempotency_key)
+            _echo_json(json.dumps(document, indent=2))
+            _report_delivered_not_stored(not_returned, "the collection upload", final_step=True)
+        metadata = CollectionProvenanceMetadata(**metadata_fields, swarm_reference=result.reference)
+        _echo_json(metadata.model_dump_json(indent=2))
     else:
         typer.secho(f"\nSUCCESS! Collection uploaded.", fg=typer.colors.GREEN, bold=True)
         typer.echo("Swarm Manifest Reference:")
@@ -1406,6 +1866,48 @@ def upload_collection(
 
 
 # --- Stamps Subcommands ---
+
+def _format_utilization(percent: Optional[float]) -> str:
+    """The gateway's `utilizationPercent` for display (#143).
+
+    Not `utilization`: that is the raw bucket fill level, so a depth-17
+    batch at 50 % has utilization 1.
+    """
+    return "unknown" if percent is None else f"{round(percent, 1):g}%"
+
+
+def _or_unknown(value) -> str:
+    """A gateway value for display; the gateway sends null when it cannot tell (#143)."""
+    return "unknown" if value is None else str(value)
+
+
+def _format_usable(usable: Optional[bool], width: int = 0) -> str:
+    """Yes, No or Unknown, padded before styling so colour codes do not count."""
+    if usable is None:
+        return typer.style(f"{'Unknown':<{width}}", fg=typer.colors.YELLOW)
+    if usable:
+        return typer.style(f"{'Yes':<{width}}", fg=typer.colors.GREEN)
+    return typer.style(f"{'No':<{width}}", fg=typer.colors.RED)
+
+
+# The gateway's UTC timestamp (2026-09-25T10:00:00Z), also with +00:00 and up to
+# microseconds. An explicit pattern, because datetime.fromisoformat accepts
+# more forms on Python 3.11+ than on 3.9 (#217).
+_GATEWAY_TIMESTAMP = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|\+00:00)")
+
+
+def _is_iso_timestamp(value: Optional[str]) -> bool:
+    """True for a UTC date and time in the gateway's form, such as 2026-12-01T10:00:00Z (#217)."""
+    if not isinstance(value, str) or not _GATEWAY_TIMESTAMP.fullmatch(value):
+        return False
+    from datetime import datetime
+    try:
+        datetime.strptime(value[:19], "%Y-%m-%dT%H:%M:%S")  # a real date and time
+    except ValueError:
+        return False
+    return True
+
 
 def _sanitize_label(label: Optional[str]) -> str:
     """A stamp label as printable text (labels come from the gateway)."""
@@ -1464,10 +1966,9 @@ def stamps_list(
         for stamp in result.stamps:
             stamp_id_str = stamp.batchID if full else f"{stamp.batchID[:8]}...{stamp.batchID[-8:]}"
             # Pad before styling: colour codes would count towards the width
-            usable_str = (typer.style(f"{'Yes':<8}", fg=typer.colors.GREEN) if stamp.usable
-                          else typer.style(f"{'No':<8}", fg=typer.colors.RED))
+            usable_str = _format_usable(stamp.usable, 8)
             ttl_str = _format_ttl(stamp.batchTTL)
-            util_str = f"{stamp.utilization}%"
+            util_str = _format_utilization(stamp.utilizationPercent)
             line = f"{stamp_id_str:<{id_width}} {usable_str} {ttl_str:<12} {stamp.depth:<6} {util_str:<12}"
             if full:
                 line += f" {_sanitize_label(stamp.label)}"
@@ -1491,6 +1992,7 @@ def stamps_info(
     """
     Get detailed information about a specific stamp.
     """
+    stamp_id = _validated_stamp_id(stamp_id, "STAMP_ID")
     use_gateway = _backend_config["backend"] == "gateway"
     gateway_url = _backend_config["gateway_url"]
     bee_url = _backend_config["bee_url"]
@@ -1513,12 +2015,13 @@ def stamps_info(
 
             typer.echo(f"\nStamp Details:")
             typer.echo(f"  Batch ID:    {stamp.batchID}")
-            typer.echo(f"  Usable:      {typer.style('Yes', fg=typer.colors.GREEN) if stamp.usable else typer.style('No', fg=typer.colors.RED)}")
-            typer.echo(f"  Exists:      {'Yes' if stamp.exists else 'No'}")
+            typer.echo(f"  Usable:      {_format_usable(stamp.usable)}")
+            # `local`: the batch is on this gateway's node. The gateway sends no `exists`.
+            typer.echo(f"  Local:       {'Unknown' if stamp.local is None else 'Yes' if stamp.local else 'No'}")
             typer.echo(f"  TTL:         {_format_ttl(stamp.batchTTL)}")
             typer.echo(f"  Depth:       {stamp.depth}")
             typer.echo(f"  Amount:      {stamp.amount}")
-            typer.echo(f"  Utilization: {stamp.utilization}%")
+            typer.echo(f"  Utilization: {_format_utilization(stamp.utilizationPercent)}")
             if stamp.label:
                 typer.echo(f"  Label:       {_sanitize_label(stamp.label)}")
         else:
@@ -1546,27 +2049,87 @@ def stamps_info(
 @stamps_app.command("extend")
 def stamps_extend(
     stamp_id: Annotated[str, typer.Argument(help="Stamp batch ID to extend.")],
-    amount: Annotated[int, typer.Option("--amount", "-a", help="Amount of BZZ to add to the stamp.")],
+    duration_hours: Annotated[Optional[int], typer.Option(
+        "--duration-hours", "--duration", "-d",
+        help="Hours to add to the stamp (min 24). Default: the gateway's default, 25 hours.")] = None,
+    amount: Annotated[Optional[int], typer.Option(
+        "--amount", "-a",
+        help="Legacy: PLUR per chunk to add, instead of --duration-hours. "
+             "The gateway refuses an amount worth less than 24 hours.")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False
 ):
     """
-    Extend an existing stamp by adding funds. (Gateway only)
+    Extend an existing stamp. (Gateway only)
+
+    The gateway charges for an extension like a purchase. A stamp you bought
+    can be extended only with a paid request from the same wallet (--x402);
+    the free tier (--free) can extend only shared stamps.
     """
+    stamp_id = _validated_stamp_id(stamp_id, "STAMP_ID")
     if _backend_config["backend"] != "gateway":
         typer.secho("ERROR: 'stamps extend' requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    if amount is not None and duration_hours is not None:
+        typer.secho("ERROR: Give --duration-hours or --amount, not both.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    if amount is not None and amount <= 0:
+        typer.secho(f"ERROR: --amount must be greater than 0, got {amount}.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    if duration_hours is not None and duration_hours < 24:
+        typer.secho(f"ERROR: --duration-hours must be at least 24, got {duration_hours}.",
+                    fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     gateway_url = _backend_config["gateway_url"]
     if verbose:
-        typer.echo(f"Extending stamp {stamp_id} with amount {amount}...")
+        if amount is not None:
+            what = f"amount {amount} PLUR per chunk"
+        else:
+            what = f"{duration_hours or 'the default'} hours"
+        typer.echo(f"Extending stamp {stamp_id} by {what}...")
 
     try:
-        gw_client = GatewayClient(base_url=gateway_url, free_tier=_backend_config["free_tier"])
-        result_id = gw_client.extend_stamp(stamp_id, amount, verbose=verbose)
+        gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
+        result = gw_client.extend_stamp_details(stamp_id, amount=amount, duration_hours=duration_hours,
+                                                verbose=verbose)
         typer.secho(f"SUCCESS: Stamp extended.", fg=typer.colors.GREEN)
-        typer.echo(f"Batch ID: {result_id}")
+        typer.echo(f"Batch ID: {result.batchID}")
+        # The gateway reads the expiry right after the top-up, so it may not
+        # include this extension yet
+        if _is_iso_timestamp(result.expires_at):
+            typer.echo(f"Expiry reported by the gateway: {result.expires_at} (an estimate at today's "
+                       "price, read right after the top-up; it may not include this extension yet. "
+                       f"Check with: swarm-prov-upload stamps info {result.batchID})")
+        else:
+            typer.echo("Expiry: not available. Check with: "
+                       f"swarm-prov-upload stamps info {result.batchID}")
+    except exceptions.PaymentRequiredError as e:
+        _report_payment_required(e)
+    except exceptions.PaymentOutcomeUnknownError as e:
+        _report_payment_outcome(
+            e, "the stamp extension", final_step=True,
+            final_note="The batch ID is the stamp ID you gave. Do not pay again.",
+            final_stdout=["SUCCESS: Stamp extended.", f"Batch ID: {stamp_id}"],
+            check=f"swarm-prov-upload stamps info {stamp_id}",
+            # The CLI knows the amount added only when --amount was given
+            check_note=("The extension worked if the Amount it shows is higher"
+                        + (f" by {amount}" if amount is not None else "")
+                        + " and the TTL is longer than before the extension. The new values "
+                        "may take a few minutes to show."),
+        )
+    except typer.Exit:
+        raise  # already reported, e.g. an invalid auto-pay limit (#152)
     except Exception as e:
-        typer.secho(f"ERROR: Failed to extend stamp: {e}", fg=typer.colors.RED, err=True)
+        cause = e.__cause__
+        # extend_stamp's ConnectionError text starts with "Failed to extend
+        # stamp <id>:"; print its cause so the prefix appears once.
+        detail = cause if isinstance(e, ConnectionError) and cause is not None else e
+        typer.secho(f"ERROR: Failed to extend stamp: {detail}", fg=typer.colors.RED, err=True)
+        if (isinstance(cause, exceptions.GatewayHTTPError) and cause.code == "STAMP_OWNERSHIP_DENIED"
+                and _backend_config["free_tier"]):
+            # --free sends X-Payment-Mode: free, which the gateway serves as unpaid
+            typer.echo("A stamp you bought can be extended only with a paid request from the same "
+                       "wallet: use --x402 instead of --free.", err=True)
         raise typer.Exit(code=1)
 
 
@@ -1646,6 +2209,7 @@ def stamps_check(
 
     Returns detailed health check including errors and warnings.
     """
+    stamp_id = _validated_stamp_id(stamp_id, "STAMP_ID")
     if _backend_config["backend"] != "gateway":
         typer.secho("ERROR: 'stamps check' requires gateway backend. Use --backend gateway", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -1725,7 +2289,7 @@ def wallet(
         wallet_info = gw_client.get_wallet(verbose=verbose)
         typer.echo(f"\nWallet Information:")
         typer.echo(f"  Address: {wallet_info.walletAddress}")
-        typer.echo(f"  BZZ Balance: {wallet_info.bzzBalance}")
+        typer.echo(f"  BZZ Balance: {_or_unknown(wallet_info.bzzBalance)}")
     except Exception as e:
         typer.secho(f"ERROR: Failed to get wallet info: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -1751,8 +2315,8 @@ def chequebook(
         cheque_info = gw_client.get_chequebook(verbose=verbose)
         typer.echo(f"\nChequebook Information:")
         typer.echo(f"  Address:           {cheque_info.chequebookAddress}")
-        typer.echo(f"  Available Balance: {cheque_info.availableBalance}")
-        typer.echo(f"  Total Balance:     {cheque_info.totalBalance}")
+        typer.echo(f"  Available Balance: {_or_unknown(cheque_info.availableBalance)}")
+        typer.echo(f"  Total Balance:     {_or_unknown(cheque_info.totalBalance)}")
     except Exception as e:
         typer.secho(f"ERROR: Failed to get chequebook info: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -1801,6 +2365,8 @@ def health(
             typer.secho(f"✗ Status: Unhealthy", fg=typer.colors.RED)
             raise typer.Exit(code=1)
 
+    except typer.Exit:
+        raise
     except Exception as e:
         typer.secho(f"✗ Backend: {backend_url}", fg=typer.colors.RED)
         typer.secho(f"✗ Status: Unreachable", fg=typer.colors.RED)
@@ -1835,22 +2401,34 @@ def x402_status(
 
     # Auto-pay settings
     auto_pay = _x402_config["auto_pay"]
-    max_pay = _x402_config["max_auto_pay_usd"]
+    max_pay = _auto_pay_limit()
     auto_str = typer.style("Yes", fg=typer.colors.GREEN) if auto_pay else typer.style("No", fg=typer.colors.YELLOW)
     typer.echo(f"  Auto-pay:     {auto_str}")
-    max_pay_str = f"{max_pay:.2f}" if round(max_pay, 2) == max_pay else f"{max_pay:.6f}"
-    typer.echo(f"  Max auto-pay: ${max_pay_str}")
+    if max_pay is None:
+        typer.echo(f"  Max auto-pay: {_x402_config['max_auto_pay_usd']!r}")
+        typer.secho("  WARNING: X402_MAX_AUTO_PAY_USD is not a finite number of 0 or more; "
+                    "commands that pay will exit with an error.", fg=typer.colors.YELLOW)
+    else:
+        typer.echo(f"  Max auto-pay: ${_format_max_pay(max_pay)}")
     expected_pay_to = _x402_config.get("expected_pay_to")
     typer.echo(f"  Pay-to pin:   {expected_pay_to or 'none (any recipient the gateway names)'}")
     if expected_pay_to and not re.fullmatch(r"0x[0-9a-fA-F]{40}", expected_pay_to.strip()):
         typer.secho("  WARNING: X402_EXPECTED_PAY_TO is not an address; every payment will be refused.",
                     fg=typer.colors.RED)
 
-    # Check for private key (don't show the actual key)
-    pk_env_name = config.X402_PRIVATE_KEY_ENV
-    has_pk = bool(os.getenv(pk_env_name) or os.getenv("X402_PRIVATE_KEY"))
-    pk_str = typer.style("Configured", fg=typer.colors.GREEN) if has_pk else typer.style("Not set", fg=typer.colors.RED)
+    # Check for private key the way the signer does (#141); show only the
+    # name of the variable it came from, never the key
+    from .core.x402_client import (INVALID_PRIVATE_KEY_ENV_MESSAGE, printable_key_env_name,
+                                   resolve_x402_private_key, x402_private_key_env_name)
+    pk_env_name = x402_private_key_env_name()  # None when invalid: never print the raw value
+    pk_source = resolve_x402_private_key()[1]
+    has_pk = pk_source is not None
+    pk_str = (typer.style("Configured", fg=typer.colors.GREEN)
+              + f" (from {printable_key_env_name(pk_source)})" if has_pk
+              else typer.style("Not set", fg=typer.colors.RED))
     typer.echo(f"  Private key:  {pk_str}")
+    if pk_env_name is None:
+        typer.secho(f"  WARNING: {INVALID_PRIVATE_KEY_ENV_MESSAGE}; no key is read.", fg=typer.colors.RED)
 
     if has_pk and verbose:
         # Show wallet address (safe to display)
@@ -1859,15 +2437,23 @@ def x402_status(
             client = X402Client(network=network)
             typer.echo(f"  Wallet:       {client.wallet_address}")
         except Exception as e:
-            typer.echo(f"  Wallet:       {typer.style(f'Error: {e}', fg=typer.colors.RED)}")
+            typer.echo(f"  Wallet:       {typer.style(f'Error: {redact_urls(str(e))}', fg=typer.colors.RED)}")
 
     typer.echo("")
 
     if not has_pk:
-        typer.echo("To enable x402 payments, set your private key for one command,")
-        typer.echo("reading it from your password manager (not typed into the shell):")
-        typer.echo(f"  {pk_env_name}=\"$(op read 'op://<vault>/<item>/<field>')\" swarm-prov-upload x402 status")
-        typer.echo("Or keep it in a .env file with mode 600 (chmod 600 .env), never committed.")
+        if pk_env_name is None:
+            typer.echo("To enable x402 payments, set X402_PRIVATE_KEY_ENV to a variable name")
+            typer.echo("(or unset it to use X402_PRIVATE_KEY), and put your key in that variable.")
+        elif printable_key_env_name(pk_env_name) == pk_env_name:
+            typer.echo("To enable x402 payments, set your private key for one command,")
+            typer.echo("reading it from your password manager (not typed into the shell):")
+            typer.echo(f"  {pk_env_name}=\"$(op read 'op://<vault>/<item>/<field>')\" swarm-prov-upload x402 status")
+            typer.echo("Or keep it in a .env file with mode 600 (chmod 600 .env), never committed.")
+        else:
+            typer.echo(f"To enable x402 payments, put your private key in {printable_key_env_name(pk_env_name)},")
+            typer.echo("reading it from your password manager (not typed into the shell),")
+            typer.echo("or keep it in a .env file with mode 600 (chmod 600 .env), never committed.")
         typer.echo("")
 
 
@@ -1880,14 +2466,24 @@ def x402_balance(
     """
     import os
 
-    # Check for private key
-    pk_env_name = config.X402_PRIVATE_KEY_ENV
-    has_pk = bool(os.getenv(pk_env_name) or os.getenv("X402_PRIVATE_KEY"))
+    # Check for private key, the same way the signer does (#141)
+    from .core.x402_client import (INVALID_PRIVATE_KEY_ENV_MESSAGE, printable_key_env_name,
+                                   resolve_x402_private_key, x402_private_key_env_name)
+    pk_env_name = x402_private_key_env_name()  # None when invalid: never print the raw value
+    has_pk = resolve_x402_private_key()[0] is not None
 
+    if pk_env_name is None:
+        typer.secho(f"ERROR: {INVALID_PRIVATE_KEY_ENV_MESSAGE}.", fg=typer.colors.RED, err=True)
+        typer.echo("Set it to the name of the variable that holds your key, or unset it.")
+        raise typer.Exit(code=1)
     if not has_pk:
         typer.secho(f"ERROR: No private key configured.", fg=typer.colors.RED, err=True)
-        typer.echo("Set your private key for one command, reading it from your password manager:")
-        typer.echo(f"  {pk_env_name}=\"$(op read 'op://<vault>/<item>/<field>')\" swarm-prov-upload x402 balance")
+        if printable_key_env_name(pk_env_name) == pk_env_name:
+            typer.echo("Set your private key for one command, reading it from your password manager:")
+            typer.echo(f"  {pk_env_name}=\"$(op read 'op://<vault>/<item>/<field>')\" swarm-prov-upload x402 balance")
+        else:
+            typer.echo(f"Set your private key in {printable_key_env_name(pk_env_name)}, "
+                       "reading it from your password manager.")
         typer.echo("Or keep it in a .env file with mode 600 (chmod 600 .env), never committed.")
         raise typer.Exit(code=1)
 
@@ -1913,7 +2509,7 @@ def x402_balance(
             typer.echo("Get testnet USDC: https://faucet.circle.com/")
 
     except Exception as e:
-        typer.secho(f"ERROR: Failed to get balance: {e}", fg=typer.colors.RED, err=True)
+        typer.secho(f"ERROR: Failed to get balance: {redact_urls(str(e))}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
 
@@ -1935,6 +2531,8 @@ def x402_info():
     typer.echo("   X402_PRIVATE_KEY=\"$(op read 'op://<vault>/<item>/<field>')\" \\")
     typer.echo("     swarm-prov-upload --x402 upload --file data.txt")
     typer.echo("   If you keep it in a .env file instead: chmod 600 .env, never commit it.")
+    typer.echo("   (X402_PRIVATE_KEY_ENV can name another variable; the legacy")
+    typer.echo("   SWARM_X402_PRIVATE_KEY is still read. See docs/x402-setup.md.)")
 
     typer.echo("\n3. Get testnet funds (for testing):")
     typer.echo("   - ETH (gas): https://www.alchemy.com/faucets/base-sepolia")
@@ -2112,6 +2710,8 @@ def notary_verify(
         except exceptions.NotaryNotEnabledError:
             typer.secho("ERROR: Notary not enabled on gateway. Provide --address manually.", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
+        except typer.Exit:
+            raise
         except Exception as e:
             typer.secho(f"ERROR: Failed to get notary address: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -2153,6 +2753,12 @@ def notary_verify(
 
 # --- Chain Subcommands ---
 
+# Help for --gas on every chain write command (#180)
+_GAS_HELP = (
+    "Explicit gas limit. Skips gas estimation, so a transaction that would "
+    "revert is still sent and costs gas."
+)
+
 
 def _insufficient_funds_json(e: "exceptions.InsufficientFundsError") -> dict:
     """JSON fields for an InsufficientFundsError."""
@@ -2160,6 +2766,7 @@ def _insufficient_funds_json(e: "exceptions.InsufficientFundsError") -> dict:
 
     data = {
         "error": "insufficient_funds",
+        "message": str(e),
         "wallet_address": e.wallet_address,
         "balance_eth": f"{(e.balance_wei or 0) / 1e18:.6f}",
         "estimated_cost_eth": f"{(e.estimated_cost_wei or 0) / 1e18:.6f}",
@@ -2182,6 +2789,20 @@ def _rpc_rejection_message(e: Exception) -> Optional[str]:
     return rejection_message(e)
 
 
+def _print_chain_traceback(e: Exception, verbose: bool) -> None:
+    """With verbose, print the traceback of a chain error to stderr, URLs redacted.
+
+    Local variables are not printed. ChainClient redacts the exception chain
+    of the chain errors it raises (#187); redact_urls also covers the rest.
+    """
+    if not verbose:
+        return
+    import traceback
+
+    trace = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+    typer.echo(redact_urls(trace), err=True)
+
+
 def _report_unexpected_chain_error(e: Exception, verbose: bool = False) -> None:
     """Print an error that no chain command handles, without the RPC URL.
 
@@ -2190,13 +2811,10 @@ def _report_unexpected_chain_error(e: Exception, verbose: bool = False) -> None:
     also lists local variables (#169). With verbose, the traceback is
     printed without local variables and with URLs redacted.
     """
-    if verbose:
-        import traceback
-
-        trace = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-        typer.echo(redact_urls(trace), err=True)
+    _print_chain_traceback(e, verbose)
     rejection = _rpc_rejection_message(e)
     if rejection is not None:
+        _json_error("chain_error", f"The RPC rejected the request: {redact_urls(rejection)}")
         typer.secho(f"ERROR: The RPC rejected the request: {redact_urls(rejection)}",
                     fg=typer.colors.RED, err=True)
         return
@@ -2206,27 +2824,35 @@ def _report_unexpected_chain_error(e: Exception, verbose: bool = False) -> None:
     except ImportError:
         rpc_failure = False
     if rpc_failure:
+        _json_error("connection_failed", f"Cannot connect to chain: {redact_urls(str(e))}")
         typer.secho(f"ERROR: Cannot connect to chain: {redact_urls(str(e))}",
                     fg=typer.colors.RED, err=True)
     else:
-        typer.secho(f"ERROR: Chain command failed: {type(e).__name__}: {redact_urls(str(e))}",
+        detail = redact_urls(str(e))
+        message = f"Chain command failed: {type(e).__name__}" + (f": {detail}" if detail else "")
+        _json_error("chain_error", message)
+        typer.secho(f"ERROR: {message}",
                     fg=typer.colors.RED, err=True)
 
 
 def _chain_command(name: str):
-    """Register a chain subcommand. Errors it does not handle exit 1 with redacted text."""
+    """Register a chain subcommand. Errors it does not handle exit 1 with redacted text.
+
+    With --json, the command runs in _json_mode, and those errors are JSON too.
+    """
     register = chain_app.command(name)
 
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            try:
-                return func(*args, **kwargs)
-            except (click.exceptions.Exit, click.exceptions.Abort, click.ClickException):
-                raise
-            except Exception as e:
-                _report_unexpected_chain_error(e, verbose=bool(kwargs.get("verbose")))
-                raise typer.Exit(code=1)
+            with _json_mode(bool(kwargs.get("output_json"))):
+                try:
+                    return func(*args, **kwargs)
+                except (click.exceptions.Exit, click.exceptions.Abort, click.ClickException):
+                    raise
+                except Exception as e:
+                    _report_unexpected_chain_error(e, verbose=bool(kwargs.get("verbose")))
+                    raise typer.Exit(code=1)
         return register(wrapper)
 
     return decorator
@@ -2247,7 +2873,7 @@ def _handle_insufficient_funds(
     cost_eth = (e.estimated_cost_wei or 0) / 1e18
 
     if output_json:
-        typer.echo(json.dumps(_insufficient_funds_json(e), indent=2))
+        _echo_json(json.dumps(_insufficient_funds_json(e), indent=2))
         return
 
     if label:
@@ -2268,10 +2894,66 @@ def _handle_insufficient_funds(
         typer.echo(f"\n  Bridge ETH to Base: {bridge}", err=True)
 
 
+# Exit code for a sent transaction that may still be mined (#167):
+# ReceiptTimeoutError and the other TransactionOutcomeUnknownError cases
+EXIT_PENDING = 3
+
+
+def _unconfirmed_exit_code(e: Exception) -> int:
+    """3 if the transaction may still be mined (outcome unknown, receipt timeout), else 1."""
+    if isinstance(e, exceptions.TransactionOutcomeUnknownError):
+        return EXIT_PENDING
+    return 1
+
+
+def _wait_command(e: "exceptions.TransactionUnconfirmedError") -> Optional[str]:
+    """The `chain wait` command that resumes the wait for e's transaction, or None without a hash."""
+    if not e.tx_hash:
+        return None
+    tx_hash = e.tx_hash if e.tx_hash.startswith("0x") else "0x" + e.tx_hash
+    command = f"swarm-prov-upload chain wait {tx_hash}"
+    if e.event_name:
+        command += f" --event {e.event_name}"
+        if e.expected_count is not None and e.expected_count != 1:
+            command += f" --count {e.expected_count}"
+    return command
+
+
+def _replaced_cli_advice(event_name: Optional[str]) -> str:
+    """The CLI wording of the check to make before a replaced write is run again (#167).
+
+    The decision is chain.exceptions.replaced_check_kind, shared with the
+    library message.
+    """
+    from .chain import exceptions as chain_exceptions
+
+    kind = chain_exceptions.replaced_check_kind(event_name)
+    if kind == "record":
+        return "check the record with swarm-prov-upload chain get <data hash>"
+    if kind == "delegate":
+        return "check the delegate state or the transaction in the explorer"
+    return (
+        "check the transaction in the explorer, or the record with "
+        "swarm-prov-upload chain get <data hash>"
+    )
+
+
 def _not_recorded_json(e: "exceptions.TransactionUnconfirmedError") -> dict:
-    """JSON fields for a TransactionNotRecordedError or TransactionNotVerifiedError."""
+    """JSON fields for a TransactionNotRecordedError, TransactionNotVerifiedError,
+    TransactionOutcomeUnknownError, ReceiptTimeoutError or TransactionReplacedError."""
+    if isinstance(e, exceptions.TransactionNotRecordedError):
+        error = "not_recorded"
+    elif isinstance(e, exceptions.ReceiptTimeoutError):
+        error = "receipt_timeout"
+    elif isinstance(e, exceptions.TransactionOutcomeUnknownError):
+        error = "outcome_unknown"
+    elif isinstance(e, exceptions.TransactionReplacedError):
+        error = "replaced"
+    else:
+        error = "not_verified"
     data = {
-        "error": "not_recorded" if isinstance(e, exceptions.TransactionNotRecordedError) else "not_verified",
+        "error": error,
+        "message": redact_urls(str(e)),
         "tx_hash": e.tx_hash,
         "explorer_url": e.explorer_url,
         "contract_address": e.contract_address,
@@ -2280,8 +2962,15 @@ def _not_recorded_json(e: "exceptions.TransactionUnconfirmedError") -> dict:
     }
     if isinstance(e, exceptions.TransactionNotRecordedError):
         data["emitted_count"] = e.emitted_count
+    elif isinstance(e, exceptions.TransactionReplacedError):
+        data["nonce"] = e.nonce
     else:
         data["reason"] = redact_urls(getattr(e, "reason", None))
+    if isinstance(e, exceptions.ReceiptTimeoutError):
+        data["timeout"] = e.timeout
+    if isinstance(e, exceptions.TransactionOutcomeUnknownError):
+        # Exit 3: the command that resumes the wait, or None without a hash
+        data["wait_command"] = _wait_command(e)
     return data
 
 
@@ -2289,14 +2978,17 @@ def _handle_not_recorded(
     e: "exceptions.TransactionUnconfirmedError",
     output_json: bool = False,
     label: Optional[str] = None,
+    waiting: bool = False,
 ) -> None:
-    """Report a mined transaction that is not confirmed as recorded.
+    """Report a sent transaction that is not confirmed as recorded.
 
     `label` names the failed step of a composite command in the error line.
+    `waiting` is True for `chain wait`, which sends nothing: after a receipt
+    timeout, running it again is safe, while a write must not be run again.
     """
     verified = isinstance(e, exceptions.TransactionNotRecordedError)
     if output_json:
-        typer.echo(json.dumps(_not_recorded_json(e), indent=2))
+        _echo_json(json.dumps(_not_recorded_json(e), indent=2))
         return
 
     prefix = f"ERROR: {label}. " if label else "ERROR: "
@@ -2306,6 +2998,54 @@ def _handle_not_recorded(
             "emit the expected events.",
             fg=typer.colors.RED, err=True,
         )
+    elif isinstance(e, exceptions.ReceiptTimeoutError):
+        if isinstance(e.timeout, (int, float)) and not isinstance(e.timeout, bool):
+            within = f"within {e.timeout:g} seconds"
+        else:
+            within = "in time"
+        if waiting:
+            # chain wait was only given the hash
+            sent = "may have been sent"
+            advice = "It may still be mined. Running chain wait again is safe: it sends nothing."
+        else:
+            sent = "was sent"
+            advice = "It may still be mined: do not run the write again."
+        typer.secho(
+            prefix + f"Not confirmed yet. The transaction {sent}, but no receipt "
+            f"arrived {within}. " + advice,
+            fg=typer.colors.RED, err=True,
+        )
+        command = _wait_command(e)
+        if command:
+            typer.echo(f"  Wait for it: {command}", err=True)
+    elif isinstance(e, exceptions.TransactionReplacedError):
+        typer.secho(
+            prefix + "Replaced. Another transaction with the same nonce from the same "
+            "address was mined instead, so this transaction will not be mined. The "
+            f"other transaction may have made the same write: {_replaced_cli_advice(e.event_name)} "
+            "before you run the command again.",
+            fg=typer.colors.RED, err=True,
+        )
+        if e.nonce is not None:
+            typer.echo(f"  Nonce:       {e.nonce}", err=True)
+    elif isinstance(e, exceptions.TransactionOutcomeUnknownError):
+        if e.explorer_url:
+            check = "Check it in the explorer before you try again."
+        else:
+            # No explorer for this chain (for example a local node)
+            check = (
+                "Check whether it was recorded with swarm-prov-upload chain get "
+                "<data hash> before you try again."
+            )
+        typer.secho(
+            prefix + "Outcome unknown. The transaction may have been sent, and it is "
+            "not known whether it was mined. " + check,
+            fg=typer.colors.RED, err=True,
+        )
+        command = _wait_command(e)
+        if command:
+            typer.echo(f"  Wait for it: {command}", err=True)
+        typer.echo(f"  Reason:      {redact_urls(getattr(e, 'reason', None) or str(e))}", err=True)
     else:
         typer.secho(
             prefix + "Not verified. The transaction was mined, but its events could not "
@@ -2314,7 +3054,7 @@ def _handle_not_recorded(
             fg=typer.colors.RED, err=True,
         )
         typer.echo(f"  Reason:      {redact_urls(getattr(e, 'reason', None) or str(e))}", err=True)
-    typer.echo(f"  Transaction: {e.tx_hash}", err=True)
+    typer.echo(f"  Transaction: {e.tx_hash or 'unknown'}", err=True)
     if e.explorer_url:
         typer.echo(f"  Explorer:    {e.explorer_url}", err=True)
     typer.echo(f"  Contract:    {e.contract_address}", err=True)
@@ -2374,7 +3114,18 @@ def _step_error_json(e: "exceptions.ChainError") -> dict:
         return {"error": "transaction_failed", "message": str(e), "tx_hash": e.tx_hash}
     if isinstance(e, exceptions.ChainConnectionError):
         return {"error": "connection_failed", "message": str(e)}
+    if isinstance(e, (exceptions.DeployBlockError, exceptions.ContractCodeNotFoundError)):
+        # A CHAIN_DEPLOY_BLOCK or CHAIN_CONTRACT / CHAIN_NAME that does not fit the chain (#230, #231)
+        return {"error": "configuration_error", "message": str(e)}
     return {"error": "chain_error", "message": str(e)}
+
+
+def _json_chain_error(e: "exceptions.ChainError") -> None:
+    """With --json, print the error document for a chain error (codes as in _step_error_json)."""
+    data = _step_error_json(e)
+    if isinstance(e, exceptions.ChainConnectionError) and e.rpc_url:
+        data["rpc_url"] = redact_url(e.rpc_url)
+    _json_error(data.pop("error"), data.pop("message", str(e)), **data)
 
 
 def _composite_step_failed(
@@ -2385,7 +3136,10 @@ def _composite_step_failed(
     hint: Optional[str] = None,
     error_json: Optional[dict] = None,
 ) -> NoReturn:
-    """Report a failed step of a composite command and exit 1.
+    """Report a failed step of a composite command and exit.
+
+    The exit code is 3 when the step's transaction may still be mined
+    (outcome unknown, receipt timeout), and 1 otherwise (#167).
 
     `steps` holds the results of the steps that were recorded before the
     failure. Their transaction hashes are always reported, so a mined
@@ -2393,8 +3147,12 @@ def _composite_step_failed(
 
     JSON output: the step results (see `_composite_json`), "partial_failure"
     (true only if an earlier step was recorded), "failed_step", and either
-    "unconfirmed" (the write was mined but is not confirmed as recorded) or
+    "unconfirmed" (the write was sent but is not confirmed as recorded) or
     "error" (any other failure; `error_json` replaces the default object).
+
+    `hint` is printed after the error in text output. When the step's write
+    may have happened (not verified, or outcome unknown), it is prefixed
+    with "After you have checked the transaction, ".
     """
     unconfirmed = isinstance(e, exceptions.TransactionUnconfirmedError)
     if output_json:
@@ -2405,8 +3163,8 @@ def _composite_step_failed(
             output["unconfirmed"] = _not_recorded_json(e)
         else:
             output["error"] = error_json or _step_error_json(e)
-        typer.echo(json.dumps(output, indent=2))
-        raise typer.Exit(code=1)
+        _echo_json(json.dumps(output, indent=2))
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
 
     _print_completed_steps(steps)
     label = _COMPOSITE_STEP_LABELS[step]
@@ -2422,8 +3180,12 @@ def _composite_step_failed(
         if tx_hash:
             typer.echo(f"  Transaction: {tx_hash}", err=True)
     if hint:
+        if unconfirmed and not isinstance(e, exceptions.TransactionNotRecordedError):
+            # The write may have happened: check it before doing it again
+            hint = hint.strip()
+            hint = f"  After you have checked the transaction, {hint[:1].lower()}{hint[1:]}"
         typer.echo(hint, err=True)
-    raise typer.Exit(code=1)
+    raise typer.Exit(code=_unconfirmed_exit_code(e))
 
 
 @_chain_command("balance")
@@ -2435,21 +3197,25 @@ def chain_balance(
     Show wallet balance and chain configuration.
     """
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
         result = client.balance(verbose=verbose)
     except typer.Exit:
         raise
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(result.model_dump(), indent=2))
+        _echo_json(json.dumps(result.model_dump(), indent=2))
         return
 
     typer.echo(f"\nChain Wallet:")
@@ -2471,34 +3237,81 @@ def chain_balance(
         typer.echo(f"Bridge ETH: {bridge}")
 
 
+def _validate_owner_address(value: Optional[str]) -> Optional[str]:
+    """Typer callback for --owner: a 0x-prefixed 20-byte hex address, any case."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", value):
+        raise typer.BadParameter("must be a 0x-prefixed 40-hex-digit address.")
+    return value
+
+
 @_chain_command("verify")
 def chain_verify(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to verify on-chain.")],
+    require_active: Annotated[bool, typer.Option(
+        "--require-active",
+        help="Also require the record status to be ACTIVE (exit 1 for RESTRICTED or DELETED).",
+    )] = False,
+    owner: Annotated[Optional[str], typer.Option(
+        "--owner",
+        help="Also require this owner address (case-insensitive; exit 1 if it differs).",
+        callback=_validate_owner_address,
+    )] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
 ):
     """
     Verify that a Swarm hash is anchored on-chain.
 
-    Exit code 0 if anchored, 1 if not found (useful for scripting).
+    Prints the record's status and owner. Exit code 0 if anchored, 1 if not
+    found (useful for scripting). Without --require-active and --owner, a
+    RESTRICTED or DELETED record, or one with any owner, still exits 0.
     """
     try:
         client = _get_chain_client(verbose=verbose)
-        is_registered = client.verify(swarm_hash, verbose=verbose)
+        record = client.get(swarm_hash, verbose=verbose)
     except typer.Exit:
         raise
+    except exceptions.DataNotRegisteredError:
+        typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
-    if is_registered:
-        typer.secho(f"Verified: {swarm_hash} is anchored on-chain.", fg=typer.colors.GREEN)
+    status = record.status.name
+    failures = []
+    if require_active and status != "ACTIVE":
+        failures.append(f"status is {status}, not ACTIVE (--require-active)")
+    if owner is not None and record.owner.lower() != owner.lower():
+        failures.append(f"owner is {record.owner}, not {owner} (--owner)")
+
+    if failures:
+        typer.secho(f"Not verified: {swarm_hash} is anchored on-chain, but:", fg=typer.colors.YELLOW)
+        for failure in failures:
+            typer.secho(f"  - {failure}", fg=typer.colors.YELLOW)
+    elif status != "ACTIVE":
+        # Exit 0 as before, but not called "Verified"
+        typer.secho(
+            f"Anchored on-chain (status: {status}): {swarm_hash}. "
+            "The record is not ACTIVE; use --require-active to exit 1 in this case.",
+            fg=typer.colors.YELLOW,
+        )
     else:
-        typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
+        typer.secho(f"Verified: {swarm_hash} is anchored on-chain.", fg=typer.colors.GREEN)
+    typer.echo(f"  Status: {status}")
+    typer.echo(f"  Owner:  {record.owner}")
+    if failures:
         raise typer.Exit(code=1)
 
 
@@ -2506,7 +3319,7 @@ def chain_verify(
 def chain_get(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to look up.")],
     follow: Annotated[bool, typer.Option("--follow", help="Walk the transformation chain.")] = False,
-    depth: Annotated[Optional[int], typer.Option("--depth", help="Max chain depth when using --follow.")] = None,
+    depth: Annotated[Optional[int], typer.Option("--depth", min=1, max=50, help="Max chain depth when using --follow (1-50, default 10).")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -2527,15 +3340,20 @@ def chain_get(
         except typer.Exit:
             raise
         except exceptions.ChainConnectionError as e:
+            _json_chain_error(e)
+            _print_chain_traceback(e, verbose)
             typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
             if e.rpc_url:
                 typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
             raise typer.Exit(code=1)
         except exceptions.ChainError as e:
+            _json_chain_error(e)
+            _print_chain_traceback(e, verbose)
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
 
         if not chain_records:
+            _json_error("not_registered", f"{swarm_hash} is not registered on-chain.", data_hash=swarm_hash)
             typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
             raise typer.Exit(code=1)
 
@@ -2545,7 +3363,7 @@ def chain_get(
                 "depth": len(chain_records),
                 "root": swarm_hash,
             }
-            typer.echo(json.dumps(output, indent=2))
+            _echo_json(json.dumps(output, indent=2))
             return
 
         typer.echo(f"\nProvenance Chain ({len(chain_records)} records):")
@@ -2583,19 +3401,24 @@ def chain_get(
     except typer.Exit:
         raise
     except exceptions.DataNotRegisteredError:
+        _json_error("not_registered", f"{swarm_hash} is not registered on-chain.", data_hash=swarm_hash)
         typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(record.model_dump(), indent=2))
+        _echo_json(json.dumps(record.model_dump(), indent=2))
         return
 
     from datetime import datetime, timezone
@@ -2636,7 +3459,7 @@ def chain_anchor(
     data_type: Annotated[str, typer.Option("--type", "-t", help="Data type/category.")] = "swarm-provenance",
     storage_ref: Annotated[Optional[str], typer.Option("--storage-ref", "-s", help="Storage reference (e.g. Swarm hash) to link bidirectionally.")] = None,
     owner: Annotated[Optional[str], typer.Option("--owner", help="Register on behalf of this owner address (requires delegate authorization).")] = None,
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -2649,7 +3472,7 @@ def chain_anchor(
     if gas is not None:
         _chain_config["gas_limit"] = gas
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
         if owner:
             result = client.anchor_for(swarm_hash, owner=owner, data_type=data_type, storage_ref=storage_ref, verbose=verbose)
         else:
@@ -2659,8 +3482,9 @@ def chain_anchor(
     except exceptions.DataAlreadyRegisteredError as e:
         if output_json:
             from datetime import datetime, timezone
-            typer.echo(json.dumps({
+            _echo_json(json.dumps({
                 "error": "already_registered",
+                "message": str(e),
                 "data_hash": e.data_hash,
                 "owner": e.owner,
                 "timestamp": e.timestamp,
@@ -2679,23 +3503,28 @@ def chain_anchor(
         raise typer.Exit(code=1)
     except exceptions.TransactionUnconfirmedError as e:
         _handle_not_recorded(e, output_json=output_json)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
             typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(result.model_dump(), indent=2))
+        _echo_json(json.dumps(result.model_dump(), indent=2))
         return
 
     typer.secho(f"\nAnchored successfully!", fg=typer.colors.GREEN, bold=True)
@@ -2716,7 +3545,7 @@ def chain_anchor(
 def chain_set_storage_ref(
     data_hash: Annotated[str, typer.Argument(help="Registered data hash.")],
     storage_ref: Annotated[str, typer.Argument(help="Storage reference (e.g. Swarm hash) to link.")],
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit.")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -2728,7 +3557,7 @@ def chain_set_storage_ref(
     if gas is not None:
         _chain_config["gas_limit"] = gas
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
         result = client.set_storage_ref(data_hash, storage_ref, verbose=verbose)
     except typer.Exit:
         raise
@@ -2737,23 +3566,26 @@ def chain_set_storage_ref(
         raise typer.Exit(code=1)
     except exceptions.TransactionUnconfirmedError as e:
         _handle_not_recorded(e, output_json=output_json)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
             typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(result.model_dump(), indent=2))
+        _echo_json(json.dumps(result.model_dump(), indent=2))
         return
 
     typer.secho(f"\nStorage reference linked!", fg=typer.colors.GREEN, bold=True)
@@ -2762,6 +3594,147 @@ def chain_set_storage_ref(
     typer.echo(f"  Tx:      {result.tx_hash}")
     typer.echo(f"  Block:   {result.block_number}")
     typer.echo(f"  Gas:     {result.gas_used}")
+    if result.explorer_url:
+        typer.echo(f"  Explorer: {result.explorer_url}")
+
+
+def _validate_tx_hash(value: str) -> str:
+    """Typer callback for a transaction hash: 64 hex digits, with or without 0x."""
+    value = value.strip()
+    if not re.fullmatch(r"(0x)?[0-9a-fA-F]{64}", value):
+        raise typer.BadParameter("must be 64 hex digits, with or without 0x")
+    return value if value.startswith("0x") else "0x" + value
+
+
+def _validate_event_name(value: Optional[str]) -> Optional[str]:
+    """Typer callback for --event: an event name from the DataProvenance ABI."""
+    if value is None:
+        return None
+    from .chain.contract import abi_event_names
+
+    names = abi_event_names()
+    if value not in names:
+        raise typer.BadParameter(f"unknown event {value!r}. Events: {', '.join(names)}")
+    return value
+
+
+@_chain_command("wait")
+def chain_wait(
+    tx_hash: Annotated[str, typer.Argument(help="Hash of a sent transaction.", callback=_validate_tx_hash)],
+    event: Annotated[Optional[str], typer.Option("--event", help="Event the contract must emit, for example DataRegistered. Without it, only the receipt status is checked.", callback=_validate_event_name)] = None,
+    count: Annotated[Optional[int], typer.Option("--count", min=1, help="Number of --event events the contract must emit (default 1).")] = None,
+    timeout: Annotated[int, typer.Option("--timeout", min=1, help="Seconds to wait for the receipt.")] = 120,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
+    output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
+):
+    """
+    Wait for a sent transaction and check its receipt.
+
+    Use it after a write reports "Not confirmed yet", with the command that
+    the write prints. It sends nothing and needs no wallet key.
+
+    Exit codes: 0 confirmed; 1 reverted, not recorded, replaced or not
+    found; 3 still pending, outcome unknown (the RPC answered the receipt
+    lookup with an error), or no RPC could be reached.
+    """
+    if count is not None and event is None:
+        raise typer.BadParameter("--count needs --event", param_hint="--count")
+    try:
+        client = _get_chain_client(verbose=verbose, require_wallet=False)
+        result = client.wait_for_transaction(
+            tx_hash,
+            expected_event=event,
+            expected_count=count if count is not None else 1,
+            timeout=timeout,
+            verbose=verbose,
+        )
+    except typer.Exit:
+        raise
+    except exceptions.TransactionUnconfirmedError as e:
+        _handle_not_recorded(e, output_json=output_json, waiting=True)
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
+    except exceptions.TransactionNotFoundError as e:
+        if output_json:
+            _echo_json(json.dumps({
+                "error": "not_found",
+                "message": str(e),
+                "tx_hash": e.tx_hash,
+                "explorer_url": e.explorer_url,
+            }, indent=2))
+        else:
+            typer.secho(
+                f"ERROR: Not found. The RPC does not know transaction {e.tx_hash}, and "
+                f"no receipt arrived within {timeout} seconds.",
+                fg=typer.colors.RED, err=True,
+            )
+            if e.explorer_url:
+                typer.echo(f"  Explorer:    {e.explorer_url}", err=True)
+            typer.echo(
+                "  Check the hash in the explorer, or check whether the write was "
+                "recorded with swarm-prov-upload chain get <data hash>.",
+                err=True,
+            )
+        raise typer.Exit(code=1)
+    except exceptions.ChainTransactionError as e:
+        if output_json:
+            _echo_json(json.dumps(_step_error_json(e), indent=2))
+        else:
+            typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
+            if e.tx_hash:
+                typer.echo(f"  Transaction: {e.tx_hash}", err=True)
+        raise typer.Exit(code=1)
+    except exceptions.ChainConnectionError as e:
+        # No RPC left during the wait: the transaction may still be pending
+        _print_chain_traceback(e, verbose)
+        try:
+            explorer_url = client._provider.get_explorer_tx_url(tx_hash)
+        except Exception:
+            explorer_url = None
+        if not isinstance(explorer_url, str):
+            explorer_url = None
+        again = f"swarm-prov-upload chain wait {tx_hash}"
+        if event:
+            again += f" --event {event}"
+            if count is not None and count != 1:
+                again += f" --count {count}"
+        if output_json:
+            _echo_json(json.dumps({
+                "error": "connection_failed",
+                "message": str(e),
+                "tx_hash": tx_hash,
+                "explorer_url": explorer_url,
+                "wait_command": again,
+            }, indent=2))
+        else:
+            typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+            if e.rpc_url:
+                typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
+            typer.echo(
+                "  The transaction may still be pending: its state is unknown. Run the "
+                "command again when the RPC is reachable:",
+                err=True,
+            )
+            typer.echo(f"  {again}", err=True)
+            if explorer_url:
+                typer.echo(f"  Explorer:    {explorer_url}", err=True)
+        raise typer.Exit(code=EXIT_PENDING)
+    except exceptions.ChainError as e:
+        _print_chain_traceback(e, verbose)
+        if output_json:
+            _echo_json(json.dumps(_step_error_json(e), indent=2))
+        else:
+            typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if output_json:
+        _echo_json(json.dumps(result.model_dump(), indent=2))
+        return
+
+    typer.secho(f"\nConfirmed in block {result.block_number}", fg=typer.colors.GREEN, bold=True)
+    typer.echo(f"  Tx:      {result.tx_hash}")
+    typer.echo(f"  Gas:     {result.gas_used}")
+    if result.event:
+        typer.echo(f"  Events:  {result.emitted_count} {result.event}")
     if result.explorer_url:
         typer.echo(f"  Explorer: {result.explorer_url}")
 
@@ -2781,19 +3754,24 @@ def chain_lookup(
     except typer.Exit:
         raise
     except exceptions.DataNotRegisteredError:
+        _json_error("not_registered", f"No record linked to storage ref {storage_ref}.", storage_ref=storage_ref)
         typer.secho(f"Not found: no record linked to storage ref {storage_ref}.", fg=typer.colors.YELLOW)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
+        _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(record.model_dump(), indent=2))
+        _echo_json(json.dumps(record.model_dump(), indent=2))
         return
 
     from datetime import datetime, timezone
@@ -2816,7 +3794,7 @@ def chain_lookup(
 @_chain_command("access")
 def chain_access(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to record access for.")],
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -2829,7 +3807,7 @@ def chain_access(
     if gas is not None:
         _chain_config["gas_limit"] = gas
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
         result = client.access(swarm_hash, verbose=verbose)
     except typer.Exit:
         raise
@@ -2838,23 +3816,26 @@ def chain_access(
         raise typer.Exit(code=1)
     except exceptions.TransactionUnconfirmedError as e:
         _handle_not_recorded(e, output_json=output_json)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
             typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(result.model_dump(), indent=2))
+        _echo_json(json.dumps(result.model_dump(), indent=2))
         return
 
     typer.secho(f"\nAccess recorded!", fg=typer.colors.GREEN, bold=True)
@@ -2870,7 +3851,7 @@ def chain_access(
 def chain_status(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to query or update status.")],
     set_status: Annotated[Optional[str], typer.Option("--set", help="Set status: active, restricted, deleted.")] = None,
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -2888,6 +3869,7 @@ def chain_status(
         # Set status mode
         status_name = set_status.lower()
         if status_name not in status_map:
+            _json_error("invalid_input", f"Invalid status '{set_status}'. Use: active, restricted, deleted.")
             typer.secho(
                 f"ERROR: Invalid status '{set_status}'. Use: active, restricted, deleted.",
                 fg=typer.colors.RED, err=True,
@@ -2895,11 +3877,12 @@ def chain_status(
             raise typer.Exit(code=1)
 
         try:
-            client = _get_chain_client(verbose=verbose)
+            client = _get_chain_client(verbose=verbose, require_wallet=True)
             result = client.set_status(swarm_hash, status=status_map[status_name], verbose=verbose)
         except typer.Exit:
             raise
         except exceptions.DataNotRegisteredError:
+            _json_error("not_registered", f"{swarm_hash} is not registered on-chain.", data_hash=swarm_hash)
             typer.secho(f"ERROR: {swarm_hash} is not registered on-chain.", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
         except exceptions.InsufficientFundsError as e:
@@ -2907,23 +3890,26 @@ def chain_status(
             raise typer.Exit(code=1)
         except exceptions.TransactionUnconfirmedError as e:
             _handle_not_recorded(e, output_json=output_json)
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=_unconfirmed_exit_code(e))
         except exceptions.ChainTransactionError as e:
+            _json_chain_error(e)
             typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
             if e.tx_hash:
                 typer.echo(f"  Transaction: {e.tx_hash}", err=True)
             raise typer.Exit(code=1)
         except exceptions.ChainConnectionError as e:
+            _json_chain_error(e)
             typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
             if e.rpc_url:
                 typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
             raise typer.Exit(code=1)
         except exceptions.ChainError as e:
+            _json_chain_error(e)
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
 
         if output_json:
-            typer.echo(json.dumps(result.model_dump(), indent=2))
+            _echo_json(json.dumps(result.model_dump(), indent=2))
             return
 
         typer.secho(f"\nStatus updated!", fg=typer.colors.GREEN, bold=True)
@@ -2942,19 +3928,24 @@ def chain_status(
         except typer.Exit:
             raise
         except exceptions.DataNotRegisteredError:
+            _json_error("not_registered", f"{swarm_hash} is not registered on-chain.", data_hash=swarm_hash)
             typer.secho(f"Not found: {swarm_hash} is not registered on-chain.", fg=typer.colors.YELLOW)
             raise typer.Exit(code=1)
         except exceptions.ChainConnectionError as e:
+            _json_chain_error(e)
+            _print_chain_traceback(e, verbose)
             typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
             if e.rpc_url:
                 typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
             raise typer.Exit(code=1)
         except exceptions.ChainError as e:
+            _json_chain_error(e)
+            _print_chain_traceback(e, verbose)
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
 
         if output_json:
-            typer.echo(json.dumps({"hash": swarm_hash, "status": record.status.name}, indent=2))
+            _echo_json(json.dumps({"hash": swarm_hash, "status": record.status.name}, indent=2))
             return
 
         hash_short = f"{swarm_hash[:12]}...{swarm_hash[-8:]}" if len(swarm_hash) > 20 else swarm_hash
@@ -2966,7 +3957,7 @@ def chain_status(
 def chain_transfer(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to transfer.")],
     to: Annotated[str, typer.Option("--to", help="New owner address.")],
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -2976,7 +3967,7 @@ def chain_transfer(
     if gas is not None:
         _chain_config["gas_limit"] = gas
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
         result = client.transfer_ownership(swarm_hash, new_owner=to, verbose=verbose)
     except typer.Exit:
         raise
@@ -2985,23 +3976,26 @@ def chain_transfer(
         raise typer.Exit(code=1)
     except exceptions.TransactionUnconfirmedError as e:
         _handle_not_recorded(e, output_json=output_json)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
             typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(result.model_dump(), indent=2))
+        _echo_json(json.dumps(result.model_dump(), indent=2))
         return
 
     to_short = f"{to[:10]}...{to[-4:]}" if len(to) > 14 else to
@@ -3020,7 +4014,7 @@ def chain_delegate(
     address: Annotated[str, typer.Argument(help="Delegate address to authorize or revoke.")],
     authorize: Annotated[bool, typer.Option("--authorize", help="Authorize this delegate.")] = False,
     revoke: Annotated[bool, typer.Option("--revoke", help="Revoke this delegate.")] = False,
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3033,6 +4027,7 @@ def chain_delegate(
     if gas is not None:
         _chain_config["gas_limit"] = gas
     if authorize == revoke:
+        _json_error("invalid_input", "Specify exactly one of --authorize or --revoke.")
         typer.secho(
             "ERROR: Specify exactly one of --authorize or --revoke.",
             fg=typer.colors.RED, err=True,
@@ -3040,7 +4035,7 @@ def chain_delegate(
         raise typer.Exit(code=1)
 
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
         result = client.set_delegate(delegate=address, authorized=authorize, verbose=verbose)
     except typer.Exit:
         raise
@@ -3049,23 +4044,26 @@ def chain_delegate(
         raise typer.Exit(code=1)
     except exceptions.TransactionUnconfirmedError as e:
         _handle_not_recorded(e, output_json=output_json)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
             typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(result.model_dump(), indent=2))
+        _echo_json(json.dumps(result.model_dump(), indent=2))
         return
 
     action = "authorized" if authorize else "revoked"
@@ -3085,7 +4083,7 @@ def chain_transform(
     new_hash: Annotated[str, typer.Argument(help="Hash of the transformed data.")],
     description: Annotated[str, typer.Option("--description", "-d", help="Description of the transformation.")] = "",
     restrict_original: Annotated[bool, typer.Option("--restrict-original", help="Set original hash status to RESTRICTED after transform.")] = False,
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3098,7 +4096,7 @@ def chain_transform(
     if gas is not None:
         _chain_config["gas_limit"] = gas
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
         try:
             result = client.transform(original_hash, new_hash, description=description, verbose=verbose)
         except exceptions.ChainError as e:
@@ -3112,6 +4110,8 @@ def chain_transform(
     except typer.Exit:
         raise
     except exceptions.DataNotRegisteredError as e:
+        _json_error("not_registered", "Original hash is not registered on-chain.",
+                    data_hash=e.data_hash or original_hash)
         typer.secho(f"ERROR: Original hash is not registered on-chain.", fg=typer.colors.RED, err=True)
         typer.echo(f"  Anchor it first: swarm-prov-upload chain anchor {e.data_hash or original_hash}", err=True)
         raise typer.Exit(code=1)
@@ -3120,18 +4120,21 @@ def chain_transform(
         raise typer.Exit(code=1)
     except exceptions.TransactionUnconfirmedError as e:
         _handle_not_recorded(e, output_json=output_json)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
             typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
@@ -3149,9 +4152,9 @@ def chain_transform(
     if output_json:
         if restrict_original:
             combined = _composite_json({"transform": result, "restrict": status_result})
-            typer.echo(json.dumps(combined, indent=2))
+            _echo_json(json.dumps(combined, indent=2))
         else:
-            typer.echo(json.dumps(result.model_dump(), indent=2))
+            _echo_json(json.dumps(result.model_dump(), indent=2))
         return
 
     typer.secho(f"\nTransformation recorded!", fg=typer.colors.GREEN, bold=True)
@@ -3179,7 +4182,7 @@ def chain_protect(
     description: Annotated[str, typer.Option("--description", "-d", help="Description of the transformation.")] = "",
     anchor_new: Annotated[bool, typer.Option("--anchor-new", help="Anchor the new hash if not already registered.")] = False,
     data_type: Annotated[str, typer.Option("--type", "-t", help="Data type for anchoring new hash.")] = "swarm-provenance",
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3195,7 +4198,7 @@ def chain_protect(
     if gas is not None:
         _chain_config["gas_limit"] = gas
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
     except typer.Exit:
         raise
 
@@ -3205,11 +4208,15 @@ def chain_protect(
     try:
         record = client.get(original_hash, verbose=verbose)
     except exceptions.ChainError as e:
+        if not isinstance(e, exceptions.DataNotRegisteredError):
+            _print_chain_traceback(e, verbose)
         if output_json:
             _composite_step_failed(e, "verify", results, output_json=True)
         if isinstance(e, exceptions.DataNotRegisteredError):
             typer.secho(f"ERROR: Original hash is not registered on-chain.", fg=typer.colors.RED, err=True)
             typer.echo(f"  Anchor it first: swarm-prov-upload chain anchor {original_hash}", err=True)
+        elif isinstance(e, exceptions.ChainConnectionError):
+            typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         else:
             typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -3240,6 +4247,7 @@ def chain_protect(
             if not output_json:
                 typer.secho(f"New hash already anchored, continuing.", fg=typer.colors.YELLOW)
         except exceptions.ChainError as e:
+            _print_chain_traceback(e, verbose)
             _composite_step_failed(e, "anchor", results, output_json=output_json)
 
     # Step 3: Record transformation
@@ -3264,7 +4272,7 @@ def chain_protect(
         )
 
     if output_json:
-        typer.echo(json.dumps(_composite_json(results), indent=2))
+        _echo_json(json.dumps(_composite_json(results), indent=2))
         return
 
     typer.secho(f"\nProtect complete!", fg=typer.colors.GREEN, bold=True)
@@ -3279,7 +4287,7 @@ def chain_merge(
     hashes: Annotated[List[str], typer.Argument(help="Source hashes followed by the new (merged) hash. Minimum 3 values (2 sources + 1 new).")],
     description: Annotated[str, typer.Option("--description", "-d", help="Description of the merge.")] = "",
     data_type: Annotated[str, typer.Option("--type", "-t", help="Data type for the merged result.")] = "merged",
-    gas: Annotated[Optional[int], typer.Option("--gas", help="Explicit gas limit (skips estimation).")] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3292,6 +4300,7 @@ def chain_merge(
     Example: swarm-prov-upload chain merge <hash1> <hash2> <new_hash> -d "Merged datasets"
     """
     if len(hashes) < 3:
+        _json_error("invalid_input", "Need at least 3 hashes: 2+ source hashes and 1 new hash.")
         typer.secho(
             "ERROR: Need at least 3 hashes: 2+ source hashes and 1 new hash.",
             fg=typer.colors.RED, err=True,
@@ -3305,7 +4314,7 @@ def chain_merge(
     if gas is not None:
         _chain_config["gas_limit"] = gas
     try:
-        client = _get_chain_client(verbose=verbose)
+        client = _get_chain_client(verbose=verbose, require_wallet=True)
         result = client.merge_transform(
             source_hashes=source_hashes,
             new_hash=new_hash,
@@ -3316,12 +4325,14 @@ def chain_merge(
     except typer.Exit:
         raise
     except exceptions.DataNotRegisteredError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Source hash is not registered on-chain.", fg=typer.colors.RED, err=True)
         if e.data_hash:
             typer.echo(f"  Hash: {e.data_hash}", err=True)
         typer.echo(f"  Anchor source hashes first: swarm-prov-upload chain anchor <hash>", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainValidationError as e:
+        _json_error("invalid_input", f"Validation failed: {e}")
         typer.secho(f"ERROR: Validation failed: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     except exceptions.InsufficientFundsError as e:
@@ -3329,23 +4340,26 @@ def chain_merge(
         raise typer.Exit(code=1)
     except exceptions.TransactionUnconfirmedError as e:
         _handle_not_recorded(e, output_json=output_json)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
             typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
         if e.rpc_url:
             typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainError as e:
+        _json_chain_error(e)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
-        typer.echo(json.dumps(result.model_dump(), indent=2))
+        _echo_json(json.dumps(result.model_dump(), indent=2))
         return
 
     typer.secho(f"\nMerge transformation recorded!", fg=typer.colors.GREEN, bold=True)
@@ -3391,15 +4405,16 @@ def main(
         show_default=False,
         help="Auto-pay without prompting (up to --max-pay limit). --no-auto-pay overrides X402_AUTO_PAY."
     )] = None,
-    max_pay: Annotated[Optional[float], typer.Option(
+    max_pay: Annotated[Optional[str], typer.Option(
         "--max-pay",
+        metavar="FLOAT",  # kept as written, then parsed exactly (#152)
         help="Maximum auto-pay amount in USD per request.",
-        show_default=f"{config.X402_MAX_AUTO_PAY_USD:.2f}",
+        show_default=_max_pay_help_default(),  # X402_MAX_AUTO_PAY_USD, as x402 status shows it (#144)
     )] = None,
     x402_network: Annotated[Optional[str], typer.Option(
         "--x402-network",
-        help="x402 network: 'base-sepolia' (testnet) or 'base' (mainnet).",
-        show_default=config.X402_NETWORK,
+        help="x402 network: 'base-sepolia' (testnet) or 'base' (mainnet); the CAIP-2 ids 'eip155:84532' and 'eip155:8453' also work.",
+        show_default=_x402_config["network"],  # X402_NETWORK, normalized (#144)
     )] = None,
     chain: Annotated[Optional[str], typer.Option(
         "--chain",
@@ -3430,7 +4445,8 @@ def main(
     Use --backend local for direct Bee node communication.
 
     For pay-per-request mode, use --x402 to enable x402 payments.
-    Requires X402_PRIVATE_KEY environment variable.
+    Requires X402_PRIVATE_KEY environment variable (or the variable named by
+    X402_PRIVATE_KEY_ENV, or the legacy SWARM_X402_PRIVATE_KEY; see docs/x402-setup.md).
 
     For testing/development, use --free for rate-limited free tier access.
     """
@@ -3438,6 +4454,7 @@ def main(
                          idempotency_key=None, idempotency_key_given=False)
     if idempotency_key is not None:
         if not is_valid_idempotency_key(idempotency_key):
+            _json_error("invalid_input", "--idempotency-key must be 1-255 printable ASCII characters.")
             typer.secho("ERROR: --idempotency-key must be 1-255 printable ASCII characters.",
                         fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -3451,6 +4468,7 @@ def main(
 
     if backend:
         if backend not in ("gateway", "local"):
+            _json_error("invalid_input", f"Invalid backend '{backend}'. Use 'gateway' or 'local'.")
             typer.secho(f"ERROR: Invalid backend '{backend}'. Use 'gateway' or 'local'.", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
         _backend_config["backend"] = backend
@@ -3466,18 +4484,29 @@ def main(
     if max_pay is not None:
         _x402_config["max_auto_pay_usd"] = max_pay
     if x402_network:
-        if x402_network not in ("base-sepolia", "base"):
-            typer.secho(f"ERROR: Invalid x402 network '{x402_network}'. Use 'base-sepolia' or 'base'.", fg=typer.colors.RED, err=True)
+        network = normalize_network(x402_network)
+        if network not in ("base-sepolia", "base"):
+            _json_error("invalid_input", f"Invalid x402 network '{x402_network}'. Use 'base-sepolia' or "
+                        "'base' (or 'eip155:84532' or 'eip155:8453').")
+            typer.secho(f"ERROR: Invalid x402 network '{x402_network}'. Use 'base-sepolia' or 'base' "
+                        "(or 'eip155:84532' or 'eip155:8453').", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
-        _x402_config["network"] = x402_network
+        _x402_config["network"] = network
 
     # Free tier configuration
     if free is not None:
         _backend_config["free_tier"] = free
 
+    # A --max-pay that is not a finite number of 0 or more is an error here.
+    # X402_MAX_AUTO_PAY_USD is checked when a paying client is built, so
+    # x402 status and --help still work with a bad value.
+    if max_pay is not None:
+        _check_auto_pay_limit("--max-pay")
+
     # Chain configuration
     if chain:
         if chain not in ("base-sepolia", "base"):
+            _json_error("invalid_input", f"Invalid chain '{chain}'. Use 'base-sepolia' or 'base'.")
             typer.secho(f"ERROR: Invalid chain '{chain}'. Use 'base-sepolia' or 'base'.", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
         _chain_config["chain"] = chain
