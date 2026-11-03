@@ -14,7 +14,7 @@ import json
 import logging
 from typing import List, Optional, Union
 
-from ..chain.contract import DataStatus
+from ..chain.contract import EVENT_LOOKBACK_BLOCKS, DataStatus
 from ..chain.redact import redact_url, redact_urls
 from ..chain.exceptions import (
     ChainError,
@@ -1985,11 +1985,16 @@ class ChainClient:
 
         On v2 contracts, uses state reads (``getTransformationLinks`` /
         ``getTransformationParents``) for traversal — no event scanning.
-        On v1 contracts, falls back to the cached event scan path.
-        Falls back to per-node event scanning when the deploy block is unknown.
+        On v1 contracts, falls back to the cached event scan path, which
+        scans from the deploy block (the preset's for the preset contract,
+        or CHAIN_DEPLOY_BLOCK / ``deploy_block``). When the deploy block is
+        unknown, per-node event queries scan the last 50,000 blocks; if
+        the chain is longer, the lineage may be incomplete and the call
+        raises ChainConfigurationError instead (#231).
 
-        The walk fails closed: if any read fails, the call raises instead of
-        returning the nodes reached so far (#170).
+        The walk fails closed: if any read fails, including the event scan
+        and the contract version check, the call raises instead of
+        returning the nodes reached so far (#170, #230, #231).
 
         Args:
             swarm_hash: Starting Swarm reference hash.
@@ -2007,6 +2012,9 @@ class ChainClient:
 
         Raises:
             ChainValidationError: If max_depth is outside 0 to 50.
+            ChainConfigurationError: If the RPC rejects a read, or the
+                lineage of a v1 contract may be incomplete because its
+                deploy block is unknown.
             ChainConnectionError: If an RPC read fails during the walk.
             ChainError: If another read fails during the walk, or a linked
                 hash reads as not registered.
@@ -2043,6 +2051,10 @@ class ChainClient:
         use_local_index = False
 
         if not use_state_reads and deploy_block is not None:
+            # A failed scan fails the walk (#231): the per-node queries
+            # scan only the last EVENT_LOOKBACK_BLOCKS blocks, so they are
+            # no fallback for it. An RPC failure is raised as it is, so
+            # this method's read loop moves to a fallback RPC and maps it.
             try:
                 cache = get_cache(self._provider.chain, self._provider.contract_address)
                 current_block = self._provider.web3.eth.block_number
@@ -2050,10 +2062,27 @@ class ChainClient:
                     self._contract, deploy_block, current_block
                 )
                 use_local_index = True
+            except ChainError:
+                raise
             except Exception as e:
-                logger.warning(
-                    "Full event scan failed, falling back to per-node queries: %s",
-                    redact_urls(str(e)),
+                if _is_rpc_failure(e):
+                    raise
+                raise ChainError(
+                    f"Provenance chain read failed: the event scan failed: {_error_reason(e)}"
+                ) from e
+        elif not use_state_reads:
+            # Per-node queries: complete only if their window reaches block 0
+            # (#231). A v1 contract emits no DataMerged events, so reading
+            # only DataTransformed loses no edges.
+            latest = self._provider.web3.eth.block_number
+            if latest > EVENT_LOOKBACK_BLOCKS:
+                raise ChainConfigurationError(
+                    "The provenance chain may be incomplete, so it was not read: "
+                    "the contract has no transformation links (v1) and its deploy "
+                    f"block is unknown, so only the last {EVENT_LOOKBACK_BLOCKS:,} "
+                    f"blocks of {latest:,} could be scanned for its events. "
+                    "Set CHAIN_DEPLOY_BLOCK (or ChainClient's deploy_block) to the "
+                    "block the contract was deployed in."
                 )
 
         def _hex(value) -> str:
@@ -2122,7 +2151,7 @@ class ChainClient:
                     if expand:
                         parents = [orig for orig, _ in reverse.get(current_hash, [])]
                 else:
-                    # Per-node event scanning (fallback when deploy_block unknown)
+                    # Per-node event scanning (deploy block unknown, short chain)
                     events = self._contract.get_transformations_from(current_hash)
                     enriched = [
                         ChainTransformation(description=desc, new_data_hash=_hex(new_bytes))

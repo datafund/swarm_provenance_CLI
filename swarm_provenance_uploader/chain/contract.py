@@ -31,6 +31,10 @@ MAX_BATCH_ACCESS = 100
 MIN_MERGE_SOURCES = 2
 MAX_MERGE_SOURCES = 50
 
+# Blocks the per-node event queries scan back from the latest block
+# (get_transformations_from / get_transformations_to)
+EVENT_LOOKBACK_BLOCKS = 50_000
+
 # Note: the contract also defines on-chain constants MAX_TRANSFORMATIONS (100)
 # and MAX_ACCESSORS readable via contract.functions.MAX_TRANSFORMATIONS().call().
 # These limit how many transformations/accessors can be stored per data record.
@@ -884,7 +888,7 @@ class DataProvenanceContract:
     def get_transformations_from(
         self,
         data_hash: str,
-        lookback_blocks: int = 50_000,
+        lookback_blocks: int = EVENT_LOOKBACK_BLOCKS,
     ) -> List[Tuple[bytes, bytes, str]]:
         """
         Query DataTransformed events where data_hash is the original.
@@ -913,7 +917,7 @@ class DataProvenanceContract:
     def get_transformations_to(
         self,
         data_hash: str,
-        lookback_blocks: int = 50_000,
+        lookback_blocks: int = EVENT_LOOKBACK_BLOCKS,
     ) -> List[Tuple[bytes, bytes, str]]:
         """
         Query DataTransformed events where data_hash is the new (reverse lookup).
