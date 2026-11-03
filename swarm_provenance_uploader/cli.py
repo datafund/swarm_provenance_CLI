@@ -2636,8 +2636,8 @@ def _handle_not_recorded(
                 "<data hash> before you try again."
             )
         typer.secho(
-            prefix + "Outcome unknown. The connection to the RPC failed after the "
-            "transaction was sent, so it is not known whether it was mined. " + check,
+            prefix + "Outcome unknown. The transaction was sent, but it is not known "
+            "whether it was mined. " + check,
             fg=typer.colors.RED, err=True,
         )
         command = _wait_command(e)

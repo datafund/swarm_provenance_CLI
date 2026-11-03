@@ -4315,13 +4315,13 @@ class TestSendTransactionTransportFailures:
 
         web3 = mock_chain_deps["web3_instance"]
         client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
-        web3.eth.send_raw_transaction.side_effect = Web3RPCError("nonce too low")
+        web3.eth.send_raw_transaction.side_effect = Web3RPCError("transaction underpriced")
 
         with pytest.raises(ChainTransactionError) as exc_info:
             client.set_status(swarm_hash=DUMMY_HASH, status=1)
 
         assert not isinstance(exc_info.value, TransactionUnconfirmedError)
-        assert str(exc_info.value) == "nonce too low"
+        assert str(exc_info.value) == "transaction underpriced"
 
     def test_rejection_by_send_carries_signed_hash(self, mock_chain_deps):
         """A rejection raised by send_raw_transaction shows the hash of the signed transaction."""
@@ -4329,7 +4329,7 @@ class TestSendTransactionTransportFailures:
 
         web3 = mock_chain_deps["web3_instance"]
         client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
-        web3.eth.send_raw_transaction.side_effect = Web3RPCError("nonce too low")
+        web3.eth.send_raw_transaction.side_effect = Web3RPCError("transaction underpriced")
 
         with pytest.raises(ChainTransactionError) as exc_info:
             client.set_status(swarm_hash=DUMMY_HASH, status=1)
@@ -4444,8 +4444,11 @@ def _send(client):
 def _web3_error(name):
     web3_exceptions = pytest.importorskip("web3.exceptions")
     if name == "Web3RPCError":
+        # Not a text that says the transaction may be sent ("nonce too low",
+        # "already known"): those are outcome unknown (#229)
         return web3_exceptions.Web3RPCError(
-            "nonce too low", rpc_response={"error": {"code": -32000, "message": "nonce too low"}}
+            "transaction underpriced",
+            rpc_response={"error": {"code": -32000, "message": "transaction underpriced"}},
         )
     return getattr(web3_exceptions, name)("timed out" if "Time" in name else "refused")
 
@@ -4462,17 +4465,38 @@ AFTER_SEND_CALLS = ["send_raw_transaction", "wait_for_transaction_receipt"]
 TRANSPORT_ERRORS = ["ProviderConnectionError", "BadResponseFormat", "RequestTimedOut"]
 
 
-@pytest.mark.parametrize("failing_call", AFTER_SEND_CALLS)
-def test_send_rejection_with_web3_classes(failing_call):
-    """A JSON-RPC rejection stays ChainTransactionError, with the hash."""
+def test_send_rejection_with_web3_classes():
+    """A JSON-RPC rejection of the send stays ChainTransactionError, with the hash.
+
+    A JSON-RPC error answer during the receipt wait is outcome unknown
+    (#228): TestReceiptWaitErrorIsOutcomeUnknown.
+    """
     error = _web3_error("Web3RPCError")
-    client, web3 = _send_client(failing_call, error)
+    client, web3 = _send_client("send_raw_transaction", error)
 
     with pytest.raises(ChainTransactionError) as exc_info:
         _send(client)
 
     assert type(exc_info.value) is ChainTransactionError
-    assert exc_info.value.tx_hash == _expected_hash(failing_call)
+    assert exc_info.value.tx_hash == _expected_hash("send_raw_transaction")
+    web3.eth.send_raw_transaction.assert_called_once()
+
+
+def test_receipt_wait_rejection_with_web3_classes():
+    """A JSON-RPC rejection during the receipt wait is outcome unknown, with the hash (#228)."""
+    from swarm_provenance_uploader.exceptions import (
+        ReceiptTimeoutError,
+        TransactionOutcomeUnknownError,
+    )
+
+    error = _web3_error("Web3RPCError")
+    client, web3 = _send_client("wait_for_transaction_receipt", error)
+
+    with pytest.raises(TransactionOutcomeUnknownError) as exc_info:
+        _send(client)
+
+    assert not isinstance(exc_info.value, ReceiptTimeoutError)
+    assert exc_info.value.tx_hash == _expected_hash("wait_for_transaction_receipt")
     web3.eth.send_raw_transaction.assert_called_once()
 
 

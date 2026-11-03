@@ -35,6 +35,44 @@ def _import_web3():
     return _Web3
 
 
+def _http_provider(Web3, url: str, timeout: int):
+    """An HTTPProvider for url that never repeats eth_sendRawTransaction (#229).
+
+    web3 retries the methods on its REQUEST_RETRY_ALLOWLIST, including
+    eth_sendRawTransaction, after an HTTP error answer or a read timeout. If
+    the first request reached the node, the repeat gets "already known" or
+    "nonce too low", which hides that the transaction was sent. Every other
+    method keeps web3's default retry (the same errors, retries and
+    backoff). The list set is never empty, because web3 replaces an empty
+    list with its default.
+
+    If the installed web3 does not take the configuration, its default is
+    kept; ChainClient then still reports those answers to a send as
+    "outcome unknown".
+    """
+    provider = Web3.HTTPProvider(url, request_kwargs={"timeout": timeout})
+    try:
+        from web3.providers.rpc.utils import ExceptionRetryConfiguration
+
+        default = provider.exception_retry_configuration
+        if default is None:
+            return provider  # no retry at all
+        allowlist = [m for m in default.method_allowlist if m != "eth_sendRawTransaction"]
+        provider.exception_retry_configuration = (
+            ExceptionRetryConfiguration(
+                errors=default.errors,
+                retries=default.retries,
+                backoff_factor=default.backoff_factor,
+                method_allowlist=allowlist,
+            )
+            if allowlist
+            else None
+        )
+    except Exception as e:
+        logger.debug("Kept web3's default request retry: %s", type(e).__name__)
+    return provider
+
+
 # Network presets for supported chains
 CHAIN_PRESETS = {
     "base-sepolia": {
@@ -175,12 +213,7 @@ class ChainProvider:
             )
 
         # Initialize Web3 connection
-        self._web3 = Web3(
-            Web3.HTTPProvider(
-                self.rpc_url,
-                request_kwargs={"timeout": self._request_timeout},
-            )
-        )
+        self._web3 = Web3(_http_provider(Web3, self.rpc_url, self._request_timeout))
 
         # When a custom RPC is provided, read the chain ID from the node.
         # The localhost preset takes whatever the node reports (a local node
@@ -287,12 +320,7 @@ class ChainProvider:
                 continue
             tried.add(url)
             try:
-                candidate = Web3(
-                    Web3.HTTPProvider(
-                        url,
-                        request_kwargs={"timeout": self._request_timeout},
-                    )
-                )
+                candidate = Web3(_http_provider(Web3, url, self._request_timeout))
                 if candidate.is_connected():
                     # Never switch to an endpoint on another chain
                     candidate_chain_id = candidate.eth.chain_id
