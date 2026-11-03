@@ -631,24 +631,55 @@ The `chain protect` command runs multiple operations sequentially. If a later st
 | Step 1 (verify) | Nothing committed | Fix preconditions and retry |
 | Step 2 (anchor new) | Nothing committed | Fix anchor issue and retry |
 | Step 3 (transform) | New hash may be anchored | Record transform manually |
-| Step 4 (restrict) | Transform recorded, original still ACTIVE | Restrict manually |
+| Step 4 (restrict) | Transform recorded, original still ACTIVE (or the restrict transaction may still be mined, exit 3) | Restrict manually; after exit 3, run the printed `chain wait` command first |
 
-**If restrict fails after transform:**
+If a step fails, the command lists the steps that were recorded before it, with their transaction hashes, and prints the error of the failed step. It exits 1, or 3 when the failed step's transaction may still be mined (see [Exit codes](#exit-codes)).
+
+**If restrict fails after transform (exit 1):**
 ```bash
-# The CLI shows a WARNING with the manual command:
-# WARNING: Transform succeeded but failed to restrict original: ...
-#   Restrict manually: swarm-prov-upload chain status <hash> --set restricted
+# Transformation recorded.
+#
+# Completed before the failure:
+#   Transform: tx 0xb2b2...
+#     Explorer: https://...
+# ERROR: Failed to restrict original: Transaction reverted (status=0)
+#   Transaction: 0xe5e5...
+#   Restrict manually: swarm-prov-upload chain status aaa... --set restricted
 
 # Run the suggested command:
 swarm-prov-upload chain status aaa... --set restricted
 ```
 
-**JSON output for partial failures:**
+**If the restrict transaction may still be mined (exit 3):** do not restrict manually yet. Run the printed `chain wait` command first. If it confirms the transaction (exit 0), the original is restricted and nothing else is needed. Restrict manually only when `chain wait` reports that the transaction reverted, was not recorded or was replaced.
+```bash
+# ERROR: Failed to restrict original. Not confirmed yet. The transaction was sent, but no receipt
+#   arrived within 120 seconds. It may still be mined: do not run the write again.
+#   Wait for it: swarm-prov-upload chain wait 0xe5e5... --event DataStatusChanged
+#   Transaction: 0xe5e5...
+#   ...
+#   After you have checked the transaction, restrict manually: swarm-prov-upload chain status aaa... --set restricted
+
+swarm-prov-upload chain wait 0xe5e5... --event DataStatusChanged
+```
+
+**JSON output for partial failures:** `failed_step` names the step. A step whose transaction was sent but is not confirmed has its error under `unconfirmed`; any other failure has it under `error`.
 ```json
 {
   "transform": { "tx_hash": "0x...", ... },
   "restrict": null,
-  "partial_failure": true
+  "partial_failure": true,
+  "failed_step": "restrict",
+  "unconfirmed": {
+    "error": "receipt_timeout",
+    "tx_hash": "0x...",
+    "explorer_url": "https://...",
+    "contract_address": "0x...",
+    "event": "DataStatusChanged",
+    "expected_count": 1,
+    "reason": "...",
+    "timeout": 120,
+    "wait_command": "swarm-prov-upload chain wait 0x... --event DataStatusChanged"
+  }
 }
 ```
 
