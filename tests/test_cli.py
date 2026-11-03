@@ -9207,7 +9207,8 @@ class TestPaidResultUnreadableCli:
         result = self._upload()
         self._assert_common(result)
         assert ("A gateway that supports Idempotency-Key answers a re-run with the same key from the "
-                "first request, without charging again:") in result.output
+                "first request, without charging again. It returns the first answer, which includes the "
+                "result if a proxy or the connection lost it:") in result.output
         assert "--idempotency-key key-216" in result.output
 
     @pytest.mark.parametrize("what", ["upload", "purchase"])
@@ -9234,7 +9235,26 @@ class TestPaidResultUnreadableCli:
         self._assert_common(result)
         assert "Stamp label:     paid-<suffix>" in result.output
         assert "Depth:           20" in result.output
-        assert "look for the stamp whose label starts with paid-" in result.output
+        # The CLI never sends a label, so the prefix cannot single out the new stamp
+        assert ("Every paid stamp's label starts with paid-, so the new one is most likely the newest: "
+                "Utilization 0%, a TTL close to the requested duration, and depth 20.") in result.output
+        assert "look for the stamp whose label starts with" not in result.output
+
+    def test_stamp_purchase_without_depth_names_no_depth(self, mocker):
+        err = self._error()
+        err.label_prefix = "paid-"
+        self._client(mocker, purchase_stamp=err)
+        result = self._upload()
+        assert ("Every paid stamp's label starts with paid-, so the new one is most likely the newest: "
+                "Utilization 0% and a TTL close to the requested duration.") in result.output
+
+    def test_library_label_prefix_is_looked_for(self, mocker):
+        """Only a library call of purchase_stamp(label=...) gives a prefix of its own."""
+        err = self._error()
+        err.label_prefix = "mine-"
+        self._client(mocker, purchase_stamp=err)
+        result = self._upload()
+        assert "In that list, look for the stamp whose label starts with mine-." in result.output
 
     def test_pool_acquisition_shows_no_label(self, mocker):
         self._client(mocker, acquire_stamp_from_pool=self._error())
