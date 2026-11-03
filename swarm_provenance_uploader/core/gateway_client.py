@@ -232,7 +232,9 @@ class GatewayClient:
             x402_on_payment_sent: Optional hook called with the payment's details
                                   (payer, nonce, amount, amount_usd, pay_to,
                                   network, transaction) once a signed payment has
-                                  been sent and not refused.
+                                  been sent and not refused: not for a 402, nor
+                                  for an answer the gateway sends before it
+                                  settles the payment (#215).
             x402_expected_pay_to: Only sign payments to this address (falls back
                                   to the X402_EXPECTED_PAY_TO env var).
             idempotency_key: Idempotency-Key sent with every paid request. The
@@ -850,14 +852,31 @@ class GatewayClient:
         result refer to the first request with the key: this operation paid
         only if one of its own attempts is the one that may have been collected
         (otherwise it was an earlier run, already counted there).
+
+        Otherwise only answers that are not proven uncharged count (#215): a
+        2xx, a 5xx other than those the gateway sends before settling, and any
+        answer that says it was settled. swarm_connect settles immediately
+        before the irreversible step, and marks every non-2xx answer after
+        settlement with `X-Payment-Status: settled_not_delivered` (or the
+        DELIVERY_FAILED_AFTER_PAYMENT code), so a 4xx without either was
+        refused before the payment was collected.
         """
-        if response.status_code == 402:
+        status = response.status_code
+        if status == 402:
             return False
         if (code or "").startswith("IDEMPOTENCY") or response.headers.get("Idempotent-Replayed"):
             return outstanding is not None
-        body_code = str(GatewayClient._error_body(response).get("code") or "")
+        body = GatewayClient._error_body(response)
+        body_code = str(body.get("code") or "")
         if body_code.startswith("IDEMPOTENCY"):
             return outstanding is not None
+        if (response.headers.get("X-Payment-Status") == "settled_not_delivered"
+                or body_code == "DELIVERY_FAILED_AFTER_PAYMENT"):
+            return True
+        if 400 <= status < 500:
+            return False
+        if status >= 500 and GatewayClient._says_not_charged(body):
+            return False
         return True
 
     @staticmethod
