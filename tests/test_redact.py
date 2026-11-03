@@ -232,7 +232,7 @@ class TestUrlAfterWordCharacter:
 
 
 def _assert_linear_time(func, build, size, factor=10, max_ratio=20, fail_ratio=50, attempts=3,
-                        min_total=0.1):
+                        min_total=0.1, deadline=5.0):
     """Fail if func(build(size)) takes max_ratio times longer than func(build(size // factor)).
 
     A linear scan takes about factor times longer on the larger input, and a
@@ -245,19 +245,23 @@ def _assert_linear_time(func, build, size, factor=10, max_ratio=20, fail_ratio=5
     measures a call that takes less than a millisecond. A ratio of
     fail_ratio or more fails at once. A ratio from max_ratio up to
     fail_ratio is measured again, up to attempts times, so that one pause
-    does not fail the test.
+    does not fail the test. If thread_time has not reached min_total after
+    deadline seconds of wall-clock time, the test fails instead of looping.
     """
     import time
 
     def timed(text):
         calls = 0
         start = time.thread_time()
+        give_up = time.perf_counter() + deadline
         while True:
             func(text)
             calls += 1
             total = time.thread_time() - start
             if total >= min_total:
                 return total / calls
+            if time.perf_counter() >= give_up:
+                pytest.fail(f"time.thread_time did not reach {min_total} s after {calls} calls")
 
     small, large = build(size // factor), build(size)
     ratios = []
