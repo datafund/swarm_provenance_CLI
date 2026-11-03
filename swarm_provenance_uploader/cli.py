@@ -305,9 +305,15 @@ _X402_EXPLORERS = {
 }
 
 
+def _wallet_stamps_command(e: exceptions.PaymentOutcomeUnknownError) -> Optional[str]:
+    """The command that lists the payer's stamps, or None when the payer is not known."""
+    return f"swarm-prov-upload stamps list --wallet {e.payer} --full" if e.payer else None
+
+
 def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: str,
                             final_step: bool = False, final_note: Optional[str] = None,
-                            final_stdout: Optional[List[str]] = None):
+                            final_stdout: Optional[List[str]] = None,
+                            check: Optional[str] = None):
     """
     Explain a paid request whose payment may have been taken, then exit.
 
@@ -324,6 +330,9 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
             when it succeeded but its result cannot be returned.
         final_stdout: With final_note: the command's normal success lines,
             printed to stdout in that case, so a script sees them with exit 0.
+        check: For a paid 2xx answer that could not be read
+            (PaymentResultUnreadableError): a command that shows whether the
+            request worked, for example `stamps info <id>` (#216).
 
     Raises:
         typer.Exit: Always; code 0 when the final step is known to have
@@ -331,8 +340,12 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
     """
     if isinstance(e, exceptions.PaymentDeliveredNotStoredError):
         _report_delivered_not_stored(e, action, final_step, final_note, final_stdout)
+    unreadable = isinstance(e, exceptions.PaymentResultUnreadableError)
     if isinstance(e, exceptions.StampPurchasePendingError):
         headline = f"Payment received, but {action} is not confirmed yet."
+    elif unreadable:
+        # The gateway answers 2xx only after it has done the work (#216)
+        headline = f"{action[:1].upper()}{action[1:]} most likely succeeded, but its result could not be read."
     elif e.settled:
         headline = f"Payment was taken, but {action} failed."
     else:
@@ -379,6 +392,17 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
                        "supports Idempotency-Key answers with the stamp, without charging again:",
                        err=True)
             typer.echo(f"  {_rerun_with_key(e.idempotency_key)}", err=True)
+    elif unreadable:
+        typer.echo("The gateway answered success, so the request was most likely done.", err=True)
+        if check:
+            typer.echo("Check the result before you contact the gateway operator:", err=True)
+            typer.echo(f"  {check}", err=True)
+            typer.echo("If the result is not there, contact the operator with the transaction above. "
+                       "Re-running pays again.", err=True)
+        else:
+            typer.echo("The Swarm reference was not received, so the result cannot be looked up "
+                       "here. Contact the gateway operator with the transaction above for it. "
+                       "Re-running pays again.", err=True)
     elif e.settled:
         typer.echo("Contact the gateway operator with the transaction above for the "
                    "result or a refund. Re-running pays again.", err=True)
@@ -758,7 +782,7 @@ def upload(
         except exceptions.PaymentRequiredError as e:
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
-            _report_payment_outcome(e, "the pool stamp acquisition")
+            _report_payment_outcome(e, "the pool stamp acquisition", check=_wallet_stamps_command(e))
         except typer.Exit:
             # The availability check above already printed its error and chose
             # the exit code; the catch-all would re-report it as an empty
@@ -801,7 +825,7 @@ def upload(
         except exceptions.PaymentRequiredError as e:
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
-            _report_payment_outcome(e, "the stamp purchase")
+            _report_payment_outcome(e, "the stamp purchase", check=_wallet_stamps_command(e))
         except exceptions.StampPurchaseError as e:
             typer.secho(f"ERROR: Failed purchasing stamp: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -1423,7 +1447,7 @@ def upload_collection(
         except exceptions.PaymentRequiredError as e:
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
-            _report_payment_outcome(e, "getting the stamp")
+            _report_payment_outcome(e, "getting the stamp", check=_wallet_stamps_command(e))
         except typer.Exit:
             raise  # already reported, e.g. an invalid auto-pay limit (#152)
         except Exception as e:
@@ -1721,6 +1745,7 @@ def stamps_extend(
             e, "the stamp extension", final_step=True,
             final_note="The batch ID is the stamp ID you gave. Do not pay again.",
             final_stdout=["SUCCESS: Stamp extended.", f"Batch ID: {stamp_id}"],
+            check=f"swarm-prov-upload stamps info {stamp_id}",
         )
     except typer.Exit:
         raise  # already reported, e.g. an invalid auto-pay limit (#152)

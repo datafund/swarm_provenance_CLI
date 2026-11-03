@@ -291,7 +291,11 @@ A server error that the gateway sends before it collects the payment is shown as
 
 ### "Payment was taken, but ... failed"
 
-The gateway confirmed it collected the payment, but the request failed afterwards (or it answered success with a response the CLI could not read). Contact the gateway operator with the transaction hash shown; they can deliver the result or refund it. Re-running pays again.
+The gateway confirmed it collected the payment, but the request failed afterwards. Contact the gateway operator with the transaction hash shown; they can deliver the result or refund it. Re-running pays again.
+
+### "... most likely succeeded, but its result could not be read"
+
+The gateway answered success, but the CLI could not read the answer (for example, a proxy page or a missing batch ID or Swarm reference). The gateway answers success only after it has collected the payment and done the work, so the request most likely worked. Check before you contact the gateway operator: for `stamps extend`, the message shows `swarm-prov-upload stamps info <id>`; for a stamp purchase or a stamp from the pool, it shows `swarm-prov-upload stamps list --wallet <payer> --full`. For an upload, the Swarm reference is not known, so ask the operator for it with the transaction hash shown. Re-running pays again.
 
 ### "Payment received, but the stamp purchase is not confirmed yet"
 

@@ -225,6 +225,16 @@ class PaymentSettledNotDeliveredError(PaymentOutcomeUnknownError):
     settled = True
 
 
+class PaymentResultUnreadableError(PaymentSettledNotDeliveredError):
+    """A paid request was answered 2xx, but the answer could not be read (#216).
+
+    The gateway answers 2xx only after it has settled the payment and done
+    the work, so the request most likely succeeded; only its result (for
+    example the batch ID or Swarm reference) is missing. Check the result
+    before contacting the operator. Re-running pays again.
+    """
+
+
 class PaymentDeliveredNotStoredError(PaymentSettledNotDeliveredError):
     """The first request with this Idempotency-Key succeeded and was paid once.
 

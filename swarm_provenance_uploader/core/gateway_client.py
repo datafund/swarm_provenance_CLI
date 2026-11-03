@@ -32,6 +32,7 @@ from ..exceptions import (
     PaymentRejectedError,
     PaymentRequiredError,
     PaymentSettledNotDeliveredError,
+    PaymentResultUnreadableError,
     StampPurchasePendingError,
     PoolNotEnabledError,
     PoolEmptyError,
@@ -929,7 +930,7 @@ class GatewayClient:
 
         A success without a reference stored nothing the caller can find, so
         it is an error: a ConnectionError here, which `_reading_paid_result`
-        turns into PaymentSettledNotDeliveredError when a payment was sent.
+        turns into PaymentResultUnreadableError when a payment was sent.
         """
         reference = data.get("reference") if isinstance(data, dict) else None
         if not isinstance(reference, str) or not reference.strip():
@@ -993,7 +994,7 @@ class GatewayClient:
             payment = getattr(response, "x402_payment", None)
             if not payment or isinstance(e, PaymentOutcomeUnknownError):
                 raise
-            raise PaymentSettledNotDeliveredError(
+            raise PaymentResultUnreadableError(
                 f"The payment was collected and the gateway answered HTTP {response.status_code}, "
                 f"but its response could not be read ({type(e).__name__}: {e}).",
                 status_code=response.status_code, **payment,
