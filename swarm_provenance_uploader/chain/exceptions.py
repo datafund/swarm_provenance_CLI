@@ -127,7 +127,8 @@ class InsufficientFundsError(ChainTransactionError):
 
 
 class TransactionUnconfirmedError(ChainTransactionError):
-    """Transaction was sent, but the write is not confirmed as recorded.
+    """Transaction was sent (or, for TransactionOutcomeUnknownError, may have
+    been sent), but the write is not confirmed as recorded.
 
     Base class for TransactionNotRecordedError and TransactionNotVerifiedError
     (the transaction was mined with status 1),

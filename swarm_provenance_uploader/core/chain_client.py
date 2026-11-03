@@ -13,6 +13,7 @@ import functools
 import json
 import logging
 import re
+from collections.abc import Mapping
 from typing import List, Optional
 
 from ..chain.contract import DataStatus
@@ -364,7 +365,11 @@ def _redact_value(value):
     """value with URLs and registered URL secrets redacted in its strings (#234).
 
     An exception inside value (for example in the args of another exception)
-    becomes a RedactedException copy with its redacted text.
+    becomes a RedactedException copy with its redacted text. A mapping
+    (a dict, or web3's AttributeDict) is rebuilt as a dict with redacted
+    values; tuples, lists, sets and frozensets keep their type. Bytes are
+    kept as they are: they may be binary revert data, which decoding and
+    redacting as text would change.
     """
     if isinstance(value, str):
         return redact_urls(value)
@@ -374,7 +379,9 @@ def _redact_value(value):
         return tuple(_redact_value(v) for v in value)
     if isinstance(value, list):
         return [_redact_value(v) for v in value]
-    if isinstance(value, dict):
+    if isinstance(value, (set, frozenset)):
+        return type(value)(_redact_value(v) for v in value)
+    if isinstance(value, Mapping):
         return {k: _redact_value(v) for k, v in value.items()}
     return value
 
@@ -387,8 +394,9 @@ def _redact_in_place(error: Exception) -> None:
     repeat the RPC URL with its API key. The exception keeps its type and
     identity, so callers that catch the web3 class still catch it. Its
     ``args`` (what str() shows) and its ``message``, ``data`` and
-    ``user_message`` attributes and a Web3RPCError's ``rpc_response`` (the
-    JSON-RPC answer) are redacted; other attributes, such as
+    ``user_message`` attributes, a Web3RPCError's ``rpc_response`` (the
+    JSON-RPC answer) and the exception's ``__notes__`` (add_note) are
+    redacted; other attributes, such as
     OffchainLookup's ``payload``, are kept.
 
     redact_urls also cuts every registered URL secret out of the text. If a
@@ -400,7 +408,7 @@ def _redact_in_place(error: Exception) -> None:
         error.args = _redact_value(error.args)
     except Exception:  # an exception type that does not allow it
         pass
-    for name in ("message", "data", "user_message", "rpc_response"):
+    for name in ("message", "data", "user_message", "rpc_response", "__notes__"):
         if name in getattr(error, "__dict__", {}):
             try:
                 setattr(error, name, _redact_value(getattr(error, name)))

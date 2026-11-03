@@ -365,7 +365,7 @@ The nonce of a write comes from the RPC in use. After a fallback, that RPC may n
 
 The transaction may have been sent, and the CLI does not know whether it was mined. The transaction may still be mined. This happens when:
 
-- the connection to the RPC fails after the transaction was sent;
+- the connection to the RPC fails while or after the transaction is sent;
 - the RPC answers the send with "already known", "Known transaction" or "nonce too low". A node gives these answers when it already has the transaction or a transaction with its nonce is mined, for example when a proxy sent the same request twice;
 - after the send, the RPC answers the receipt lookup with a JSON-RPC error, such as a rate limit (-32005), or the wait for the receipt fails in another way. This also applies to `chain wait`.
 

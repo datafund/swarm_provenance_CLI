@@ -2605,11 +2605,14 @@ def _handle_not_recorded(
         else:
             within = "in time"
         if waiting:
+            # chain wait was only given the hash
+            sent = "may have been sent"
             advice = "It may still be mined. Running chain wait again is safe: it sends nothing."
         else:
+            sent = "was sent"
             advice = "It may still be mined: do not run the write again."
         typer.secho(
-            prefix + f"Not confirmed yet. The transaction was sent, but no receipt "
+            prefix + f"Not confirmed yet. The transaction {sent}, but no receipt "
             f"arrived {within}. " + advice,
             fg=typer.colors.RED, err=True,
         )
