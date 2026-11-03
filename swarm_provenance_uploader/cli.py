@@ -2636,8 +2636,8 @@ def _handle_not_recorded(
                 "<data hash> before you try again."
             )
         typer.secho(
-            prefix + "Outcome unknown. The transaction was sent, but it is not known "
-            "whether it was mined. " + check,
+            prefix + "Outcome unknown. The transaction may have been sent, and it is "
+            "not known whether it was mined. " + check,
             fg=typer.colors.RED, err=True,
         )
         command = _wait_command(e)
@@ -3204,7 +3204,8 @@ def chain_wait(
     the write prints. It sends nothing and needs no wallet key.
 
     Exit codes: 0 confirmed; 1 reverted, not recorded, replaced or not
-    found; 3 still pending, or no RPC could be reached.
+    found; 3 still pending, outcome unknown (the RPC answered the receipt
+    lookup with an error), or no RPC could be reached.
     """
     if count is not None and event is None:
         raise typer.BadParameter("--count needs --event", param_hint="--count")

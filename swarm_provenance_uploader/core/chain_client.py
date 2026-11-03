@@ -12,6 +12,7 @@ import ast
 import functools
 import json
 import logging
+import re
 from typing import List, Optional
 
 from ..chain.contract import DataStatus
@@ -118,8 +119,11 @@ def _is_transaction_not_found(error: Exception) -> bool:
 # What nodes answer to a send of a transaction they already have, or whose
 # nonce is used (#229): geth, Nethermind, Erigon and reth "already known"
 # and "nonce too low" (reth adds the nonces), Besu "Known transaction" and
-# "Nonce too low". Compared in lower case with the node's message.
-_DUPLICATE_SEND_TEXTS = ("already known", "known transaction", "nonce too low")
+# "Nonce too low". Matched as words, ignoring case, in the node's message:
+# "known transaction" must not match inside "unknown transaction type".
+_DUPLICATE_SEND_TEXT = re.compile(
+    r"(?<![a-z])(already known|known transaction|nonce too low)(?![a-z])", re.IGNORECASE
+)
 
 
 def _is_duplicate_send(error: Exception) -> bool:
@@ -132,8 +136,7 @@ def _is_duplicate_send(error: Exception) -> bool:
     """
     if not _is_rpc_rejection(error):
         return False
-    reason = _error_reason(error).lower()
-    return any(text in reason for text in _DUPLICATE_SEND_TEXTS)
+    return _DUPLICATE_SEND_TEXT.search(_error_reason(error)) is not None
 
 
 # How long a write waits for its receipt, in seconds (also the chain wait default)
@@ -378,7 +381,8 @@ def _redact_in_place(error: Exception) -> None:
     repeat the RPC URL with its API key. The exception keeps its type and
     identity, so callers that catch the web3 class still catch it. Its
     ``args`` (what str() shows) and its ``message``, ``data`` and
-    ``user_message`` attributes are redacted; other attributes, such as
+    ``user_message`` attributes and a Web3RPCError's ``rpc_response`` (the
+    JSON-RPC answer) are redacted; other attributes, such as
     OffchainLookup's ``payload``, are kept.
 
     redact_urls also cuts every registered URL secret out of the text. If a
@@ -390,7 +394,7 @@ def _redact_in_place(error: Exception) -> None:
         error.args = _redact_value(error.args)
     except Exception:  # an exception type that does not allow it
         pass
-    for name in ("message", "data", "user_message"):
+    for name in ("message", "data", "user_message", "rpc_response"):
         if name in getattr(error, "__dict__", {}):
             try:
                 setattr(error, name, _redact_value(getattr(error, name)))
@@ -818,7 +822,13 @@ class ChainClient:
             # Detect "insufficient funds" in RPC error messages and convert.
             # A contract revert is checked first, as in _build_tx: its reason
             # may contain the words without being a funding problem.
-            if not _is_contract_revert(e) and "insufficient funds" in reason.lower():
+            # Only before the send returned the hash: after it, the
+            # transaction was sent, whatever the error says
+            if (
+                tx_hash is None
+                and not _is_contract_revert(e)
+                and "insufficient funds" in reason.lower()
+            ):
                 try:
                     balance_wei = self._wallet.get_balance(self._provider.web3)
                     raise InsufficientFundsError(
@@ -841,10 +851,17 @@ class ChainClient:
                 tx_hash_str = _signed_tx_hash(raw_tx)
             # Transport only: connection, timeout, or an answer that is not
             # JSON-RPC. A JSON-RPC error answer means the node answered. A
-            # receipt-wait timeout keeps its own handling.
-            transport = (
-                _is_rpc_failure(e) and not _is_rpc_rejection(e) and not _is_receipt_timeout(e)
-            )
+            # receipt-wait timeout keeps its own handling. After the hash
+            # returned, a ChainConnectionError counts too (_is_transport_failure):
+            # the receipt wait raises it unchanged when no RPC is left. Before,
+            # the old test is kept, so a ChainConnectionError there is
+            # reported as before.
+            if tx_hash is not None:
+                transport = _is_transport_failure(e)
+            else:
+                transport = (
+                    _is_rpc_failure(e) and not _is_rpc_rejection(e) and not _is_receipt_timeout(e)
+                )
             if transport and not send_called:
                 raise ChainConnectionError(
                     f"The RPC endpoint failed before the transaction was sent: {reason}",

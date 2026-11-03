@@ -307,7 +307,7 @@ swarm-prov-upload chain set-storage-ref <data_hash> <storage_ref>
 # Look up data hash by storage reference
 swarm-prov-upload chain lookup <storage_ref>
 
-# Wait for a sent transaction, after a write reported "Not confirmed yet" (exit 3)
+# Wait for a sent transaction, after a write reported "Not confirmed yet" or "Outcome unknown" (exit 3)
 swarm-prov-upload chain wait <tx_hash> --event DataRegistered
 swarm-prov-upload chain wait <tx_hash> --timeout 300 --json
 

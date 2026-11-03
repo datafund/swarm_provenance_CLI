@@ -218,7 +218,7 @@ class TransactionNotVerifiedError(TransactionUnconfirmedError):
 
 
 class TransactionOutcomeUnknownError(TransactionUnconfirmedError):
-    """The transaction was sent, but it is not known whether it was mined.
+    """The transaction may have been sent, and it is not known whether it was mined.
 
     Raised when the connection to the RPC fails after the transaction was
     sent (#181), when the RPC answers the send with "already known" or

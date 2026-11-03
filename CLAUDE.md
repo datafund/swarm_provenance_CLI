@@ -194,7 +194,7 @@ swarm-prov-upload chain merge <h1> <h2> [<h3>...] <new> --description "..."  # N
 swarm-prov-upload chain merge <h1> <h2> <new> --type "dataset"               # Merge with custom data type
 swarm-prov-upload chain set-storage-ref <data_hash> <storage_ref>            # Set/update storage reference for anchored hash
 swarm-prov-upload chain lookup <storage_ref>                                 # Look up data hash by storage reference
-swarm-prov-upload chain wait <tx_hash> --event DataRegistered [--count N]    # Resume a receipt wait (no wallet key; exit 3 if still pending)
+swarm-prov-upload chain wait <tx_hash> --event DataRegistered [--count N]    # Resume a receipt wait (no wallet key; exit 3 if still pending or outcome unknown)
 
 # Collection/manifest upload (directory as Swarm manifest, gateway only)
 swarm-prov-upload upload-collection /path/to/directory                       # Upload directory
