@@ -231,42 +231,62 @@ class TestUrlAfterWordCharacter:
         assert out.endswith(f"https://base-sepolia.g.alchemy.com/{PLACEHOLDER}")
 
 
+def _assert_linear_time(func, build, size, factor=10, max_ratio=20, attempts=3):
+    """Fail if func(build(size)) takes max_ratio times longer than func(build(size // factor)).
+
+    A linear scan takes about factor times longer on the larger input, and a
+    quadratic one about factor ** 2 times longer. A ratio, not a fixed time
+    limit, stays the same on a slow machine (#238). A ratio above the limit
+    is measured again, up to attempts times, so that one pause of the
+    machine does not fail the test.
+    """
+    import time
+
+    def timed(text):
+        start = time.perf_counter()
+        func(text)
+        return time.perf_counter() - start
+
+    small, large = build(size // factor), build(size)
+    ratios = []
+    for _ in range(attempts):
+        small_time, large_time = timed(small), timed(large)
+        ratio = large_time / max(small_time, 1e-6)
+        if ratio < max_ratio:
+            return
+        ratios.append(f"{ratio:.1f} ({small_time:.3f} s, {large_time:.3f} s)")
+    pytest.fail(f"{factor}x the input took more than {max_ratio}x the time: {', '.join(ratios)}")
+
+
 class TestRedactUrlsSpeed:
     def test_long_run_of_trailing_punctuation(self):
         """Trailing punctuation is stripped in linear time: a quadratic loop took 24 s here."""
-        import time
-
         text = f"failed {PATH_KEY_URL}" + ")" * 1_000_000
-        start = time.perf_counter()
         out = redact_urls(text)
-        elapsed = time.perf_counter() - start
         assert KEY not in out
         assert out.endswith(")" * 1_000_000)
-        assert elapsed < 1.0, f"took {elapsed:.2f} s"
-
+        _assert_linear_time(redact_urls, lambda n: f"failed {PATH_KEY_URL}" + ")" * n, 1_000_000)
 
     @pytest.mark.parametrize(
-        "text",
+        "build, size",
         [
-            "a." * 100_000,
-            "Could not decode '<html><body>" + "a-" * 50_000 + "</body></html>'",
-            "a" * 1_000_000,
+            (lambda n: "a." * n, 100_000),
+            (lambda n: "Could not decode '<html><body>" + "a-" * n + "</body></html>'", 50_000),
+            (lambda n: "a" * n, 1_000_000),
         ],
         ids=["dotted-run", "hyphenated-html-body", "letter-run"],
     )
-    def test_long_run_of_scheme_characters(self, text):
+    def test_long_run_of_scheme_characters(self, build, size):
         """A long run of letters joined by dots or hyphens is scanned in linear time.
 
         An unbounded scheme pattern took about 58 s on "a." * 100000.
         """
-        import time
-
-        start = time.perf_counter()
+        text = build(size)
         out = redact_urls(text + f" {PATH_KEY_URL}")
-        elapsed = time.perf_counter() - start
         assert out.startswith(text)
         assert KEY not in out
-        assert elapsed < 1.0, f"took {elapsed:.2f} s"
+        _assert_linear_time(redact_urls, lambda n: build(n) + f" {PATH_KEY_URL}", size)
+
 
 class TestRedactUrlNonString:
     def test_non_string_value_is_converted(self):
