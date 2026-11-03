@@ -407,12 +407,24 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
             typer.echo(f"  {check}", err=True)
             if check_note:
                 typer.echo(check_note, err=True)
-            typer.echo("If it did not work, contact the operator with the transaction above. "
-                       "Re-running pays again.", err=True)
         else:
-            typer.echo(f"The {missing} was not received, so the result cannot be looked up "
-                       "here. Contact the gateway operator with the transaction above for it. "
-                       "Re-running pays again.", err=True)
+            typer.echo(f"The {missing} was not received.", err=True)
+        if e.idempotency_key:
+            # swarm_connect answers it from the stored 2xx result for 24 h and
+            # does not settle the new authorization.
+            typer.echo("A gateway that supports Idempotency-Key answers a re-run with the same key "
+                       "from the first request, without charging again:", err=True)
+            typer.echo(f"  {_rerun_with_key(e.idempotency_key)}", err=True)
+        if check:
+            typer.echo("If it did not work, contact the gateway operator with the transaction above.",
+                       err=True)
+        else:
+            typer.echo(f"Otherwise, contact the gateway operator with the transaction above for the "
+                       f"{missing}." if e.idempotency_key else
+                       f"Contact the gateway operator with the transaction above for the {missing}.",
+                       err=True)
+        typer.echo("A re-run without the key pays again." if e.idempotency_key
+                   else "Re-running pays again.", err=True)
     elif e.settled:
         typer.echo("Contact the gateway operator with the transaction above for the "
                    "result or a refund. Re-running pays again.", err=True)
@@ -1760,8 +1772,10 @@ def stamps_extend(
             final_note="The batch ID is the stamp ID you gave. Do not pay again.",
             final_stdout=["SUCCESS: Stamp extended.", f"Batch ID: {stamp_id}"],
             check=f"swarm-prov-upload stamps info {stamp_id}",
-            check_note=("Compare the Amount and TTL it shows with the values before the extension: "
-                        "the Amount grows by exactly the amount added per chunk, and the TTL gets longer."),
+            # The CLI knows the amount added only when --amount was given
+            check_note=("The extension worked if the Amount it shows is higher"
+                        + (f" by {amount}" if amount is not None else "")
+                        + " and the TTL is longer than before the extension."),
         )
     except typer.Exit:
         raise  # already reported, e.g. an invalid auto-pay limit (#152)
