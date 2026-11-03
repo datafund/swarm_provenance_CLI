@@ -2218,6 +2218,16 @@ class TestPaidRequestOutcomeReviewCases:
         assert exc_info.value.label_prefix == prefix
         assert exc_info.value.depth == depth
 
+    def test_unreadable_purchase_with_label_gives_its_prefix(self, paying_client, requests_mock):
+        """A library call of purchase_stamp(label=...) gets "<label>-" (swarm_connect stamps.py:813-814)."""
+        from swarm_provenance_uploader.exceptions import PaymentResultUnreadableError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "text": "<html>"}])
+        with pytest.raises(PaymentResultUnreadableError) as exc_info:
+            paying_client.purchase_stamp(label="mine")
+        assert exc_info.value.label_prefix == "mine-"
+        assert exc_info.value.depth is None
+
     def test_unreadable_pool_acquire_has_no_label(self, paying_client, requests_mock):
         from swarm_provenance_uploader.exceptions import PaymentResultUnreadableError
 

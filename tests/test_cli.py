@@ -9208,7 +9208,8 @@ class TestPaidResultUnreadableCli:
         self._assert_common(result)
         assert ("A gateway that supports Idempotency-Key answers a re-run with the same key from the "
                 "first request, without charging again. It returns the first answer, which includes the "
-                "result if a proxy or the connection lost it:") in result.output
+                "result if a proxy or the connection lost it; if the gateway's own answer lacked it, the "
+                "replay lacks it too:") in result.output
         assert "--idempotency-key key-216" in result.output
 
     @pytest.mark.parametrize("what", ["upload", "purchase"])
@@ -9236,17 +9237,22 @@ class TestPaidResultUnreadableCli:
         assert "Stamp label:     paid-<suffix>" in result.output
         assert "Depth:           20" in result.output
         # The CLI never sends a label, so the prefix cannot single out the new stamp
-        assert ("Every paid stamp's label starts with paid-, so the new one is most likely the newest: "
-                "Utilization 0%, a TTL close to the requested duration, and depth 20.") in result.output
+        assert ("Stamps the CLI buys have a label that starts with paid- (stamps from the pool start "
+                "with pool-). The new one has utilization 0% and a TTL close to the requested duration "
+                "(the gateway's default when no duration was given), and depth 20.") in result.output
+        assert "newest" not in result.output
         assert "look for the stamp whose label starts with" not in result.output
+        assert ("It may show Usable: No, or not be listed yet, for a few minutes after the purchase."
+                in result.output)
 
     def test_stamp_purchase_without_depth_names_no_depth(self, mocker):
         err = self._error()
         err.label_prefix = "paid-"
         self._client(mocker, purchase_stamp=err)
         result = self._upload()
-        assert ("Every paid stamp's label starts with paid-, so the new one is most likely the newest: "
-                "Utilization 0% and a TTL close to the requested duration.") in result.output
+        assert ("The new one has utilization 0% and a TTL close to the requested duration "
+                "(the gateway's default when no duration was given).") in result.output
+        assert "depth" not in result.output.split("The new one has")[1].split("\n")[0]
 
     def test_library_label_prefix_is_looked_for(self, mocker):
         """Only a library call of purchase_stamp(label=...) gives a prefix of its own."""
@@ -9262,6 +9268,13 @@ class TestPaidResultUnreadableCli:
         self._assert_common(result)
         assert "Stamp label" not in result.output
         assert "label starts with" not in result.output
+        assert ("It may show Usable: No, or not be listed yet, for a few minutes after the purchase."
+                in result.output)
+
+    def test_upload_has_no_purchase_timing_note(self, mocker):
+        self._client(mocker, upload_data=self._error())
+        result = self._upload()
+        assert "Usable: No" not in result.output
 
     def test_other_settled_report_unchanged(self, mocker):
         err = exceptions.PaymentSettledNotDeliveredError("Collected, failed.", **self.PAYMENT)
