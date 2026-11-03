@@ -5612,3 +5612,106 @@ class TestWriteChainIdCheckFallsBack:
         assert client._provider._chain_id_confirmed is True
         web3.eth.send_raw_transaction.assert_called_once()
         mock_chain_deps["account"].sign_transaction.assert_called_once()
+
+
+class TestBlockNumberRejectionDoesNotFallBack:
+    """A JSON-RPC error answer to eth_blockNumber is a rejection, not a connection failure (#168 review 5)."""
+
+    def test_provider_get_block_number(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        _inject_real_exceptions(real_web3_exceptions)
+        web3 = mock_chain_deps["web3_instance"]
+        provider = ChainProvider(chain="base-sepolia")
+        provider._try_fallback = MagicMock(side_effect=[True, False])
+        rejection = real_web3_exceptions.Web3RPCError("limit exceeded")
+        type(web3.eth).block_number = PropertyMock(side_effect=rejection)
+        try:
+            with pytest.raises(real_web3_exceptions.Web3RPCError):
+                provider.get_block_number()
+        finally:
+            del type(web3.eth).block_number
+        provider._try_fallback.assert_not_called()
+
+    def test_provider_get_block_number_transport_failure_still_falls_back(
+        self, real_web3_exceptions, mock_chain_deps
+    ):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        _inject_real_exceptions(real_web3_exceptions)
+        web3 = mock_chain_deps["web3_instance"]
+        provider = ChainProvider(chain="base-sepolia")
+        provider._try_fallback = MagicMock(side_effect=[True, False])
+        type(web3.eth).block_number = PropertyMock(side_effect=[
+            real_web3_exceptions.ProviderConnectionError("down"), 123,
+        ])
+        try:
+            assert provider.get_block_number() == 123
+        finally:
+            del type(web3.eth).block_number
+        provider._try_fallback.assert_called_once()
+
+    def test_client_health_check_real_web3(self, failing_rpc_server, no_web3_retry_sleep):
+        """Real web3: the primary answers eth_blockNumber with a JSON-RPC error; the fallback gets no request."""
+        pytest.importorskip("web3")
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        failing_rpc_server.mode = "jsonrpc"
+        node = {"web3_clientVersion": "stub/1.0", "eth_chainId": BASE_SEPOLIA_CHAIN_ID_HEX}
+        failing_rpc_server.path_answers = {
+            "/p": dict(node),
+            "/f": {**node, "eth_blockNumber": "0x10"},
+        }
+        base = f"http://127.0.0.1:{failing_rpc_server.server_port}"
+        client = ChainClient(
+            chain="base-sepolia", rpc_url=f"{base}/p", rpc_fallbacks=[f"{base}/f"], require_wallet=False
+        )
+
+        with pytest.raises(ChainConfigurationError) as exc_info:
+            client.health_check()
+
+        assert not isinstance(exc_info.value, ChainConnectionError)
+        assert client._provider.rpc_url == f"{base}/p"
+        assert "/f" not in [path for path, _ in failing_rpc_server.requests]
+
+
+class TestSkippedFallbackIsNotProbedAgain:
+    """A fallback skipped once in a call is not probed again by a later step (#168 review 5)."""
+
+    @pytest.mark.parametrize("middle", ["dead", "wrong_chain"])
+    def test_later_step_does_not_probe_the_skipped_fallback(self, mock_chain_deps, middle):
+        import requests
+        from swarm_provenance_uploader.chain.provider import CHAIN_PRESETS
+
+        primary = CHAIN_PRESETS["base-sepolia"]["rpc_url"]
+        fallback1, fallback2 = CHAIN_PRESETS["base-sepolia"]["rpc_fallbacks"]
+        shared = mock_chain_deps["web3_instance"]
+
+        def candidate(connected, chain_id):
+            node = MagicMock()
+            node.is_connected.return_value = connected
+            node.eth.chain_id = chain_id
+            return node
+
+        candidates = {
+            fallback1: candidate(False, 84532) if middle == "dead" else candidate(True, 8453),
+            fallback2: candidate(True, 84532),
+        }
+        probes = []
+        web3_class = mock_chain_deps["web3_class"]
+        web3_class.HTTPProvider.side_effect = lambda url, **kw: probes.append(url) or url
+        # The client's own Web3 object is the shared mock; probes get their own node
+        web3_class.side_effect = lambda url: shared if url == primary else candidates[url]
+
+        client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
+        probes.clear()
+        # Step 1 (contract code check) fails on the primary: switch past fallback1 to fallback2
+        shared.eth.get_code.side_effect = [requests.exceptions.ConnectionError("down"), DUMMY_CODE]
+        # Step 2 (nonce) fails on fallback2: no endpoint is left
+        shared.eth.get_transaction_count.side_effect = requests.exceptions.ConnectionError("down")
+
+        with pytest.raises(ChainConnectionError):
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert probes == [fallback1, fallback2]
+        shared.eth.send_raw_transaction.assert_not_called()
