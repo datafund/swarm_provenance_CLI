@@ -45,7 +45,7 @@ from ..models import (
     TransformResult,
     TransactionWaitResult,
 )
-from ..chain.exceptions import redact_exception_chain, replaced_check_advice
+from ..chain.exceptions import _redacted_copy, redact_exception_chain, replaced_check_advice
 
 logger = logging.getLogger(__name__)
 
@@ -361,9 +361,15 @@ def _read_error(error: Exception, rpc_url: Optional[str]) -> Optional[ChainError
 
 
 def _redact_value(value):
-    """value with URLs and registered URL secrets redacted in its strings (#234)."""
+    """value with URLs and registered URL secrets redacted in its strings (#234).
+
+    An exception inside value (for example in the args of another exception)
+    becomes a RedactedException copy with its redacted text.
+    """
     if isinstance(value, str):
         return redact_urls(value)
+    if isinstance(value, BaseException):
+        return _redacted_copy(value)
     if isinstance(value, tuple):
         return tuple(_redact_value(v) for v in value)
     if isinstance(value, list):
@@ -876,11 +882,18 @@ class ChainClient:
                     f"answer when it already has the transaction or its nonce is used, "
                     f"so the transaction may have been sent and its outcome is unknown"
                 )
+            elif transport and send_called and tx_hash is None:
+                # send_raw_transaction itself failed: the request may or may
+                # not have reached the node
+                message = (
+                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} may "
+                    f"have been sent, but the connection to the RPC failed while it was "
+                    f"being sent, so its outcome is unknown: {reason}"
+                )
             elif transport and send_called:
                 message = (
-                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} was "
-                    f"sent, but the connection to the RPC failed, so its outcome is "
-                    f"unknown: {reason}"
+                    f"Outcome unknown: transaction {tx_hash_str} was sent, but the "
+                    f"connection to the RPC failed, so its outcome is unknown: {reason}"
                 )
             elif tx_hash is not None and not _is_contract_revert(e):
                 # The send returned the hash, so the transaction was sent
@@ -952,6 +965,9 @@ class ChainClient:
         """
         web3 = self._provider.web3
         waits = [0]
+        # A write knows that it sent the transaction; wait_for_transaction
+        # (no sender) only has a hash that the caller gave it
+        sent = "was sent" if sender is not None else "may have been sent"
 
         def wait_for_receipt():
             waits[0] += 1
@@ -973,9 +989,9 @@ class ChainClient:
                 # way. The transaction was sent: do not report it as
                 # failed (#228)
                 raise TransactionOutcomeUnknownError(
-                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} was "
-                    f"sent, but the RPC failed while waiting for its receipt, so its "
-                    f"outcome is unknown: {reason}",
+                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} {sent}, "
+                    f"but the RPC failed while waiting for its receipt, so its outcome "
+                    f"is unknown: {reason}",
                     tx_hash=tx_hash_str,
                     event_name=expected_event,
                     expected_count=expected_count,
@@ -988,8 +1004,8 @@ class ChainClient:
                 # return a receipt in time. The transaction was sent and may
                 # be mined: do not report it as failed (#168 review)
                 raise TransactionOutcomeUnknownError(
-                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} was "
-                    f"sent, but the RPC failed while waiting for its receipt, and the "
+                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} {sent}, "
+                    f"but the RPC failed while waiting for its receipt, and the "
                     f"fallback RPC did not return the receipt in time, so its outcome "
                     f"is unknown: {reason}",
                     tx_hash=tx_hash_str,

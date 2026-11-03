@@ -369,6 +369,8 @@ The transaction may have been sent, and the CLI does not know whether it was min
 - the RPC answers the send with "already known", "Known transaction" or "nonce too low". A node gives these answers when it already has the transaction or a transaction with its nonce is mined, for example when a proxy sent the same request twice;
 - after the send, the RPC answers the receipt lookup with a JSON-RPC error, such as a rate limit (-32005), or the wait for the receipt fails in another way. This also applies to `chain wait`.
 
+After "nonce too low", the transaction was often not sent: the CLI does not repeat the send, so this answer usually means that another transaction from the same wallet used the nonce first. `chain wait` then waits for the full timeout and reports the transaction as not found (`not_found`, exit 1).
+
 The "Reason" line shows the RPC's answer or the connection error. The CLI prints the transaction hash, the explorer link and the `chain wait` command that resumes the wait (with `--json`, `{"error": "outcome_unknown", "tx_hash": ..., "wait_command": ...}`) and exits 3. Running that `chain wait` command is safe: it sends nothing. Look up the transaction in the explorer, or read the record back with `chain get <data hash>` (the Swarm hash you wrote, not the transaction hash), before you run the command again: running it again can send the write twice and pay gas twice.
 
 If the connection fails before the transaction is sent, the CLI prints "Cannot connect to chain" instead. Nothing was sent in that case.
