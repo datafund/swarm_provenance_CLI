@@ -2359,6 +2359,76 @@ PRICING_FAILED_503 = _gateway_503({
 })
 
 
+def _gateway_5xx(status, detail):
+    """A swarm_connect error with a plain-string detail, in the #381 envelope."""
+    return {"status_code": status, "json": {"detail": detail, "code": f"HTTP_{status}", "message": detail}}
+
+
+# swarm_connect raises these generic answers both before and after settle_payment()
+# (stamps.py and data.py exception handlers). On 00ca70c the middleware marks the
+# settled ones with X-Payment-Status: settled_not_delivered, but nothing on the
+# answer says the marking is in place, so a header-less one stays possibly charged.
+GENERIC_5XX = [
+    ("purchase", _gateway_5xx(502, "Could not purchase stamp. The Bee node may be unavailable.")),
+    ("purchase", _gateway_5xx(500, "Invalid response from Swarm API. Please try again.")),
+    ("purchase", _gateway_5xx(500, "An unexpected error occurred while purchasing the stamp.")),
+    ("extend", _gateway_5xx(502, "Could not extend stamp. The Bee node may be unavailable.")),
+    ("extend", _gateway_5xx(500, "Invalid response from Swarm API. Please try again.")),
+    ("extend", _gateway_5xx(500, "An unexpected error occurred while extending the stamp.")),
+    ("upload", _gateway_5xx(502, "Failed to upload data to Swarm. The Bee node may be unavailable.")),
+    ("upload", _gateway_5xx(500, "Internal server error during upload")),
+]
+GENERIC_5XX_IDS = ["purchase-502", "purchase-500-invalid", "purchase-500-unexpected", "extend-502",
+                   "extend-500-invalid", "extend-500-unexpected", "upload-502", "upload-500"]
+
+
+class TestGenericGateway5xxStaysPossiblyCharged:
+    """Generic 5xx texts are sent before and after settlement: only the header tells them apart."""
+
+    def _run(self, mock_x402, requests_mock, call, answer):
+        sent = []
+        if call == "purchase":
+            requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, answer])
+        elif call == "extend":
+            requests_mock.patch(f"{GW}/api/v1/stamps/{DUMMY_STAMP}/extend", [PAYMENT_REQUIRED, answer])
+        else:
+            requests_mock.post(f"{GW}/api/v1/data/", [PAYMENT_REQUIRED, answer])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_on_payment_sent=sent.append)
+        try:
+            with pytest.raises(Exception) as exc_info:
+                if call == "purchase":
+                    client.purchase_stamp()
+                elif call == "extend":
+                    client.extend_stamp(DUMMY_STAMP, duration_hours=48)
+                else:
+                    client.upload_data(b"x", DUMMY_STAMP)
+        finally:
+            patcher.stop()
+        return exc_info.value, sent
+
+    @pytest.mark.parametrize("call,answer", GENERIC_5XX, ids=GENERIC_5XX_IDS)
+    def test_without_header_is_outcome_unknown_and_counted(self, mock_x402, requests_mock, call, answer):
+        from swarm_provenance_uploader.exceptions import (
+            PaymentOutcomeUnknownError, PaymentSettledNotDeliveredError)
+
+        err, sent = self._run(mock_x402, requests_mock, call, answer)
+        assert isinstance(err, PaymentOutcomeUnknownError)
+        assert not isinstance(err, PaymentSettledNotDeliveredError)
+        assert "may have been taken" in str(err)
+        assert len(sent) == 1
+
+    @pytest.mark.parametrize("call,answer", GENERIC_5XX, ids=GENERIC_5XX_IDS)
+    def test_with_settled_header_is_settled_and_counted(self, mock_x402, requests_mock, call, answer):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        answer = dict(answer, headers={"X-Payment-Status": "settled_not_delivered",
+                                       "X-Payment-Transaction": TX_HASH})
+        err, sent = self._run(mock_x402, requests_mock, call, answer)
+        assert isinstance(err, PaymentSettledNotDeliveredError)
+        assert err.transaction == TX_HASH
+        assert len(sent) == 1
+
+
 class TestNotChargedBeforeSettlement:
     """5xx answers that swarm_connect raises before settle_payment are not reported as possibly charged (#213)."""
 
