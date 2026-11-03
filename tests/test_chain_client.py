@@ -4351,18 +4351,21 @@ class TestSendTransactionTransportFailures:
         assert exc_info.value.tx_hash is None
         web3.eth.send_raw_transaction.assert_not_called()
 
-    def test_receipt_timeout_unchanged(self, mock_chain_deps):
-        """A receipt-wait timeout is left to #167: still a ChainTransactionError with the hash."""
-        from swarm_provenance_uploader.exceptions import TransactionUnconfirmedError
+    def test_receipt_timeout_is_not_a_failure(self, mock_chain_deps):
+        """A receipt-wait timeout is ReceiptTimeoutError with the hash, not a failed transaction (#167)."""
+        from swarm_provenance_uploader.exceptions import (
+            ReceiptTimeoutError,
+            TransactionOutcomeUnknownError,
+        )
 
         web3 = mock_chain_deps["web3_instance"]
         client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
         web3.eth.wait_for_transaction_receipt.side_effect = TimeExhausted("not in chain after 120 s")
 
-        with pytest.raises(ChainTransactionError) as exc_info:
+        with pytest.raises(ReceiptTimeoutError) as exc_info:
             client.set_status(swarm_hash=DUMMY_HASH, status=1)
 
-        assert not isinstance(exc_info.value, TransactionUnconfirmedError)
+        assert isinstance(exc_info.value, TransactionOutcomeUnknownError)
         assert not isinstance(exc_info.value, ChainConnectionError)
         assert exc_info.value.tx_hash == DUMMY_TX_HASH_BYTES.hex()
 
@@ -4425,6 +4428,10 @@ def _send_client(failing_call, error):
     client._provider.get_explorer_tx_url = lambda h: "https://explorer.example.org/tx/" + h
     client._wallet.sign_transaction.return_value = SEND_RAW
     client._contract.address = DUMMY_CONTRACT
+    # The real receipt helpers, which _send_transaction calls on self (#167)
+    from swarm_provenance_uploader.core.chain_client import ChainClient
+    for name in ("_await_receipt", "_receipt_after_timeout", "_check_receipt"):
+        setattr(client, name, getattr(ChainClient, name).__get__(client))
     return client, web3
 
 
@@ -4456,10 +4463,9 @@ TRANSPORT_ERRORS = ["ProviderConnectionError", "BadResponseFormat", "RequestTime
 
 
 @pytest.mark.parametrize("failing_call", AFTER_SEND_CALLS)
-@pytest.mark.parametrize("name", ["Web3RPCError", "TimeExhausted"])
-def test_send_rejection_and_receipt_timeout_with_web3_classes(failing_call, name):
-    """A JSON-RPC rejection and a receipt-wait timeout stay ChainTransactionError, with the hash."""
-    error = _web3_error(name)
+def test_send_rejection_with_web3_classes(failing_call):
+    """A JSON-RPC rejection stays ChainTransactionError, with the hash."""
+    error = _web3_error("Web3RPCError")
     client, web3 = _send_client(failing_call, error)
 
     with pytest.raises(ChainTransactionError) as exc_info:
@@ -4468,6 +4474,35 @@ def test_send_rejection_and_receipt_timeout_with_web3_classes(failing_call, name
     assert type(exc_info.value) is ChainTransactionError
     assert exc_info.value.tx_hash == _expected_hash(failing_call)
     web3.eth.send_raw_transaction.assert_called_once()
+
+
+def test_send_receipt_timeout_with_web3_classes():
+    """The real web3 TimeExhausted from the receipt wait is ReceiptTimeoutError, with the hash (#167)."""
+    from swarm_provenance_uploader.exceptions import ReceiptTimeoutError
+
+    error = _web3_error("TimeExhausted")
+    client, web3 = _send_client("wait_for_transaction_receipt", error)
+
+    with pytest.raises(ReceiptTimeoutError) as exc_info:
+        _send(client)
+
+    assert exc_info.value.tx_hash == _expected_hash("wait_for_transaction_receipt")
+    assert exc_info.value.explorer_url.endswith(exc_info.value.tx_hash)
+    web3.eth.send_raw_transaction.assert_called_once()
+
+
+def test_send_timeout_exhausted_from_send_is_not_receipt_timeout():
+    """TimeExhausted is classified only in the receipt wait: from the send it stays ChainTransactionError."""
+    from swarm_provenance_uploader.exceptions import TransactionUnconfirmedError
+
+    error = _web3_error("TimeExhausted")
+    client, web3 = _send_client("send_raw_transaction", error)
+
+    with pytest.raises(ChainTransactionError) as exc_info:
+        _send(client)
+
+    assert not isinstance(exc_info.value, TransactionUnconfirmedError)
+    assert exc_info.value.tx_hash == _expected_hash("send_raw_transaction")
 
 
 @pytest.mark.parametrize("name", TRANSPORT_ERRORS)
@@ -5079,19 +5114,24 @@ class TestReceiptWaitTimeoutAfterSwitch:
         assert "Outcome unknown" in str(exc_info.value)
         web3.eth.send_raw_transaction.assert_called_once()
         client._provider._try_fallback.assert_called_once()
+        # #167 keeps this case as outcome unknown, without the nonce check
+        from swarm_provenance_uploader.chain.exceptions import ReceiptTimeoutError
+        assert not isinstance(exc_info.value, ReceiptTimeoutError)
+        assert not any(c.args[1:] == ("latest",) for c in web3.eth.get_transaction_count.call_args_list)
 
-    def test_timeout_without_switch_is_unchanged(self, mock_chain_deps):
+    def test_timeout_without_switch_is_receipt_timeout(self, mock_chain_deps):
+        """Without a switch, a timeout is ReceiptTimeoutError, with the nonce check (#167)."""
         web3_exceptions = pytest.importorskip("web3.exceptions")
-        from swarm_provenance_uploader.chain.exceptions import TransactionOutcomeUnknownError
+        from swarm_provenance_uploader.chain.exceptions import ReceiptTimeoutError
 
         web3 = mock_chain_deps["web3_instance"]
         client = _fallback_client(mock_chain_deps, [_log("DataStatusChanged")])
         web3.eth.wait_for_transaction_receipt.side_effect = web3_exceptions.TimeExhausted("timeout")
 
-        with pytest.raises(ChainTransactionError) as exc_info:
+        with pytest.raises(ReceiptTimeoutError):
             client.set_status(swarm_hash=DUMMY_HASH, status=1)
 
-        assert not isinstance(exc_info.value, TransactionOutcomeUnknownError)
+        client._provider._try_fallback.assert_not_called()
 
 
 class TestHealthCheckWrongChainDoesNotFallBack:
@@ -5715,3 +5755,390 @@ class TestSkippedFallbackIsNotProbedAgain:
 
         assert probes == [fallback1, fallback2]
         shared.eth.send_raw_transaction.assert_not_called()
+
+
+# Receipt timeouts, replaced transactions and chain wait (#167)
+
+
+def _timeout_client(mock_chain_deps, real_web3_exceptions, logs=(), mined_nonce=0):
+    """A write client whose receipt wait times out with the real TimeExhausted.
+
+    The pending nonce (the one the write uses) is 5; the mined nonce
+    ("latest") is mined_nonce, or the exception it is set to.
+    """
+    _inject_real_exceptions(real_web3_exceptions)
+    web3 = mock_chain_deps["web3_instance"]
+    client = _write_client(mock_chain_deps, list(logs))
+    web3.eth.wait_for_transaction_receipt.side_effect = real_web3_exceptions.TimeExhausted(
+        "Transaction is not in the chain after 120 seconds"
+    )
+
+    def transaction_count(address, block):
+        if block == "pending":
+            return 5
+        if isinstance(mined_nonce, Exception):
+            raise mined_nonce
+        return mined_nonce
+
+    web3.eth.get_transaction_count.side_effect = transaction_count
+    web3.eth.get_transaction_receipt.side_effect = real_web3_exceptions.TransactionNotFound("not found")
+    return client
+
+
+def _receipt(logs, status=1):
+    return {
+        "status": status,
+        "transactionHash": DUMMY_TX_HASH_BYTES,
+        "blockNumber": 12345679,
+        "gasUsed": 95_000,
+        "logs": list(logs),
+    }
+
+
+class TestReceiptTimeout:
+    """A receipt timeout is pending, replaced, or mined after all; never "failed" (#167)."""
+
+    def test_timeout_is_receipt_timeout_with_details(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import (
+            ReceiptTimeoutError,
+            TransactionOutcomeUnknownError,
+        )
+
+        client = _timeout_client(mock_chain_deps, real_web3_exceptions, [_log("DataStatusChanged")], mined_nonce=5)
+
+        with pytest.raises(ReceiptTimeoutError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        e = exc_info.value
+        assert isinstance(e, TransactionOutcomeUnknownError)
+        assert e.tx_hash == DUMMY_TX_HASH_BYTES.hex()
+        assert e.explorer_url == client._provider.get_explorer_tx_url(DUMMY_TX_HASH_BYTES.hex())
+        assert e.event_name == "DataStatusChanged"
+        assert e.expected_count == 1
+        assert e.timeout == 120
+        assert e.contract_address == DUMMY_CONTRACT
+        assert "Not confirmed yet" in str(e)
+        assert "failed" not in str(e).lower()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_called_once()
+
+    def test_nonce_check_uses_sender_and_latest(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import ReceiptTimeoutError
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _timeout_client(mock_chain_deps, real_web3_exceptions, [_log("DataStatusChanged")], mined_nonce=5)
+
+        with pytest.raises(ReceiptTimeoutError):
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        web3.eth.get_transaction_count.assert_any_call(DUMMY_ADDRESS, "latest")
+        # The nonce is not above the transaction's: no second receipt lookup
+        web3.eth.get_transaction_receipt.assert_not_called()
+
+    def test_replaced_when_nonce_used_and_no_receipt(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import (
+            TransactionOutcomeUnknownError,
+            TransactionReplacedError,
+            TransactionUnconfirmedError,
+        )
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _timeout_client(mock_chain_deps, real_web3_exceptions, [_log("DataStatusChanged")], mined_nonce=6)
+
+        with pytest.raises(TransactionReplacedError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        e = exc_info.value
+        assert isinstance(e, TransactionUnconfirmedError)
+        assert not isinstance(e, TransactionOutcomeUnknownError)
+        assert e.nonce == 5
+        assert e.tx_hash == DUMMY_TX_HASH_BYTES.hex()
+        assert e.event_name == "DataStatusChanged"
+        assert e.explorer_url
+        assert "Replaced" in str(e)
+        assert "chain get" in str(e)
+        web3.eth.get_transaction_receipt.assert_called_once_with(DUMMY_TX_HASH_BYTES)
+        web3.eth.send_raw_transaction.assert_called_once()
+
+    def test_replaced_when_second_lookup_returns_none(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import TransactionReplacedError
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _timeout_client(mock_chain_deps, real_web3_exceptions, [_log("DataStatusChanged")], mined_nonce=6)
+        web3.eth.get_transaction_receipt.side_effect = None
+        web3.eth.get_transaction_receipt.return_value = None
+
+        with pytest.raises(TransactionReplacedError):
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+    def test_mined_after_wait_continues_normal_path(self, real_web3_exceptions, mock_chain_deps):
+        web3 = mock_chain_deps["web3_instance"]
+        client = _timeout_client(mock_chain_deps, real_web3_exceptions, mined_nonce=6)
+        web3.eth.get_transaction_receipt.side_effect = None
+        web3.eth.get_transaction_receipt.return_value = _receipt([_log("DataStatusChanged")])
+
+        result = client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert result.block_number == 12345679
+        assert result.gas_used == 95_000
+
+    def test_mined_after_wait_reverted(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import TransactionUnconfirmedError
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _timeout_client(mock_chain_deps, real_web3_exceptions, mined_nonce=6)
+        web3.eth.get_transaction_receipt.side_effect = None
+        web3.eth.get_transaction_receipt.return_value = _receipt([], status=0)
+
+        with pytest.raises(ChainTransactionError, match="reverted") as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+        assert not isinstance(exc_info.value, TransactionUnconfirmedError)
+
+    def test_mined_after_wait_not_recorded(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import TransactionNotRecordedError
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _timeout_client(mock_chain_deps, real_web3_exceptions, mined_nonce=6)
+        web3.eth.get_transaction_receipt.side_effect = None
+        web3.eth.get_transaction_receipt.return_value = _receipt([])
+
+        with pytest.raises(TransactionNotRecordedError):
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+    def test_nonce_check_failure_stays_receipt_timeout(self, real_web3_exceptions, mock_chain_deps):
+        import requests
+        from swarm_provenance_uploader.exceptions import ReceiptTimeoutError
+
+        client = _timeout_client(
+            mock_chain_deps, real_web3_exceptions, [_log("DataStatusChanged")],
+            mined_nonce=requests.exceptions.ConnectionError("connection refused"),
+        )
+
+        with pytest.raises(ReceiptTimeoutError):
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+    def test_second_lookup_failure_stays_receipt_timeout(self, real_web3_exceptions, mock_chain_deps):
+        import requests
+        from swarm_provenance_uploader.exceptions import ReceiptTimeoutError
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _timeout_client(mock_chain_deps, real_web3_exceptions, [_log("DataStatusChanged")], mined_nonce=6)
+        web3.eth.get_transaction_receipt.side_effect = requests.exceptions.ConnectionError("reset")
+
+        with pytest.raises(ReceiptTimeoutError):
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+    def test_batch_timeout_keeps_expected_count(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import ReceiptTimeoutError
+
+        client = _timeout_client(mock_chain_deps, real_web3_exceptions, mined_nonce=5)
+
+        with pytest.raises(ReceiptTimeoutError) as exc_info:
+            client.batch_anchor([DUMMY_HASH, "c" * 64], ["t", "t"])
+        assert exc_info.value.event_name == "DataRegistered"
+        assert exc_info.value.expected_count == 2
+
+    def test_new_exceptions_exported(self):
+        from swarm_provenance_uploader import exceptions
+        from swarm_provenance_uploader.chain import exceptions as chain_exceptions
+
+        for name in ("ReceiptTimeoutError", "TransactionReplacedError", "TransactionNotFoundError"):
+            assert getattr(exceptions, name) is getattr(chain_exceptions, name)
+            assert name in dir(exceptions)
+        assert issubclass(exceptions.ReceiptTimeoutError, exceptions.TransactionOutcomeUnknownError)
+        assert issubclass(exceptions.TransactionReplacedError, exceptions.TransactionUnconfirmedError)
+        assert not issubclass(exceptions.TransactionReplacedError, exceptions.TransactionOutcomeUnknownError)
+        assert issubclass(exceptions.TransactionNotFoundError, exceptions.ChainTransactionError)
+        assert not issubclass(exceptions.TransactionNotFoundError, exceptions.TransactionUnconfirmedError)
+
+
+TX_HASH = "0x" + "bb" * 32
+
+
+def _wait_client(mock_chain_deps, real_web3_exceptions, logs=()):
+    """A client without a wallet key, for chain wait."""
+    from swarm_provenance_uploader.core.chain_client import ChainClient
+
+    _inject_real_exceptions(real_web3_exceptions)
+    receipt = mock_chain_deps["web3_instance"].eth.wait_for_transaction_receipt.return_value
+    receipt["logs"] = list(logs)
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("PROVENANCE_WALLET_KEY", None)
+        return ChainClient(chain="base-sepolia", require_wallet=False)
+
+
+class TestWaitForTransaction:
+    """ChainClient.wait_for_transaction resumes a wait with the write's checks (#167)."""
+
+    def test_confirmed_with_event(self, real_web3_exceptions, mock_chain_deps):
+        web3 = mock_chain_deps["web3_instance"]
+        client = _wait_client(mock_chain_deps, real_web3_exceptions, [_log("DataRegistered")])
+
+        result = client.wait_for_transaction(TX_HASH, "DataRegistered")
+
+        assert result.tx_hash == TX_HASH
+        assert result.block_number == 12345679
+        assert result.gas_used == 95_000
+        assert result.status == 1
+        assert result.event == "DataRegistered"
+        assert result.emitted_count == 1
+        assert result.explorer_url == client._provider.get_explorer_tx_url(TX_HASH)
+        web3.eth.wait_for_transaction_receipt.assert_called_once_with(TX_HASH, timeout=120)
+        web3.eth.send_raw_transaction.assert_not_called()
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+
+    def test_hash_without_prefix(self, real_web3_exceptions, mock_chain_deps):
+        client = _wait_client(mock_chain_deps, real_web3_exceptions)
+
+        result = client.wait_for_transaction("BB" * 32)
+
+        assert result.tx_hash == "0x" + "BB" * 32
+
+    def test_no_event_check_without_event(self, real_web3_exceptions, mock_chain_deps):
+        client = _wait_client(mock_chain_deps, real_web3_exceptions, [])
+
+        result = client.wait_for_transaction(TX_HASH, timeout=5)
+
+        assert result.event is None
+        assert result.emitted_count is None
+        mock_chain_deps["contract"].events.DataRegistered.return_value.process_receipt.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.wait_for_transaction_receipt.assert_called_once_with(TX_HASH, timeout=5)
+
+    def test_reverted(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import TransactionUnconfirmedError
+
+        client = _wait_client(mock_chain_deps, real_web3_exceptions)
+        mock_chain_deps["web3_instance"].eth.wait_for_transaction_receipt.return_value["status"] = 0
+
+        with pytest.raises(ChainTransactionError, match="reverted") as exc_info:
+            client.wait_for_transaction(TX_HASH)
+        assert not isinstance(exc_info.value, TransactionUnconfirmedError)
+        assert exc_info.value.tx_hash == TX_HASH
+
+    def test_not_recorded(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import TransactionNotRecordedError
+
+        client = _wait_client(mock_chain_deps, real_web3_exceptions, [_log("DataRegistered")])
+
+        with pytest.raises(TransactionNotRecordedError) as exc_info:
+            client.wait_for_transaction(TX_HASH, "DataRegistered", expected_count=2)
+        assert exc_info.value.emitted_count == 1
+        assert exc_info.value.expected_count == 2
+
+    def _time_out(self, mock_chain_deps, real_web3_exceptions):
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.wait_for_transaction_receipt.side_effect = real_web3_exceptions.TimeExhausted("timeout")
+        web3.eth.get_transaction_receipt.side_effect = real_web3_exceptions.TransactionNotFound("not found")
+        return web3
+
+    def test_timeout_pending_uses_sender_of_transaction(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import ReceiptTimeoutError
+
+        client = _wait_client(mock_chain_deps, real_web3_exceptions)
+        web3 = self._time_out(mock_chain_deps, real_web3_exceptions)
+        web3.eth.get_transaction.return_value = {"from": OTHER_ADDRESS, "nonce": 7}
+        web3.eth.get_transaction_count.return_value = 7
+
+        with pytest.raises(ReceiptTimeoutError) as exc_info:
+            client.wait_for_transaction(TX_HASH, "DataRegistered", timeout=30)
+
+        assert exc_info.value.timeout == 30
+        assert exc_info.value.tx_hash == TX_HASH
+        assert exc_info.value.event_name == "DataRegistered"
+        web3.eth.get_transaction.assert_called_once_with(TX_HASH)
+        web3.eth.get_transaction_count.assert_called_once_with(OTHER_ADDRESS, "latest")
+
+    def test_timeout_replaced(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import TransactionReplacedError
+
+        client = _wait_client(mock_chain_deps, real_web3_exceptions)
+        web3 = self._time_out(mock_chain_deps, real_web3_exceptions)
+        web3.eth.get_transaction.return_value = {"from": OTHER_ADDRESS, "nonce": 7}
+        web3.eth.get_transaction_count.return_value = 8
+
+        with pytest.raises(TransactionReplacedError) as exc_info:
+            client.wait_for_transaction(TX_HASH)
+        assert exc_info.value.nonce == 7
+
+    def test_timeout_unknown_hash_not_found(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import TransactionNotFoundError
+
+        client = _wait_client(mock_chain_deps, real_web3_exceptions)
+        web3 = self._time_out(mock_chain_deps, real_web3_exceptions)
+        web3.eth.get_transaction.side_effect = real_web3_exceptions.TransactionNotFound("not found")
+
+        with pytest.raises(TransactionNotFoundError) as exc_info:
+            client.wait_for_transaction(TX_HASH)
+        assert exc_info.value.tx_hash == TX_HASH
+        assert exc_info.value.explorer_url == client._provider.get_explorer_tx_url(TX_HASH)
+        web3.eth.get_transaction_count.assert_not_called()
+
+    def test_timeout_transaction_lookup_transport_failure_is_pending(self, real_web3_exceptions, mock_chain_deps):
+        import requests
+        from swarm_provenance_uploader.exceptions import ReceiptTimeoutError
+
+        client = _wait_client(mock_chain_deps, real_web3_exceptions)
+        web3 = self._time_out(mock_chain_deps, real_web3_exceptions)
+        web3.eth.get_transaction.side_effect = requests.exceptions.ConnectionError("reset")
+
+        with pytest.raises(ReceiptTimeoutError):
+            client.wait_for_transaction(TX_HASH)
+
+    def test_transport_failure_falls_back_for_same_hash(self, real_web3_exceptions, mock_chain_deps):
+        import requests
+
+        client = _wait_client(mock_chain_deps, real_web3_exceptions, [_log("DataRegistered")])
+        web3 = mock_chain_deps["web3_instance"]
+        receipt = web3.eth.wait_for_transaction_receipt.return_value
+        web3.eth.wait_for_transaction_receipt.side_effect = [
+            requests.exceptions.ConnectionError("reset"), receipt,
+        ]
+        client._provider._try_fallback = MagicMock(side_effect=[True, False])
+
+        result = client.wait_for_transaction(TX_HASH, "DataRegistered")
+
+        assert result.emitted_count == 1
+        client._provider._try_fallback.assert_called_once()
+        assert [c.args[0] for c in web3.eth.wait_for_transaction_receipt.call_args_list] == [TX_HASH, TX_HASH]
+
+    @pytest.mark.parametrize("kwargs", [
+        {"tx_hash": "0x1234"},
+        {"tx_hash": "zz" * 32},
+        {"tx_hash": TX_HASH, "expected_event": "NoSuchEvent"},
+        {"tx_hash": TX_HASH, "expected_event": "DataRegistered", "expected_count": 0},
+        {"tx_hash": TX_HASH, "timeout": 0},
+    ])
+    def test_invalid_arguments(self, real_web3_exceptions, mock_chain_deps, kwargs):
+        client = _wait_client(mock_chain_deps, real_web3_exceptions)
+
+        with pytest.raises(ChainValidationError):
+            client.wait_for_transaction(**kwargs)
+        mock_chain_deps["web3_instance"].eth.wait_for_transaction_receipt.assert_not_called()
+
+    def test_write_and_wait_share_the_receipt_checks(self, real_web3_exceptions, mock_chain_deps):
+        """_send_transaction and wait_for_transaction both go through _await_receipt."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        _inject_real_exceptions(real_web3_exceptions)
+        client = _write_client(mock_chain_deps, [_log("DataStatusChanged"), _log("DataRegistered")])
+        seen = []
+        original = ChainClient._await_receipt
+
+        def spy(self, *args, **kwargs):
+            seen.append(args[2])
+            return original(self, *args, **kwargs)
+
+        with patch.object(ChainClient, "_await_receipt", spy):
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+            client.wait_for_transaction(TX_HASH, "DataRegistered")
+
+        assert seen == ["DataStatusChanged", "DataRegistered"]
+
+
+class TestAbiEventNames:
+    def test_lists_contract_events(self):
+        from swarm_provenance_uploader.chain.contract import abi_event_names
+
+        names = abi_event_names()
+        for name in WRITE_EVENTS:
+            assert name in names
+        assert names == sorted(names)

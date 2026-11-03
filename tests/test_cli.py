@@ -7833,7 +7833,7 @@ class TestSendOutcomeUnknown:
 
         result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
 
-        assert result.exit_code == 1, result.output
+        assert result.exit_code == 3, result.output  # may still be mined (#167)
         assert "Outcome unknown" in result.output
         assert "Transaction failed" not in result.output
         assert "Not verified" not in result.output
@@ -7852,7 +7852,7 @@ class TestSendOutcomeUnknown:
 
         result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
 
-        assert result.exit_code == 1, result.output
+        assert result.exit_code == 3, result.output  # may still be mined (#167)
         assert "Outcome unknown" in result.output
         assert "in the explorer" not in result.output
         assert "Explorer:" not in result.output
@@ -7869,7 +7869,7 @@ class TestSendOutcomeUnknown:
 
         result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF, "--json"])
 
-        assert result.exit_code == 1, result.output
+        assert result.exit_code == 3, result.output  # may still be mined (#167)
         output = json.loads(result.output)
         assert output["error"] == "outcome_unknown"
         assert output["tx_hash"] == self.STEP_TX
@@ -7886,7 +7886,7 @@ class TestSendOutcomeUnknown:
 
         for args in ([], ["--json"]):
             result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF] + args)
-            assert result.exit_code == 1, result.output
+            assert result.exit_code == 3, result.output  # may still be mined (#167)
             assert RPC_KEY not in result.output
 
     def test_composite_step(self, mocker):
@@ -7903,13 +7903,13 @@ class TestSendOutcomeUnknown:
         args = ["chain", "transform", DUMMY_SWARM_REF, "c" * 64, "--description", "d", "--restrict-original"]
 
         result = runner.invoke(app, args)
-        assert result.exit_code == 1, result.output
+        assert result.exit_code == 3, result.output  # may still be mined (#167)
         assert "Failed to restrict original. Outcome unknown" in result.output
         assert self.STEP_TX in result.output
         assert transform_tx in result.output
 
         result = runner.invoke(app, args + ["--json"])
-        assert result.exit_code == 1, result.output
+        assert result.exit_code == 3, result.output  # may still be mined (#167)
         output = json.loads(result.output)
         assert output["failed_step"] == "restrict"
         assert output["partial_failure"] is True
@@ -7957,7 +7957,7 @@ class TestSendOutcomeUnknown:
         getattr(client, method).side_effect = self._error(event)
 
         result = runner.invoke(app, self.PROTECT)
-        assert result.exit_code == 1, result.output
+        assert result.exit_code == 3, result.output  # may still be mined (#167)
         assert "Outcome unknown" in result.output
         assert "Transaction failed" not in result.output
         assert self.STEP_TX in result.output
@@ -7969,7 +7969,7 @@ class TestSendOutcomeUnknown:
         client.set_status.assert_not_called()
 
         result = runner.invoke(app, self.PROTECT + ["--json"])
-        assert result.exit_code == 1, result.output
+        assert result.exit_code == 3, result.output  # may still be mined (#167)
         output = json.loads(result.output)
         assert output["failed_step"] == step
         assert output["partial_failure"] is bool(done)
@@ -7999,7 +7999,8 @@ class TestSendOutcomeUnknown:
 
         result = runner.invoke(app, getattr(self, args))
 
-        assert result.exit_code == 1, result.output
+        # Exit 3 when the step may still be mined (#167)
+        assert result.exit_code == (3 if kind == "outcome_unknown" else 1), result.output
         assert (
             "After you have checked the transaction, restrict manually: "
             f"swarm-prov-upload chain status {DUMMY_SWARM_REF} --set restricted"
@@ -8458,3 +8459,397 @@ class TestStampUtilizationPercent:
         stamp = GatewayClient(base_url=gw).get_stamp(DUMMY_STAMP)
         assert stamp.utilization == 1
         assert stamp.utilizationPercent == 50.0
+
+
+# Receipt timeouts, replaced transactions and chain wait (#167)
+
+
+class TestReceiptTimeoutAndReplaced:
+    """A receipt timeout is "Not confirmed yet" (exit 3); a replaced transaction is "Replaced" (exit 1)."""
+
+    STEP_TX = "0x" + "e5" * 32
+    STEP_EXPLORER = "https://base-sepolia.blockscout.com/tx/" + STEP_TX
+
+    def _timeout(self, event="DataAccessed", count=1, tx_hash=None):
+        from swarm_provenance_uploader.exceptions import ReceiptTimeoutError
+
+        tx_hash = tx_hash or self.STEP_TX
+        return ReceiptTimeoutError(
+            f"Not confirmed yet: transaction {tx_hash} was sent, but no receipt arrived "
+            f"within 120 seconds.",
+            tx_hash=tx_hash,
+            event_name=event,
+            expected_count=count,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=self.STEP_EXPLORER,
+            reason="Transaction is not in the chain after 120 seconds",
+            timeout=120,
+        )
+
+    def _replaced(self, event="DataAccessed"):
+        from swarm_provenance_uploader.exceptions import TransactionReplacedError
+
+        return TransactionReplacedError(
+            f"Replaced: transaction {self.STEP_TX} was not mined",
+            tx_hash=self.STEP_TX,
+            event_name=event,
+            expected_count=1,
+            contract_address=DUMMY_ADDRESS,
+            explorer_url=self.STEP_EXPLORER,
+            nonce=5,
+        )
+
+    def _client(self, mocker, method, error):
+        mock_client = mocker.MagicMock()
+        getattr(mock_client, method).side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+        return mock_client
+
+    WRITES = [
+        ("access", ["chain", "access", DUMMY_SWARM_REF], "DataAccessed"),
+        ("anchor", ["chain", "anchor", DUMMY_SWARM_REF], "DataRegistered"),
+        ("set_status", ["chain", "status", DUMMY_SWARM_REF, "--set", "restricted"], "DataStatusChanged"),
+        ("set_storage_ref", ["chain", "set-storage-ref", DUMMY_SWARM_REF, "c" * 64], "StorageRefLinked"),
+        ("transfer_ownership", ["chain", "transfer", DUMMY_SWARM_REF, "--to", "0x" + "ab" * 20], "DataOwnershipTransferred"),
+        ("set_delegate", ["chain", "delegate", "--authorize", "0x" + "ab" * 20], "DelegateAuthorized"),
+        ("transform", ["chain", "transform", DUMMY_SWARM_REF, "c" * 64, "--description", "d"], "DataTransformed"),
+        ("merge_transform", ["chain", "merge", DUMMY_SWARM_REF, "c" * 64, "d" * 64, "--description", "d"], "DataMerged"),
+    ]
+
+    @pytest.mark.parametrize("method,args,event", WRITES, ids=[w[0] for w in WRITES])
+    def test_write_timeout_text(self, mocker, method, args, event):
+        self._client(mocker, method, self._timeout(event))
+
+        result = runner.invoke(app, args)
+
+        assert result.exit_code == 3, result.output
+        assert "Not confirmed yet" in result.output
+        assert "Transaction failed" not in result.output
+        assert "do not run the command again" in result.output
+        assert self.STEP_TX in result.output
+        assert self.STEP_EXPLORER in result.output
+        assert f"swarm-prov-upload chain wait {self.STEP_TX} --event {event}" in result.output
+        assert "--count" not in result.output
+
+    @pytest.mark.parametrize("method,args,event", WRITES, ids=[w[0] for w in WRITES])
+    def test_write_timeout_json(self, mocker, method, args, event):
+        self._client(mocker, method, self._timeout(event))
+
+        result = runner.invoke(app, args + ["--json"])
+
+        assert result.exit_code == 3, result.output
+        output = json.loads(result.stdout)
+        assert output["error"] == "receipt_timeout"
+        assert output["tx_hash"] == self.STEP_TX
+        assert output["explorer_url"] == self.STEP_EXPLORER
+        assert output["event"] == event
+        assert output["expected_count"] == 1
+        assert output["timeout"] == 120
+
+    @pytest.mark.parametrize("method,args,event", WRITES, ids=[w[0] for w in WRITES])
+    def test_write_replaced(self, mocker, method, args, event):
+        self._client(mocker, method, self._replaced(event))
+
+        result = runner.invoke(app, args)
+        assert result.exit_code == 1, result.output
+        assert "Replaced" in result.output
+        assert "Transaction failed" not in result.output
+        assert "swarm-prov-upload chain get <data hash> before you run the command again" in result.output
+        assert self.STEP_TX in result.output
+
+        result = runner.invoke(app, args + ["--json"])
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.stdout)
+        assert output["error"] == "replaced"
+        assert output["tx_hash"] == self.STEP_TX
+        assert output["nonce"] == 5
+        assert output["event"] == event
+
+    def test_batch_timeout_command_has_count(self, mocker):
+        self._client(mocker, "access", self._timeout("DataRegistered", count=3))
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+
+        assert f"swarm-prov-upload chain wait {self.STEP_TX} --event DataRegistered --count 3" in result.output
+
+    def test_timeout_command_adds_0x_prefix(self, mocker):
+        self._client(mocker, "access", self._timeout(tx_hash="e5" * 32))
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+
+        assert f"swarm-prov-upload chain wait 0x{'e5' * 32} --event DataAccessed" in result.output
+
+    PROTECT = ["chain", "protect", DUMMY_SWARM_REF, "c" * 64, "--description", "d"]
+    TRANSFORM = ["chain", "transform", DUMMY_SWARM_REF, "c" * 64, "--description", "d", "--restrict-original"]
+
+    def _composite_client(self, mocker):
+        from swarm_provenance_uploader.models import (
+            ChainProvenanceRecord, DataStatusEnum, TransformResult,
+        )
+
+        mock_client = mocker.MagicMock()
+        mock_client.get.return_value = ChainProvenanceRecord(
+            data_hash=DUMMY_SWARM_REF, owner=DUMMY_ADDRESS, timestamp=1700000000,
+            data_type="swarm-provenance", status=DataStatusEnum.ACTIVE,
+            accessors=[], transformations=[],
+        )
+        mock_client.transform.return_value = TransformResult(
+            tx_hash="0x" + "b2" * 32, block_number=2, gas_used=1, explorer_url=None,
+            original_hash=DUMMY_SWARM_REF, new_hash="c" * 64, description="d",
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+        return mock_client
+
+    @pytest.mark.parametrize("args", ["PROTECT", "TRANSFORM"])
+    @pytest.mark.parametrize("kind,code", [("timeout", 3), ("replaced", 1)])
+    def test_composite_restrict_step(self, mocker, args, kind, code):
+        client = self._composite_client(mocker)
+        client.set_status.side_effect = (
+            self._timeout("DataStatusChanged") if kind == "timeout" else self._replaced("DataStatusChanged")
+        )
+
+        result = runner.invoke(app, getattr(self, args))
+        assert result.exit_code == code, result.output
+        assert "Failed to restrict original." in result.output
+        assert ("Not confirmed yet" if kind == "timeout" else "Replaced") in result.output
+        assert "Transaction failed" not in result.output
+
+        result = runner.invoke(app, getattr(self, args) + ["--json"])
+        assert result.exit_code == code, result.output
+        output = json.loads(result.stdout)
+        assert output["failed_step"] == "restrict"
+        assert output["unconfirmed"]["error"] == ("receipt_timeout" if kind == "timeout" else "replaced")
+
+    def test_composite_transform_step_timeout(self, mocker):
+        client = self._composite_client(mocker)
+        client.transform.side_effect = self._timeout("DataTransformed")
+
+        result = runner.invoke(app, self.PROTECT + ["--json"])
+
+        assert result.exit_code == 3, result.output
+        output = json.loads(result.stdout)
+        assert output["failed_step"] == "transform"
+        assert output["unconfirmed"]["error"] == "receipt_timeout"
+        client.set_status.assert_not_called()
+
+    def test_composite_not_recorded_exits_1(self, mocker):
+        from swarm_provenance_uploader.exceptions import TransactionNotRecordedError
+
+        client = self._composite_client(mocker)
+        client.set_status.side_effect = TransactionNotRecordedError(
+            "Not recorded", tx_hash=self.STEP_TX, event_name="DataStatusChanged",
+            expected_count=1, emitted_count=0, contract_address=DUMMY_ADDRESS,
+        )
+
+        result = runner.invoke(app, self.PROTECT)
+
+        assert result.exit_code == 1, result.output
+
+
+class TestChainWait:
+    """chain wait <tx_hash> resumes waiting for a sent transaction (#167)."""
+
+    TX = "0x" + "e5" * 32
+    EXPLORER = "https://base-sepolia.blockscout.com/tx/" + TX
+
+    def _client(self, mocker, result=None, error=None):
+        from swarm_provenance_uploader.models import TransactionWaitResult
+
+        mock_client = mocker.MagicMock()
+        if error is not None:
+            mock_client.wait_for_transaction.side_effect = error
+        else:
+            mock_client.wait_for_transaction.return_value = result or TransactionWaitResult(
+                tx_hash=self.TX, block_number=4242, gas_used=95000, status=1,
+                explorer_url=self.EXPLORER, event="DataRegistered", emitted_count=1,
+            )
+        get_client = mocker.patch(
+            "swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client
+        )
+        return mock_client, get_client
+
+    def test_confirmed_text(self, mocker):
+        client, get_client = self._client(mocker)
+
+        result = runner.invoke(app, ["chain", "wait", self.TX, "--event", "DataRegistered"])
+
+        assert result.exit_code == 0, result.output
+        assert "Confirmed in block 4242" in result.output
+        assert "95000" in result.output
+        assert self.EXPLORER in result.output
+        client.wait_for_transaction.assert_called_once_with(
+            self.TX, expected_event="DataRegistered", expected_count=1, timeout=120, verbose=False,
+        )
+        # A read: no wallet key needed
+        assert get_client.call_args.kwargs["require_wallet"] is False
+
+    def test_confirmed_json(self, mocker):
+        self._client(mocker)
+
+        result = runner.invoke(app, ["chain", "wait", self.TX, "--event", "DataRegistered", "--json"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout) == {
+            "tx_hash": self.TX, "block_number": 4242, "gas_used": 95000, "status": 1,
+            "explorer_url": self.EXPLORER, "event": "DataRegistered", "emitted_count": 1,
+        }
+
+    def test_without_event_and_with_options(self, mocker):
+        from swarm_provenance_uploader.models import TransactionWaitResult
+
+        client, _ = self._client(mocker, result=TransactionWaitResult(
+            tx_hash=self.TX, block_number=1, gas_used=2, status=1, explorer_url=None,
+        ))
+
+        result = runner.invoke(app, ["chain", "wait", "E5" * 32, "--timeout", "30", "--json"])
+
+        assert result.exit_code == 0, result.output
+        output = json.loads(result.stdout)
+        assert output["event"] is None and output["emitted_count"] is None
+        client.wait_for_transaction.assert_called_once_with(
+            "0x" + "E5" * 32, expected_event=None, expected_count=1, timeout=30, verbose=False,
+        )
+
+    def test_count_passed(self, mocker):
+        client, _ = self._client(mocker)
+
+        runner.invoke(app, ["chain", "wait", self.TX, "--event", "DataRegistered", "--count", "3"])
+
+        assert client.wait_for_transaction.call_args.kwargs["expected_count"] == 3
+
+    @pytest.mark.parametrize("args", [
+        ["0x1234"],
+        ["zz" * 32],
+        [TX, "--event", "NoSuchEvent"],
+        [TX, "--count", "2"],
+        [TX, "--event", "DataRegistered", "--count", "0"],
+        [TX, "--timeout", "0"],
+    ], ids=["short", "not-hex", "unknown-event", "count-without-event", "count-0", "timeout-0"])
+    def test_usage_errors(self, mocker, args):
+        client, _ = self._client(mocker)
+
+        result = runner.invoke(app, ["chain", "wait"] + args)
+
+        assert result.exit_code == 2, result.output
+        client.wait_for_transaction.assert_not_called()
+
+    def test_reverted(self, mocker):
+        from swarm_provenance_uploader.exceptions import ChainTransactionError
+
+        self._client(mocker, error=ChainTransactionError("Transaction reverted (status=0)", tx_hash=self.TX))
+
+        result = runner.invoke(app, ["chain", "wait", self.TX])
+        assert result.exit_code == 1, result.output
+        assert "reverted" in result.output
+
+        result = runner.invoke(app, ["chain", "wait", self.TX, "--json"])
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.stdout)
+        assert output["error"] == "transaction_failed"
+        assert output["tx_hash"] == self.TX
+
+    def test_not_recorded(self, mocker):
+        from swarm_provenance_uploader.exceptions import TransactionNotRecordedError
+
+        self._client(mocker, error=TransactionNotRecordedError(
+            "Not recorded", tx_hash=self.TX, event_name="DataRegistered", expected_count=2,
+            emitted_count=1, contract_address=DUMMY_ADDRESS, explorer_url=self.EXPLORER,
+        ))
+
+        result = runner.invoke(app, ["chain", "wait", self.TX, "--event", "DataRegistered", "--count", "2", "--json"])
+
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.stdout)
+        assert output["error"] == "not_recorded"
+        assert output["emitted_count"] == 1
+
+    def test_not_verified(self, mocker):
+        from swarm_provenance_uploader.exceptions import TransactionNotVerifiedError
+
+        self._client(mocker, error=TransactionNotVerifiedError(
+            "Not verified", tx_hash=self.TX, event_name="DataRegistered", expected_count=1,
+            contract_address=DUMMY_ADDRESS, explorer_url=self.EXPLORER, reason="boom",
+        ))
+
+        result = runner.invoke(app, ["chain", "wait", self.TX, "--event", "DataRegistered", "--json"])
+
+        assert result.exit_code == 1, result.output
+        assert json.loads(result.stdout)["error"] == "not_verified"
+
+    def test_still_pending(self, mocker):
+        from swarm_provenance_uploader.exceptions import ReceiptTimeoutError
+
+        self._client(mocker, error=ReceiptTimeoutError(
+            "Not confirmed yet", tx_hash=self.TX, event_name="DataRegistered", expected_count=1,
+            contract_address=DUMMY_ADDRESS, explorer_url=self.EXPLORER, reason="timeout", timeout=30,
+        ))
+
+        result = runner.invoke(app, ["chain", "wait", self.TX, "--event", "DataRegistered", "--timeout", "30"])
+        assert result.exit_code == 3, result.output
+        assert "Not confirmed yet" in result.output
+        assert "within 30 seconds" in result.output
+        assert f"swarm-prov-upload chain wait {self.TX} --event DataRegistered" in result.output
+
+        result = runner.invoke(app, ["chain", "wait", self.TX, "--json"])
+        assert result.exit_code == 3, result.output
+        output = json.loads(result.stdout)
+        assert output["error"] == "receipt_timeout"
+        assert output["timeout"] == 30
+
+    def test_replaced(self, mocker):
+        from swarm_provenance_uploader.exceptions import TransactionReplacedError
+
+        self._client(mocker, error=TransactionReplacedError(
+            "Replaced", tx_hash=self.TX, event_name=None, expected_count=1,
+            contract_address=DUMMY_ADDRESS, explorer_url=self.EXPLORER, nonce=7,
+        ))
+
+        result = runner.invoke(app, ["chain", "wait", self.TX])
+        assert result.exit_code == 1, result.output
+        assert "Replaced" in result.output
+
+        result = runner.invoke(app, ["chain", "wait", self.TX, "--json"])
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.stdout)
+        assert output["error"] == "replaced"
+        assert output["nonce"] == 7
+
+    def test_not_found(self, mocker):
+        from swarm_provenance_uploader.exceptions import TransactionNotFoundError
+
+        self._client(mocker, error=TransactionNotFoundError(
+            "Not found", tx_hash=self.TX, explorer_url=self.EXPLORER,
+        ))
+
+        result = runner.invoke(app, ["chain", "wait", self.TX])
+        assert result.exit_code == 1, result.output
+        assert "Not found" in result.output
+        assert self.EXPLORER in result.output
+        assert "chain get" in result.output
+
+        result = runner.invoke(app, ["chain", "wait", self.TX, "--json"])
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.stdout)
+        assert output["error"] == "not_found"
+        assert output["tx_hash"] == self.TX
+        assert output["explorer_url"] == self.EXPLORER
+
+    def test_connection_error(self, mocker):
+        from swarm_provenance_uploader.exceptions import ChainConnectionError
+
+        self._client(mocker, error=ChainConnectionError("refused", rpc_url=RPC_URLS_WITH_KEY[0]))
+
+        result = runner.invoke(app, ["chain", "wait", self.TX])
+
+        assert result.exit_code == 1, result.output
+        assert "Cannot connect to chain" in result.output
+        assert RPC_KEY not in result.output
+
+    def test_help(self):
+        result = runner.invoke(app, ["chain", "wait", "--help"])
+
+        output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        assert result.exit_code == 0, output
+        for option in ("--event", "--count", "--timeout", "--json"):
+            assert option in output
+        assert "--interval" not in output
