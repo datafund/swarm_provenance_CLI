@@ -2512,6 +2512,20 @@ def _wait_command(e: "exceptions.TransactionUnconfirmedError") -> Optional[str]:
     return command
 
 
+def _replaced_cli_advice(event_name: Optional[str]) -> str:
+    """The check to make before a replaced write is run again, by its event (#167)."""
+    from .chain.exceptions import DATA_RECORD_EVENTS
+
+    if event_name in DATA_RECORD_EVENTS:
+        return "check the record with swarm-prov-upload chain get <data hash>"
+    if event_name == "DelegateAuthorized":
+        return "check the delegate state or the transaction in the explorer"
+    return (
+        "check the transaction in the explorer, or the record with "
+        "swarm-prov-upload chain get <data hash>"
+    )
+
+
 def _not_recorded_json(e: "exceptions.TransactionUnconfirmedError") -> dict:
     """JSON fields for a TransactionNotRecordedError, TransactionNotVerifiedError,
     TransactionOutcomeUnknownError, ReceiptTimeoutError or TransactionReplacedError."""
@@ -2582,8 +2596,8 @@ def _handle_not_recorded(
         typer.secho(
             prefix + "Replaced. Another transaction with the same nonce from the same "
             "address was mined instead, so this transaction will not be mined. The "
-            "other transaction may have made the same write: check the record with "
-            "swarm-prov-upload chain get <data hash> before you run the command again.",
+            f"other transaction may have made the same write: {_replaced_cli_advice(e.event_name)} "
+            "before you run the command again.",
             fg=typer.colors.RED, err=True,
         )
         if e.nonce is not None:
@@ -3163,7 +3177,7 @@ def chain_wait(
     the write prints. It sends nothing and needs no wallet key.
 
     Exit codes: 0 confirmed; 1 reverted, not recorded, replaced or not
-    found; 3 still pending.
+    found; 3 still pending, or no RPC could be reached.
     """
     if count is not None and event is None:
         raise typer.BadParameter("--count needs --event", param_hint="--count")
@@ -3212,11 +3226,39 @@ def chain_wait(
                 typer.echo(f"  Transaction: {e.tx_hash}", err=True)
         raise typer.Exit(code=1)
     except exceptions.ChainConnectionError as e:
+        # No RPC left during the wait: the transaction may still be pending
         _print_chain_traceback(e, verbose)
-        typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
-        if e.rpc_url:
-            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
-        raise typer.Exit(code=1)
+        try:
+            explorer_url = client._provider.get_explorer_tx_url(tx_hash)
+        except Exception:
+            explorer_url = None
+        if not isinstance(explorer_url, str):
+            explorer_url = None
+        if output_json:
+            typer.echo(json.dumps({
+                "error": "connection_failed",
+                "message": str(e),
+                "tx_hash": tx_hash,
+                "explorer_url": explorer_url,
+            }, indent=2))
+        else:
+            typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+            if e.rpc_url:
+                typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
+            typer.echo(
+                "  The transaction may still be pending: its state is unknown. Run the "
+                "command again when the RPC is reachable:",
+                err=True,
+            )
+            again = f"swarm-prov-upload chain wait {tx_hash}"
+            if event:
+                again += f" --event {event}"
+                if count is not None and count != 1:
+                    again += f" --count {count}"
+            typer.echo(f"  {again}", err=True)
+            if explorer_url:
+                typer.echo(f"  Explorer:    {explorer_url}", err=True)
+        raise typer.Exit(code=EXIT_PENDING)
     except exceptions.ChainError as e:
         _print_chain_traceback(e, verbose)
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)

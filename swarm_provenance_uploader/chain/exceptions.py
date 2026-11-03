@@ -317,6 +317,36 @@ class TransactionReplacedError(TransactionUnconfirmedError):
         self.nonce = nonce
 
 
+# Events of writes that create or change a data record, which `chain get`
+# reads back. Other events (DelegateAuthorized) have no data record (#167).
+DATA_RECORD_EVENTS = frozenset({
+    "DataRegistered",
+    "StorageRefLinked",
+    "DataTransformed",
+    "DataMerged",
+    "DataAccessed",
+    "DataStatusChanged",
+    "DataOwnershipTransferred",
+})
+
+
+def replaced_check_advice(event_name: Optional[str]) -> str:
+    """What to check before a replaced write is sent again, for its event (#167).
+
+    A write with a data record is read back with ``chain get``. A delegate
+    write has no data record: check the delegate state or the transaction
+    in the block explorer. Without an event, both are named.
+    """
+    if event_name in DATA_RECORD_EVENTS:
+        return "read the record back (chain get <data hash>)"
+    if event_name == "DelegateAuthorized":
+        return (
+            "check the delegate state (the contract's isAuthorizedDelegate) or the "
+            "transaction in the block explorer"
+        )
+    return "check the transaction in the block explorer, or read the record back (chain get <data hash>)"
+
+
 class TransactionNotFoundError(ChainTransactionError):
     """The RPC does not know the transaction, and no receipt arrived (#167).
 

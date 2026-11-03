@@ -44,7 +44,7 @@ from ..models import (
     TransformResult,
     TransactionWaitResult,
 )
-from ..chain.exceptions import redact_exception_chain
+from ..chain.exceptions import redact_exception_chain, replaced_check_advice
 
 logger = logging.getLogger(__name__)
 
@@ -959,8 +959,8 @@ class ChainClient:
         raise TransactionReplacedError(
             f"Replaced: transaction {tx_hash_str} was not mined, and another "
             f"transaction with the same nonce ({nonce}) from {sender} was mined "
-            f"instead. The other transaction may have made the same write: read the "
-            f"record back (chain get) before you send it again.",
+            f"instead. The other transaction may have made the same write: "
+            f"{replaced_check_advice(expected_event)} before you send it again.",
             tx_hash=tx_hash_str,
             event_name=expected_event,
             expected_count=expected_count,
