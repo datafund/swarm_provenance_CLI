@@ -8525,7 +8525,8 @@ class TestReceiptTimeoutAndReplaced:
         assert result.exit_code == 3, result.output
         assert "Not confirmed yet" in result.output
         assert "Transaction failed" not in result.output
-        assert "do not run the command again" in result.output
+        assert "do not run the write again" in result.output
+        assert "chain wait again is safe" not in result.output
         assert self.STEP_TX in result.output
         assert self.STEP_EXPLORER in result.output
         assert f"swarm-prov-upload chain wait {self.STEP_TX} --event {event}" in result.output
@@ -8545,6 +8546,7 @@ class TestReceiptTimeoutAndReplaced:
         assert output["event"] == event
         assert output["expected_count"] == 1
         assert output["timeout"] == 120
+        assert output["wait_command"] == f"swarm-prov-upload chain wait {self.STEP_TX} --event {event}"
 
     @pytest.mark.parametrize("method,args,event", WRITES, ids=[w[0] for w in WRITES])
     def test_write_replaced(self, mocker, method, args, event):
@@ -8794,6 +8796,9 @@ class TestChainWait:
         assert result.exit_code == 3, result.output
         assert "Not confirmed yet" in result.output
         assert "within 30 seconds" in result.output
+        assert "It may still be mined" in result.output
+        assert "Running chain wait again is safe" in result.output
+        assert "do not run" not in result.output.lower()
         assert f"swarm-prov-upload chain wait {self.TX} --event DataRegistered" in result.output
 
         result = runner.invoke(app, ["chain", "wait", self.TX, "--json"])
@@ -8872,6 +8877,27 @@ class TestChainWait:
         assert output["explorer_url"] == self.EXPLORER
         assert RPC_KEY not in result.stdout
 
+    @pytest.mark.parametrize("error_name,error_key", [
+        ("ChainConfigurationError", "chain_error"),
+        ("ChainValidationError", "chain_error"),
+    ])
+    def test_other_chain_error_json(self, mocker, error_name, error_key):
+        """A JSON-RPC rejection or a validation error gives JSON on stdout too (#240 review 2)."""
+        from swarm_provenance_uploader import exceptions as exc
+
+        self._client(mocker, error=getattr(exc, error_name)(f"The RPC rejected the request: {RPC_URLS_WITH_KEY[0]}"))
+
+        result = runner.invoke(app, ["chain", "wait", self.TX, "--json"])
+        assert result.exit_code == 1, result.output
+        output = json.loads(result.stdout)
+        assert output["error"] == error_key
+        assert "rejected" in output["message"]
+        assert RPC_KEY not in result.stdout
+
+        result = runner.invoke(app, ["chain", "wait", self.TX])
+        assert result.exit_code == 1, result.output
+        assert "rejected" in result.output
+
     def test_not_found_stays_exit_1(self, mocker):
         from swarm_provenance_uploader.exceptions import TransactionNotFoundError
 
@@ -8887,3 +8913,26 @@ class TestChainWait:
         for option in ("--event", "--count", "--timeout", "--json"):
             assert option in output
         assert "--interval" not in output
+
+
+class TestReplacedAdviceOneSource:
+    """The CLI and the library pick the replaced advice from one decision (#240 review 2)."""
+
+    @pytest.mark.parametrize("event,kind", [
+        ("DataRegistered", "record"), ("StorageRefLinked", "record"), ("DataTransformed", "record"),
+        ("DataMerged", "record"), ("DataAccessed", "record"), ("DataStatusChanged", "record"),
+        ("DataOwnershipTransferred", "record"), ("DelegateAuthorized", "delegate"),
+        (None, "unknown"), ("RoleGranted", "unknown"),
+    ])
+    def test_kind(self, event, kind):
+        from swarm_provenance_uploader.chain.exceptions import replaced_check_kind
+
+        assert replaced_check_kind(event) == kind
+
+    def test_cli_follows_the_shared_decision(self, mocker):
+        from swarm_provenance_uploader import cli
+
+        mocker.patch("swarm_provenance_uploader.chain.exceptions.replaced_check_kind", return_value="delegate")
+        assert "delegate state" in cli._replaced_cli_advice("DataRegistered")
+        mocker.patch("swarm_provenance_uploader.chain.exceptions.replaced_check_kind", return_value="record")
+        assert "chain get" in cli._replaced_cli_advice("DelegateAuthorized")
