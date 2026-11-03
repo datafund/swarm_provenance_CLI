@@ -262,9 +262,33 @@ def _assert_linear_time(func, build, size, factor=10, max_ratio=20, fail_ratio=5
     pytest.fail(f"{factor}x the input took more than {max_ratio}x the time: {', '.join(ratios)}")
 
 
+class TestAssertLinearTime:
+    """The timing helper with a clock as coarse as time.thread_time on Windows (about 15.6 ms)."""
+
+    @pytest.fixture
+    def coarse_clock(self, monkeypatch):
+        import time
+
+        real = time.thread_time
+        tick = 0.0156
+        monkeypatch.setattr(time, "thread_time", lambda: (real() // tick) * tick)
+
+    @staticmethod
+    def _quadratic(text):
+        return sum(1 for _ in range(len(text)) for _ in range(len(text) // 100))
+
+    @pytest.mark.parametrize("size", [10_000, 100_000, 1_000_000])
+    def test_linear_passes_with_coarse_clock(self, coarse_clock, size):
+        _assert_linear_time(redact_urls, lambda n: "a" * n + f" {PATH_KEY_URL}", size)
+
+    def test_quadratic_fails_with_coarse_clock(self, coarse_clock):
+        with pytest.raises(pytest.fail.Exception, match="took more than 20x the time"):
+            _assert_linear_time(self._quadratic, lambda n: "a" * n, 10_000)
+
+
 class TestRedactUrlsSpeed:
     """The time check runs first, on inputs small enough that a quadratic
-    scan fails it within a minute. The full-size call after it checks the
+    scan fails it within seconds. The full-size call after it checks the
     output."""
 
     def test_long_run_of_trailing_punctuation(self):
