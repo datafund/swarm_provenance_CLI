@@ -273,13 +273,37 @@ swarm-prov-upload chain anchor <hash> --type "model-weights"
 
 ### JSON output for scripting
 
-All chain commands support `--json` for machine-readable output:
+All chain commands except `chain verify` support `--json` for machine-readable output:
 
 ```bash
 swarm-prov-upload chain get <hash> --json
 swarm-prov-upload chain balance --json
 swarm-prov-upload chain anchor <hash> --json
 ```
+
+With `--json`, stdout carries exactly one JSON document, for a success or an error, so you can pipe it to `jq`. Everything else (progress, warnings, hints, `-v` debug lines and the text of an error) goes to stderr. The exit codes are the same as without `--json`. Errors in the global options and usage errors (exit 2) are JSON too, when the command you run has `--json` and it is set. `--help` and `--version` print text, not JSON.
+
+An error document has an `error` code and a `message`, and some codes add fields:
+
+| Code | Meaning | Extra fields |
+|------|---------|--------------|
+| `invalid_input` | A command-line value is not valid, including usage errors (exit 2) | |
+| `configuration_error` | The chain settings are not valid, for example an unsupported `CHAIN_NAME`, an invalid `CHAIN_CONTRACT` or `CHAIN_DEPLOY_BLOCK`, a deploy block later than the chain head, or no contract code at the contract address on any RPC | |
+| `invalid_gas_limit` | A chain write would use a `CHAIN_GAS_LIMIT` that is not a whole number of at least 21000 | |
+| `missing_dependencies` | The blockchain extras are not installed | `install` |
+| `connection_failed` | No RPC can be reached | `rpc_url` (redacted) |
+| `not_registered` | The hash (or storage reference) has no on-chain record | `data_hash` or `storage_ref` |
+| `already_registered` | `chain anchor`: the hash is already anchored | `data_hash`, `owner`, `timestamp`, `data_type` |
+| `transaction_failed` | The transaction reverted or could not be sent | `tx_hash` |
+| `insufficient_funds` | The wallet cannot pay the gas | `wallet_address`, `balance_eth`, `estimated_cost_eth`, `chain` |
+| `receipt_timeout`, `outcome_unknown` | The transaction may still be mined (exit 3) | `tx_hash`, `wait_command` |
+| `replaced`, `not_recorded`, `not_verified` | The transaction is not confirmed as recorded | `tx_hash`, `explorer_url` |
+| `not_found` | `chain wait`: the RPC does not know the transaction | `tx_hash` |
+| `chain_error` | Any other chain error | |
+| `interrupted` | The command was stopped with Ctrl+C (exit 130) | |
+| `aborted` | A prompt was aborted (exit 1) | |
+
+`chain protect` and `chain transform --restrict-original` report a failed step in their step format, with `failed_step` and an `error` or `unconfirmed` object (see [chain-workflows.md](chain-workflows.md)).
 
 ### Use a different chain or RPC
 

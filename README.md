@@ -317,6 +317,8 @@ swarm-prov-upload chain get <hash> --follow --depth 2     # limit depth
 swarm-prov-upload chain get <hash> --follow --json        # JSON output
 ```
 
+> **`--json`**: stdout carries exactly one JSON document, for a success or an error (`{"error": "<code>", "message": ...}`), so the output can be piped to `jq`. Progress, warnings, hints and `-v` debug lines go to stderr, and the exit codes do not change. See [docs/chain-setup.md](docs/chain-setup.md#json-output-for-scripting) for the error codes.
+
 > **Exit code 3: may still be mined**: when a write sent its transaction but no receipt arrived within 120 seconds, the command exits 3 and prints the transaction hash. It also exits 3 with "Outcome unknown" when the connection to the RPC fails while or after the transaction is sent; when the RPC answers the send with "already known", "Known transaction" or "nonce too low", which a node gives when it already has the transaction or a transaction with its nonce is mined; or when, after the send, the RPC answers the receipt lookup with a JSON-RPC error, such as a rate limit (-32005). Do not run the write again: wait with the printed `chain wait` command, or check the transaction in the explorer. A transaction that another one with the same nonce replaced is reported as "Replaced" (exit 1). See [docs/chain-workflows.md](docs/chain-workflows.md#exit-codes) for all exit codes.
 
 > **`chain get --follow` fails closed**: if any read fails during the walk, the command prints an error and exits with code 1 instead of printing a partial chain. This includes a chain that may be incomplete: on a v1 contract (no transformation links) whose deploy block is unknown, only the last 50,000 blocks can be scanned, so on a longer chain the command asks you to set `CHAIN_DEPLOY_BLOCK`. In `--json` output, each record has a `parents` list (`null` for records at the depth limit).
@@ -488,7 +490,7 @@ swarm-prov-upload upload-collection /path/to/directory --stamp-id <id> --deferre
 | `--redundancy` | Erasure coding level from 0 to 4: `0` none, `1` medium, `2` strong, `3` insane, `4` paranoid. A higher level keeps the data retrievable when more chunks are lost, and uses more of the stamp. Without this option, the gateway uses level 2. |
 | `--stamp-retries` | Number of times to check that the stamp is usable before the upload (default: 12) |
 | `--stamp-interval` | Seconds between stamp usability checks (default: 20) |
-| `--json` | Output result as JSON (see example below) |
+| `--json` | Output result as JSON (see example below). stdout then carries only the JSON document; progress and the payment prompt go to stderr. An error is a JSON object too, for example `{"error": "stamp_not_usable", "message": ...}` (other codes: `invalid_input`, `configuration_error`, `payment_required`, `payment_outcome_unknown`, `delivered_not_stored`, `upload_failed`, `interrupted`, `aborted`). After the command bought a stamp or took one from the pool, an error document has `unused_stamp_id` |
 
 **Example Output (text):**
 ```
@@ -575,6 +577,8 @@ swarm-prov-upload stamps list --full --wallet 0xYourPayerAddress
 swarm-prov-upload stamps info <stamp_id>
 
 # Extend stamp TTL by 48 hours (paid; a stamp you bought needs --x402 from the same wallet)
+# Prints the batch ID and the expiry the gateway reports: an estimate read right after the top-up,
+# which may not include the extension yet (check it with stamps info)
 swarm-prov-upload --x402 stamps extend <stamp_id> --duration-hours 48
 
 # Check stamp health (can it be used for uploads?)

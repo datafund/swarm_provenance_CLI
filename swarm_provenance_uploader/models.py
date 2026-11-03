@@ -1,6 +1,6 @@
 from enum import IntEnum
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from typing import Any, Dict, Optional, List
 
 class ProvenanceMetadata(BaseModel):
@@ -70,6 +70,19 @@ class StampExtensionResponse(BaseModel):
     """Response from extending a stamp."""
     batchID: str = Field(description="The extended batch ID")
     message: Optional[str] = Field(default=None, description="Status message")
+    expires_at: Optional[str] = Field(
+        default=None,
+        description="The expiry the gateway reported after the extension (UTC, ISO 8601): an "
+                    "estimate from the stamp's TTL on the node at today's price, read right after "
+                    "the top-up, so it may not include the extension yet; None if the gateway did "
+                    "not report one",
+    )
+
+    @field_validator("expires_at", mode="before")
+    @classmethod
+    def _expires_at_text_only(cls, value):
+        """A value that is not text is treated as not reported, so the extension still succeeds."""
+        return value if isinstance(value, str) else None
 
 
 class DataUploadResponse(BaseModel):

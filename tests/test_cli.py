@@ -1,14 +1,17 @@
+import click
 import json
 import re
 import pytest
 import typer
 from typer.testing import CliRunner
 from swarm_provenance_uploader import exceptions
+from swarm_provenance_uploader.chain.redact import redact_url
 from swarm_provenance_uploader.cli import app, _backend_config, _x402_config, _chain_config
 from swarm_provenance_uploader.models import (
     StampDetails,
     StampListResponse,
     StampPurchaseResponse,
+    StampExtensionResponse,
     WalletResponse,
     ChequebookResponse,
 )
@@ -372,7 +375,7 @@ class TestStampsCommands:
     def test_stamps_extend_success(self, mocker):
         """Tests stamps extend command."""
         mock_client = mocker.MagicMock()
-        mock_client.extend_stamp.return_value = DUMMY_STAMP
+        mock_client.extend_stamp_details.return_value = StampExtensionResponse(batchID=DUMMY_STAMP)
 
         mocker.patch(
             "swarm_provenance_uploader.cli.GatewayClient",
@@ -423,13 +426,13 @@ class TestStampsCommands:
     def test_stamps_extend_accepts_0x_prefix(self, mocker):
         """stamps extend drops a 0x prefix before calling the gateway (#159)."""
         mock_client = mocker.MagicMock()
-        mock_client.extend_stamp.return_value = DUMMY_STAMP
+        mock_client.extend_stamp_details.return_value = StampExtensionResponse(batchID=DUMMY_STAMP)
         mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
 
         result = runner.invoke(app, ["stamps", "extend", "0x" + DUMMY_STAMP, "--amount", "1000000"])
 
         assert result.exit_code == 0, f"CLI Failed: {result.output}"
-        assert mock_client.extend_stamp.call_args.args[0] == DUMMY_STAMP
+        assert mock_client.extend_stamp_details.call_args.args[0] == DUMMY_STAMP
 
     def test_stamps_check_accepts_0x_prefix(self, mocker):
         """stamps check drops a 0x prefix before calling the gateway (#159)."""
@@ -7420,7 +7423,7 @@ class TestChainErrorRedaction:
         assert "ERROR: Chain command failed: ValueError: bad answer from https://rpc.example.org/" in result.output
 
     def test_json_stdout_has_no_error_text(self, mocker):
-        """With --json, the error and the RPC URL line go to stderr, not into the JSON stream."""
+        """With --json, the error and the RPC URL line go to stderr; stdout has only the JSON error (#241)."""
         from typer.testing import CliRunner as _Runner
 
         error = exceptions.ChainConnectionError("RPC health check failed", rpc_url=RPC_URLS_WITH_KEY[0])
@@ -7431,7 +7434,12 @@ class TestChainErrorRedaction:
         result = _Runner(mix_stderr=False).invoke(app, ["chain", "balance", "--json"])
 
         assert result.exit_code == 1
-        assert result.stdout == ""
+        assert json.loads(result.stdout) == {
+            "error": "connection_failed",
+            "message": "RPC health check failed",
+            "rpc_url": redact_url(RPC_URLS_WITH_KEY[0]),
+        }
+        assert RPC_KEY not in result.stdout
         assert "RPC URL: https://base-sepolia.g.alchemy.com/" in result.stderr
         assert RPC_KEY not in result.stderr
 
@@ -7671,7 +7679,9 @@ class TestMergeErrorLinesOnStderr:
             app, ["chain", "merge", "a" * 64, "b" * 64, "c" * 64, "--json"]
         )
         assert result.exit_code == 1
-        assert result.stdout == ""
+        # stdout has only the JSON error (#241); the text lines stay on stderr
+        assert json.loads(result.stdout) == {
+            "error": "not_registered", "message": "not registered", "data_hash": "a" * 64}
         assert f"Hash: {'a' * 64}" in result.stderr
 
 
@@ -7860,9 +7870,9 @@ class TestStampsExtendPaid:
 
     def _extend(self, mocker, *args, global_args=(), effect=None):
         mock_client = mocker.MagicMock()
-        mock_client.extend_stamp.return_value = DUMMY_STAMP
+        mock_client.extend_stamp_details.return_value = StampExtensionResponse(batchID=DUMMY_STAMP)
         if effect is not None:
-            mock_client.extend_stamp.side_effect = effect
+            mock_client.extend_stamp_details.side_effect = effect
         constructor = mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
         result = runner.invoke(app, [*global_args, "stamps", "extend", DUMMY_STAMP, *args])
         return result, mock_client, constructor
@@ -7871,15 +7881,15 @@ class TestStampsExtendPaid:
     def test_duration_hours_sent(self, mocker, flag):
         result, client, _ = self._extend(mocker, flag, "48")
         assert result.exit_code == 0, result.output
-        assert client.extend_stamp.call_args.kwargs["duration_hours"] == 48
-        assert client.extend_stamp.call_args.kwargs.get("amount") is None
+        assert client.extend_stamp_details.call_args.kwargs["duration_hours"] == 48
+        assert client.extend_stamp_details.call_args.kwargs.get("amount") is None
         assert "SUCCESS: Stamp extended" in result.output
         assert f"Batch ID: {DUMMY_STAMP}" in result.output
 
     def test_neither_option_leaves_the_gateway_default(self, mocker):
         result, client, _ = self._extend(mocker)
         assert result.exit_code == 0, result.output
-        kwargs = client.extend_stamp.call_args.kwargs
+        kwargs = client.extend_stamp_details.call_args.kwargs
         assert kwargs.get("duration_hours") is None and kwargs.get("amount") is None
 
     def test_x402_client_used(self, mocker):
@@ -7894,20 +7904,20 @@ class TestStampsExtendPaid:
         result, client, _ = self._extend(mocker, "--amount", "5000000000", "--duration-hours", "48")
         assert result.exit_code == 1
         assert "not both" in result.output
-        client.extend_stamp.assert_not_called()
+        client.extend_stamp_details.assert_not_called()
 
     def test_duration_below_24_refused(self, mocker):
         result, client, _ = self._extend(mocker, "--duration-hours", "10")
         assert result.exit_code == 1
         assert "at least 24" in result.output
-        client.extend_stamp.assert_not_called()
+        client.extend_stamp_details.assert_not_called()
 
     @pytest.mark.parametrize("amount", ["0", "-5"])
     def test_amount_not_positive_refused(self, mocker, amount):
         result, client, constructor = self._extend(mocker, "--amount", amount, global_args=["--x402"])
         assert result.exit_code == 1
         assert "greater than 0" in result.output
-        client.extend_stamp.assert_not_called()
+        client.extend_stamp_details.assert_not_called()
         constructor.assert_not_called()
 
     def test_help_describes_amount_as_plur(self):
@@ -7937,7 +7947,7 @@ class TestStampsExtendPaid:
         err = exceptions.PaymentDeliveredNotStoredError("Paid once.", transaction="0x" + "cd" * 32,
                                                         **self.PAYMENT)
         mock_client = mocker.MagicMock()
-        mock_client.extend_stamp.side_effect = err
+        mock_client.extend_stamp_details.side_effect = err
         mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
         result = CliRunner(mix_stderr=False).invoke(
             app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
@@ -9180,6 +9190,1374 @@ class TestReplacedAdviceOneSource:
         assert "chain get" in cli._replaced_cli_advice("DelegateAuthorized")
 
 
+# --- --json: stdout carries exactly one JSON document (#211, #241) ---
+
+JSON_TX = "0x" + "e7" * 32
+
+
+def _json_runner():
+    """A runner that keeps stderr out of result.stdout (Click 8.1 mixes them by default)."""
+    try:
+        return CliRunner(mix_stderr=False)
+    except TypeError:  # Click 8.2+ always keeps them apart
+        return CliRunner()
+
+
+def _one_json_document(result) -> dict:
+    """result.stdout is exactly one JSON document (json.loads refuses two, or text around it)."""
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise AssertionError(f"stdout is not one JSON document ({e}):\n{result.stdout!r}\n"
+                             f"stderr:\n{result.stderr}") from e
+
+
+def _error_code(document: dict) -> str:
+    """The error code of an error document, also of a composite (chain protect) failure."""
+    if "unconfirmed" in document:
+        return document["unconfirmed"]["error"]
+    error = document["error"]
+    return error if isinstance(error, str) else error["error"]
+
+
+def _json_result(**fields):
+    """A chain result stand-in whose model_dump() is JSON."""
+    from unittest.mock import MagicMock
+
+    result = MagicMock()
+    result.model_dump.return_value = {"tx_hash": JSON_TX, **fields}
+    return result
+
+
+def _active_record():
+    from swarm_provenance_uploader.models import DataStatusEnum
+
+    record = _json_result(status="ACTIVE")
+    record.status = DataStatusEnum.ACTIVE
+    return record
+
+
+# Every chain command that has --json: (id, command line, the first client method it calls)
+JSON_CHAIN_COMMANDS = [
+    ("balance", ["chain", "balance"], "balance"),
+    ("get", ["chain", "get", DUMMY_SWARM_REF], "get"),
+    ("get-follow", ["chain", "get", DUMMY_SWARM_REF, "--follow"], "get_provenance_chain"),
+    ("anchor", ["chain", "anchor", DUMMY_SWARM_REF], "anchor"),
+    ("set-storage-ref", ["chain", "set-storage-ref", DUMMY_SWARM_REF, "c" * 64], "set_storage_ref"),
+    ("wait", ["chain", "wait", JSON_TX], "wait_for_transaction"),
+    ("lookup", ["chain", "lookup", DUMMY_SWARM_REF], "get_by_storage_ref"),
+    ("access", ["chain", "access", DUMMY_SWARM_REF], "access"),
+    ("status", ["chain", "status", DUMMY_SWARM_REF], "get"),
+    ("status-set", ["chain", "status", DUMMY_SWARM_REF, "--set", "restricted"], "set_status"),
+    ("transfer", ["chain", "transfer", DUMMY_SWARM_REF, "--to", DUMMY_ADDRESS], "transfer_ownership"),
+    ("delegate", ["chain", "delegate", DUMMY_ADDRESS, "--authorize"], "set_delegate"),
+    ("transform", ["chain", "transform", DUMMY_SWARM_REF, "b" * 64], "transform"),
+    ("transform-restrict", ["chain", "transform", DUMMY_SWARM_REF, "b" * 64, "--restrict-original"],
+     "transform"),
+    ("protect", ["chain", "protect", DUMMY_SWARM_REF, "b" * 64], "get"),
+    ("merge", ["chain", "merge", DUMMY_SWARM_REF, "b" * 64, "c" * 64], "merge_transform"),
+]
+JSON_CHAIN_IDS = [c[0] for c in JSON_CHAIN_COMMANDS]
+
+
+def _successful_chain_client(mocker):
+    """A chain client mock on which every command succeeds with JSON-able results."""
+    client = mocker.MagicMock()
+    for method in ("balance", "anchor", "set_storage_ref", "wait_for_transaction", "get_by_storage_ref",
+                   "access", "set_status", "transfer_ownership", "set_delegate", "transform",
+                   "merge_transform"):
+        getattr(client, method).return_value = _json_result()
+    client.get.return_value = _active_record()
+    client.get_provenance_chain.return_value = [_json_result()]
+    mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=client)
+    return client
+
+
+class TestJsonModeHelper:
+    """_json_mode redirects stdout to stderr and always restores it."""
+
+    def test_restores_stdout_after_normal_exit(self):
+        import sys
+        from swarm_provenance_uploader import cli
+
+        before = sys.stdout
+        with cli._json_mode(True):
+            assert sys.stdout is sys.stderr
+            assert cli._json_output["stream"] is before
+        assert sys.stdout is before
+        assert cli._json_output == {"stream": None, "written": False}
+
+    @pytest.mark.parametrize("error", [RuntimeError("boom"), typer.Exit(code=1), KeyboardInterrupt()],
+                             ids=["exception", "typer-exit", "keyboard-interrupt"])
+    def test_restores_stdout_when_the_command_raises(self, error):
+        import sys
+        from swarm_provenance_uploader import cli
+
+        before = sys.stdout
+        with pytest.raises(type(error)):
+            with cli._json_mode(True):
+                cli._echo_json("{}")
+                raise error
+        assert sys.stdout is before
+        assert cli._json_output == {"stream": None, "written": False}
+
+    def test_off_does_not_redirect(self):
+        import sys
+        from swarm_provenance_uploader import cli
+
+        before = sys.stdout
+        with cli._json_mode(False):
+            assert sys.stdout is before
+            cli._json_error("chain_error", "ignored")  # no-op without --json
+            assert cli._json_output["written"] is False
+
+    def test_json_error_prints_once(self, capsys):
+        from swarm_provenance_uploader import cli
+
+        with cli._json_mode(True):
+            cli._json_error("chain_error", "first")
+            cli._json_error("connection_failed", "second")
+        assert json.loads(capsys.readouterr().out) == {"error": "chain_error", "message": "first"}
+
+    def test_stdout_works_after_a_failed_json_command(self, mocker):
+        """A --json command that raises leaves no redirect behind for the next command."""
+        client = _successful_chain_client(mocker)
+        client.balance.side_effect = KeyError("boom")
+        first = _json_runner().invoke(app, ["chain", "balance", "--json"])
+        assert first.exit_code == 1
+        assert _error_code(_one_json_document(first)) == "chain_error"
+
+        client.balance.side_effect = None
+        client.balance.return_value = mocker.MagicMock(
+            address=DUMMY_ADDRESS, balance_eth="1.0", chain="base-sepolia", contract_address=DUMMY_ADDRESS)
+        second = _json_runner().invoke(app, ["chain", "balance"])
+        assert second.exit_code == 0, second.output
+        assert "Chain Wallet:" in second.stdout
+        assert "Chain Wallet:" not in second.stderr
+
+
+class TestJsonStdoutHasOnlyTheDocument:
+    """With --json, progress and debug lines go to stderr (#211)."""
+
+    def _collection_client(self, mocker, purchase_effect=None):
+        from swarm_provenance_uploader.models import ManifestUploadResponse
+
+        client = mocker.MagicMock()
+        client.purchase_stamp.return_value = DUMMY_STAMP
+        if purchase_effect is not None:
+            client.purchase_stamp.side_effect = purchase_effect
+        client.acquire_stamp_from_pool.return_value = mocker.MagicMock(
+            batch_id=DUMMY_STAMP, fallback_used=False)
+        client.get_stamp.return_value = _usable_stamp(DUMMY_STAMP)
+        client.upload_manifest.return_value = ManifestUploadResponse(
+            reference=DUMMY_SWARM_REF, file_count=1, message="Manifest uploaded")
+        mocker.patch("swarm_provenance_uploader.cli.time.sleep")
+        return client
+
+    def _upload_collection(self, *args, user_input=None):
+        runner_ = _json_runner()
+        with runner_.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/data.csv", "w") as f:
+                f.write("a,b\n1,2")
+            return runner_.invoke(app, [*args[:-1], "upload-collection", "mydir", *args[-1]],
+                                  input=user_input)
+
+    @pytest.mark.parametrize("args,progress", [
+        (["--stamp-id", DUMMY_STAMP], "Using existing stamp"),
+        (["--usePool"], "Acquiring stamp from pool"),
+        ([], "Purchasing postage stamp"),
+        (["-v"], "Collection Upload Config"),
+    ], ids=["existing-stamp", "pool", "bought", "verbose"])
+    def test_upload_collection_progress_goes_to_stderr(self, mocker, args, progress):
+        client = self._collection_client(mocker)
+        mocker.patch("swarm_provenance_uploader.cli._get_gateway_client_with_x402", return_value=client)
+
+        result = self._upload_collection([*args, "--json"])
+
+        assert result.exit_code == 0, result.output
+        document = _one_json_document(result)
+        assert document["swarm_reference"] == DUMMY_SWARM_REF
+        assert progress in result.stderr
+        assert "Checking stamp usability" in result.stderr or "Attempt 1" in result.stderr
+        assert "Uploading collection to Swarm" in result.stderr
+
+    def test_upload_collection_payment_prompt_goes_to_stderr(self, mocker):
+        """The x402 prompt and its answer line are on stderr; stdout is the document."""
+        _x402_config.update(enabled=True)
+        client = self._collection_client(mocker)
+        constructor = mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=client)
+
+        def purchase(**kwargs):
+            pay = constructor.call_args.kwargs["x402_payment_callback"]
+            assert pay("$0.050000", "stamp purchase") is True
+            return DUMMY_STAMP
+
+        client.purchase_stamp.side_effect = purchase
+
+        result = self._upload_collection(["--json"], user_input="y\n")
+
+        assert result.exit_code == 0, result.output
+        assert _one_json_document(result)["stamp_id"] == DUMMY_STAMP
+        assert "Payment required: $0.050000 USDC" in result.stderr
+        assert "Pay now?" in result.stderr
+        assert "Processing payment..." in result.stderr
+
+    def test_upload_collection_library_debug_goes_to_stderr(self, mocker):
+        """print() debug lines of the gateway client (-v) do not reach stdout."""
+        def purchase(**kwargs):
+            print("DEBUG: Purchased stamp ID: " + DUMMY_STAMP)
+            return DUMMY_STAMP
+
+        client = self._collection_client(mocker, purchase_effect=purchase)
+        mocker.patch("swarm_provenance_uploader.cli._get_gateway_client_with_x402", return_value=client)
+
+        result = self._upload_collection(["-v", "--json"])
+
+        assert result.exit_code == 0, result.output
+        _one_json_document(result)
+        assert "DEBUG: Purchased stamp ID" in result.stderr
+
+    @pytest.mark.parametrize("command_id,args,method", JSON_CHAIN_COMMANDS, ids=JSON_CHAIN_IDS)
+    def test_chain_debug_lines_go_to_stderr(self, mocker, command_id, args, method):
+        """ChainClient prints DEBUG lines with -v; with --json they are on stderr."""
+        client = _successful_chain_client(mocker)
+        result_value = getattr(client, method).return_value
+
+        def noisy(*a, **kw):
+            print("DEBUG: Transaction sent: " + JSON_TX)
+            return result_value
+
+        getattr(client, method).side_effect = noisy
+
+        result = _json_runner().invoke(app, [*args, "-v", "--json"])
+
+        assert result.exit_code == 0, result.output
+        _one_json_document(result)
+        assert "DEBUG: Transaction sent" in result.stderr
+
+
+def _chain_error(kind):
+    """A chain error of the given kind, built fresh for each test."""
+    from swarm_provenance_uploader.exceptions import ReceiptTimeoutError
+
+    return {
+        "connection": lambda: exceptions.ChainConnectionError(
+            "RPC health check failed", rpc_url=RPC_URLS_WITH_KEY[0]),
+        "chain": lambda: exceptions.ChainError("the contract refused"),
+        "transaction": lambda: exceptions.ChainTransactionError("reverted", tx_hash=JSON_TX),
+        "not_registered": lambda: exceptions.DataNotRegisteredError("not registered", data_hash="a" * 64),
+        "validation": lambda: exceptions.ChainValidationError("duplicate source hash"),
+        "unexpected": lambda: KeyError(f"no field in answer from {RPC_URLS_WITH_KEY[0]}"),
+        "funds": lambda: exceptions.InsufficientFundsError(
+            "Insufficient funds", wallet_address=DUMMY_ADDRESS, balance_wei=1,
+            estimated_cost_wei=2, chain_name="base-sepolia"),
+        "timeout": lambda: ReceiptTimeoutError(
+            "Not confirmed yet", tx_hash=JSON_TX, event_name="DataRegistered", expected_count=1,
+            contract_address=DUMMY_ADDRESS, explorer_url=None, reason="no receipt", timeout=120),
+        "tx_not_found": lambda: exceptions.TransactionNotFoundError("unknown transaction", tx_hash=JSON_TX),
+    }[kind]()
+
+
+_READS = {"balance", "get", "get-follow", "lookup", "status"}
+_WRITES = {"anchor", "set-storage-ref", "access", "status-set", "transfer", "delegate", "transform",
+           "transform-restrict", "merge"}
+_NOT_REGISTERED = {"get", "lookup", "status", "status-set", "transform", "merge", "get-follow"}
+
+
+def _chain_error_cases():
+    """(command id, args, method, error kind, expected code, expected exit code) for every path."""
+    cases = []
+    for command_id, args, method in JSON_CHAIN_COMMANDS:
+        kinds = [("connection", "connection_failed", 1), ("chain", "chain_error", 1),
+                 ("unexpected", "chain_error", 1)]
+        if command_id in _WRITES:
+            kinds += [("transaction", "transaction_failed", 1), ("funds", "insufficient_funds", 1),
+                      ("timeout", "receipt_timeout", 3)]
+        if command_id in _NOT_REGISTERED:
+            kinds.append(("not_registered", "not_registered", 1))
+        if command_id == "merge":
+            kinds.append(("validation", "invalid_input", 1))
+        if command_id == "wait":
+            kinds = [("connection", "connection_failed", 3), ("chain", "chain_error", 1),
+                     ("unexpected", "chain_error", 1), ("transaction", "transaction_failed", 1),
+                     ("tx_not_found", "not_found", 1), ("timeout", "receipt_timeout", 3)]
+        if command_id == "protect":
+            kinds = [("connection", "connection_failed", 1), ("chain", "chain_error", 1),
+                     ("not_registered", "not_registered", 1), ("unexpected", "chain_error", 1)]
+        for kind, code, exit_code in kinds:
+            cases.append(pytest.param(args, method, kind, code, exit_code, id=f"{command_id}-{kind}"))
+    return cases
+
+
+class TestJsonErrorDocuments:
+    """With --json, every error is one JSON document on stdout, and the exit code is unchanged (#241)."""
+
+    @pytest.mark.parametrize("args,method,kind,code,exit_code", _chain_error_cases())
+    def test_chain_error_paths(self, mocker, args, method, kind, code, exit_code):
+        client = _successful_chain_client(mocker)
+        getattr(client, method).side_effect = _chain_error(kind)
+
+        result = _json_runner().invoke(app, [*args, "--json"])
+
+        assert result.exit_code == exit_code, result.output
+        document = _one_json_document(result)
+        assert _error_code(document) == code, document
+        assert RPC_KEY not in result.stdout
+
+    def test_connection_error_document_has_redacted_rpc_url(self, mocker):
+        client = _successful_chain_client(mocker)
+        client.anchor.side_effect = _chain_error("connection")
+
+        result = _json_runner().invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
+
+        assert json.loads(result.stdout) == {
+            "error": "connection_failed", "message": "RPC health check failed",
+            "rpc_url": redact_url(RPC_URLS_WITH_KEY[0])}
+        assert "ERROR: Cannot connect to chain" in result.stderr
+
+    def test_unexpected_error_document_is_redacted(self, mocker):
+        client = _successful_chain_client(mocker)
+        client.get.side_effect = _chain_error("unexpected")
+
+        result = _json_runner().invoke(app, ["chain", "get", DUMMY_SWARM_REF, "--json"])
+
+        document = _one_json_document(result)
+        assert document["message"].startswith("Chain command failed: KeyError: ")
+        assert "https://base-sepolia.g.alchemy.com/" in document["message"]
+        assert RPC_KEY not in result.stdout + result.stderr
+
+    @pytest.mark.parametrize("args", [
+        ["chain", "get", DUMMY_SWARM_REF],
+        ["chain", "lookup", DUMMY_SWARM_REF],
+        ["chain", "status", DUMMY_SWARM_REF],
+    ], ids=["get", "lookup", "status"])
+    def test_not_found_text_is_not_on_stdout(self, mocker, args):
+        client = _successful_chain_client(mocker)
+        client.get.side_effect = _chain_error("not_registered")
+        client.get_by_storage_ref.side_effect = _chain_error("not_registered")
+
+        result = _json_runner().invoke(app, [*args, "--json"])
+
+        assert result.exit_code == 1
+        assert _one_json_document(result)["error"] == "not_registered"
+        assert "Not found:" in result.stderr
+
+    def test_get_follow_empty_chain_is_not_registered(self, mocker):
+        client = _successful_chain_client(mocker)
+        client.get_provenance_chain.return_value = []
+
+        result = _json_runner().invoke(app, ["chain", "get", DUMMY_SWARM_REF, "--follow", "--json"])
+
+        assert result.exit_code == 1
+        assert _one_json_document(result) == {
+            "error": "not_registered", "message": f"{DUMMY_SWARM_REF} is not registered on-chain.",
+            "data_hash": DUMMY_SWARM_REF}
+
+    def test_protect_not_active_is_one_document(self, mocker):
+        from swarm_provenance_uploader.models import DataStatusEnum
+
+        client = _successful_chain_client(mocker)
+        client.get.return_value.status = DataStatusEnum.RESTRICTED
+
+        result = _json_runner().invoke(app, ["chain", "protect", DUMMY_SWARM_REF, "b" * 64, "--json"])
+
+        assert result.exit_code == 1
+        assert _error_code(_one_json_document(result)) == "not_active"
+
+    def test_anchor_already_registered_is_one_document(self, mocker):
+        client = _successful_chain_client(mocker)
+        client.anchor.side_effect = exceptions.DataAlreadyRegisteredError(
+            "already registered", data_hash=DUMMY_SWARM_REF, owner=DUMMY_ADDRESS, timestamp=1,
+            data_type="swarm-provenance")
+
+        result = _json_runner().invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
+
+        assert result.exit_code == 1
+        assert _error_code(_one_json_document(result)) == "already_registered"
+
+    @pytest.mark.parametrize("args", [
+        ["chain", "status", DUMMY_SWARM_REF, "--set", "bogus"],
+        ["chain", "delegate", DUMMY_ADDRESS],
+        ["chain", "delegate", DUMMY_ADDRESS, "--authorize", "--revoke"],
+        ["chain", "merge", DUMMY_SWARM_REF, "b" * 64],
+    ], ids=["status-bad-value", "delegate-no-flag", "delegate-both-flags", "merge-two-hashes"])
+    def test_invalid_input(self, mocker, args):
+        _successful_chain_client(mocker)
+
+        result = _json_runner().invoke(app, [*args, "--json"])
+
+        assert result.exit_code == 1
+        assert _one_json_document(result)["error"] == "invalid_input"
+        assert "ERROR:" in result.stderr
+
+    @pytest.mark.parametrize("args,exit_code", [
+        (["chain", "wait", JSON_TX, "--count", "2"], 2),     # --count needs --event
+        (["chain", "wait", "0x1234"], 2),                     # not a transaction hash
+        (["chain", "anchor"], 2),                             # missing argument
+        (["--bogus", "chain", "balance"], 2),                 # unknown global option
+        (["--x402=1", "chain", "balance"], 2),                # a value for a global flag
+        (["chain", "get", DUMMY_SWARM_REF, "--follow=x"], 2),  # a value for a command flag
+        (["chain", "balance", "--json=1"], 2),                # a value for --json itself
+        (["chain", "anchor", DUMMY_SWARM_REF, "-t", "--", "--json=1"], 2),  # "--" as an option value
+        (["chain", "--bogus", "balance"], 2),                 # unknown group option
+        (["--backend", "nowhere", "chain", "balance"], 1),
+        (["--chain", "mars", "chain", "balance"], 1),
+        (["--x402-network", "mars", "upload-collection", "mydir"], 1),
+        (["--idempotency-key", "", "upload-collection", "mydir"], 1),
+        (["--max-pay", "lots", "upload-collection", "mydir"], 1),
+    ], ids=["wait-count-without-event", "wait-bad-hash", "anchor-missing-arg", "unknown-global-option",
+            "global-flag-with-value", "command-flag-with-value", "json-with-value", "double-dash-as-a-value",
+            "unknown-group-option", "bad-backend", "bad-chain", "bad-x402-network", "bad-idempotency-key", "bad-max-pay"])
+    def test_errors_before_the_command_runs(self, mocker, args, exit_code):
+        """Global option checks and usage errors are JSON too, with their exit codes."""
+        _successful_chain_client(mocker)
+
+        result = _json_runner().invoke(app, [*args, "--json"])
+
+        assert result.exit_code == exit_code, result.output
+        assert _one_json_document(result)["error"] == "invalid_input"
+
+    def test_usage_error_without_json_prints_no_document(self):
+        result = _json_runner().invoke(app, ["chain", "wait", "0x1234"])
+        assert result.exit_code == 2
+        assert result.stdout == ""
+
+
+class TestJsonChainSetupErrors:
+    """With --json, chain client setup failures are JSON on stdout for every chain command (#241)."""
+
+    @pytest.mark.parametrize("command_id,args,method", JSON_CHAIN_COMMANDS, ids=JSON_CHAIN_IDS)
+    def test_unsupported_chain_name(self, command_id, args, method):
+        pytest.importorskip("web3")
+        _chain_config["chain"] = "nochain"
+
+        result = _json_runner().invoke(app, [*args, "--json"])
+
+        assert result.exit_code == 1, result.output
+        document = _one_json_document(result)
+        assert document["error"] == "configuration_error"
+        assert "Unsupported chain: nochain" in document["message"]
+        assert "ERROR: Chain configuration invalid" in result.stderr
+
+    @pytest.mark.parametrize("command_id,args,method", JSON_CHAIN_COMMANDS, ids=JSON_CHAIN_IDS)
+    def test_invalid_contract_address(self, command_id, args, method, monkeypatch):
+        pytest.importorskip("web3")
+        monkeypatch.setenv("PROVENANCE_WALLET_KEY", "0x" + "11" * 32)
+        _chain_config["contract"] = "0xnotanaddress"
+
+        result = _json_runner().invoke(app, [*args, "--json"])
+
+        assert result.exit_code == 1, result.output
+        document = _one_json_document(result)
+        assert document["error"] == "configuration_error"
+        assert "0xnotanaddress" in document["message"]
+
+    def test_invalid_contract_address_text(self, monkeypatch):
+        """Without --json, an invalid CHAIN_CONTRACT is a configuration error, not "Chain command failed"."""
+        pytest.importorskip("web3")
+        _chain_config["contract"] = "0xnotanaddress"
+
+        result = _json_runner().invoke(app, ["chain", "get", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert "ERROR: Chain configuration invalid:" in result.stderr
+        assert "0xnotanaddress" in result.stderr
+        assert "Chain command failed" not in result.stderr
+
+    @pytest.mark.parametrize("command_id,args,method", JSON_CHAIN_COMMANDS, ids=JSON_CHAIN_IDS)
+    def test_missing_web3(self, command_id, args, method, monkeypatch):
+        """web3 not installed: ChainProvider raises ChainConfigurationError from an ImportError."""
+        import sys
+        from swarm_provenance_uploader.chain import provider
+
+        monkeypatch.setattr(provider, "_Web3", None)
+        monkeypatch.setitem(sys.modules, "web3", None)
+
+        result = _json_runner().invoke(app, [*args, "--json"])
+
+        assert result.exit_code == 1, result.output
+        document = _one_json_document(result)
+        assert document["error"] == "missing_dependencies"
+        assert document["install"].startswith("pip install")
+
+    @pytest.mark.parametrize("command_id,args,method", JSON_CHAIN_COMMANDS, ids=JSON_CHAIN_IDS)
+    def test_chain_client_module_missing(self, command_id, args, method, monkeypatch):
+        import sys
+
+        monkeypatch.setitem(sys.modules, "swarm_provenance_uploader.core.chain_client", None)
+
+        result = _json_runner().invoke(app, [*args, "--json"])
+
+        assert result.exit_code == 1, result.output
+        document = _one_json_document(result)
+        assert document["error"] == "missing_dependencies"
+        assert "Install with:" in result.stderr
+
+
+class TestJsonUploadCollectionErrors:
+    """upload-collection --json: every error is one JSON document on stdout (#211)."""
+
+    def _client(self, mocker):
+        from swarm_provenance_uploader.models import ManifestUploadResponse
+
+        client = mocker.MagicMock()
+        client.purchase_stamp.return_value = DUMMY_STAMP
+        client.get_stamp.return_value = _usable_stamp(DUMMY_STAMP)
+        client.upload_manifest.return_value = ManifestUploadResponse(
+            reference=DUMMY_SWARM_REF, file_count=1, message="Manifest uploaded")
+        mocker.patch("swarm_provenance_uploader.cli._get_gateway_client_with_x402", return_value=client)
+        mocker.patch("swarm_provenance_uploader.cli.time.sleep")
+        return client
+
+    def _invoke(self, *args, directory="mydir", files=True, global_args=()):
+        runner_ = _json_runner()
+        with runner_.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            os.mkdir("emptydir")
+            if files:
+                with open("mydir/data.csv", "w") as f:
+                    f.write("a,b\n1,2")
+            return runner_.invoke(app, [*global_args, "upload-collection", directory, *args, "--json"])
+
+    def _assert_error(self, result, code, exit_code=1):
+        assert result.exit_code == exit_code, result.output
+        document = _one_json_document(result)
+        assert document["error"] == code, document
+        assert "ERROR" in result.stderr
+        return document
+
+    def test_requires_gateway_backend(self, mocker):
+        self._client(mocker)
+        self._assert_error(self._invoke(global_args=["--backend", "local"]), "configuration_error")
+
+    def test_bad_stamp_id(self, mocker):
+        self._client(mocker)
+        self._assert_error(self._invoke("--stamp-id", "abc"), "invalid_input")
+
+    def test_not_a_directory(self, mocker):
+        self._client(mocker)
+        self._assert_error(self._invoke(directory="missing"), "invalid_input")
+
+    def test_empty_directory(self, mocker):
+        self._client(mocker)
+        self._assert_error(self._invoke(directory="emptydir"), "invalid_input")
+
+    def test_directory_scan_fails(self, mocker):
+        self._client(mocker)
+        mocker.patch("swarm_provenance_uploader.cli.file_utils.calculate_directory_hash_and_files",
+                     side_effect=ValueError("symlink outside the directory"))
+        self._assert_error(self._invoke(), "invalid_input")
+
+    def test_tar_fails(self, mocker):
+        self._client(mocker)
+        mocker.patch("swarm_provenance_uploader.cli.file_utils.create_tar_from_directory",
+                     side_effect=OSError("disk full"))
+        assert self._assert_error(self._invoke(), "upload_failed")["step"] == "archive"
+
+    def test_pool_not_enabled(self, mocker):
+        client = self._client(mocker)
+        client.acquire_stamp_from_pool.side_effect = exceptions.PoolNotEnabledError("pool off")
+        self._assert_error(self._invoke("--usePool"), "configuration_error")
+
+    def test_stamp_purchase_fails(self, mocker):
+        client = self._client(mocker)
+        client.purchase_stamp.side_effect = RuntimeError("gateway down")
+        assert self._assert_error(self._invoke(), "upload_failed")["step"] == "stamp"
+
+    def test_payment_required(self, mocker):
+        client = self._client(mocker)
+        client.purchase_stamp.side_effect = exceptions.PaymentRequiredError("402 from the gateway")
+        self._assert_error(self._invoke(), "payment_required")
+
+    def test_payment_outcome_unknown(self, mocker):
+        client = self._client(mocker)
+        client.purchase_stamp.side_effect = exceptions.PaymentOutcomeUnknownError(
+            "the connection dropped", payer=DUMMY_ADDRESS, nonce="0x01", amount_usd="$0.05",
+            network="base-sepolia", idempotency_key="retry-1")
+        document = self._assert_error(self._invoke(), "payment_outcome_unknown")
+        assert document["payer"] == DUMMY_ADDRESS
+        assert document["idempotency_key"] == "retry-1"
+
+    def test_stamp_not_usable(self, mocker):
+        client = self._client(mocker)
+        client.get_stamp.return_value = _usable_stamp(DUMMY_STAMP, usable=False)
+        document = self._assert_error(self._invoke("--stamp-retries", "1"), "stamp_not_usable")
+        assert document["stamp_id"] == DUMMY_STAMP
+
+    def test_upload_fails(self, mocker):
+        client = self._client(mocker)
+        client.upload_manifest.side_effect = RuntimeError("upload refused")
+        assert self._assert_error(self._invoke(), "upload_failed")["step"] == "upload"
+
+    def test_invalid_env_auto_pay_limit(self, mocker):
+        _x402_config.update(enabled=True, max_auto_pay_usd="nan")
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient")
+        self._assert_error(self._invoke(), "configuration_error")
+
+
+class TestStampsExtendExpiry:
+    """stamps extend prints the expiry the gateway reported after the extension (#217).
+
+    The gateway reads it right after the top-up, so it is an estimate that may
+    not include the extension yet.
+    """
+
+    def _extend(self, mocker, expires_at):
+        client = mocker.MagicMock()
+        client.extend_stamp_details.return_value = StampExtensionResponse(
+            batchID=DUMMY_STAMP, message="Postage stamp extended successfully", expires_at=expires_at)
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=client)
+        return runner.invoke(app, ["stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
+
+    def test_prints_the_expiry_the_gateway_reported(self, mocker):
+        """Not presented as the expiry after the extension: it may not include it yet."""
+        result = self._extend(mocker, "2026-12-01T10:00:00Z")
+        assert result.exit_code == 0, result.output
+        assert f"Batch ID: {DUMMY_STAMP}" in result.stdout
+        assert ("Expiry reported by the gateway: 2026-12-01T10:00:00Z (an estimate at today's price, "
+                "read right after the top-up; it may not include this extension yet. Check with: "
+                f"swarm-prov-upload stamps info {DUMMY_STAMP})") in result.stdout
+        assert "New expiry" not in result.stdout
+        assert "it can take" not in result.stdout
+
+    def test_unknown_expiry_points_to_stamps_info(self, mocker):
+        result = self._extend(mocker, None)
+        assert result.exit_code == 0, result.output
+        assert "Expiry: not available." in result.stdout
+        assert f"swarm-prov-upload stamps info {DUMMY_STAMP}" in result.stdout
+
+    @pytest.mark.parametrize("expires_at", [
+        "2026-12-01T10:00:00Z\x1b[2J", "next tuesday", "2026-12-01T10:00:00Z" + "x" * 5000, "9" * 5000,
+        "2026-12-01",
+        "2026-12-01T10:00:00.123456789Z", "2026-12-01T10:00:00+02:00", "2026-13-01T10:00:00Z",
+        "2026-12-01T10:00Z", "2026-12-01 10:00:00Z", "２０２６-12-01T10:00:00Z", "2026-12-01T10:00:00",
+    ], ids=["control-characters", "not-iso", "5000-characters-after-a-timestamp", "5000-digits", "date-only",
+            "nanoseconds", "other-offset", "month-13", "no-seconds", "space-separator", "unicode-digits",
+            "no-offset"])
+    def test_expiry_that_is_not_a_timestamp_is_not_printed(self, mocker, expires_at):
+        """Only the gateway's shapes (Z or +00:00, up to microseconds) are printed, on 3.9 as on 3.13 (#217)."""
+        result = self._extend(mocker, expires_at)
+        assert result.exit_code == 0, result.output
+        assert "Expiry: not available." in result.stdout
+        assert "\x1b" not in result.stdout
+        assert "next tuesday" not in result.stdout
+        assert len(result.stdout) < 500
+
+    @pytest.mark.parametrize("expires_at", [
+        "2026-12-01T10:00:00+00:00", "2026-12-01T10:00:00.123Z", "2026-12-01T10:00:00.123456Z",
+        "2026-12-01T10:00:00.5+00:00",
+    ])
+    def test_other_iso_forms_are_printed(self, mocker, expires_at):
+        result = self._extend(mocker, expires_at)
+        assert f"Expiry reported by the gateway: {expires_at} (an estimate at today's price," in result.stdout
+
+    @pytest.mark.parametrize("expires_at", [1764583200, {"at": "2026-12-01T10:00:00Z"}],
+                             ids=["int", "dict"])
+    def test_non_string_expiry_from_the_gateway(self, requests_mock, expires_at):
+        """A non-string expires_at does not fail the extension: it is "not reported" (#217)."""
+        requests_mock.patch(
+            f"https://provenance-gateway.datafund.io/api/v1/stamps/{DUMMY_STAMP}/extend",
+            json={"batchID": DUMMY_STAMP, "message": "ok", "expires_at": expires_at})
+
+        result = runner.invoke(app, ["stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
+
+        assert result.exit_code == 0, result.output
+        assert f"Batch ID: {DUMMY_STAMP}" in result.stdout
+        assert "Expiry: not available." in result.stdout
+
+
+class TestJsonReviewRound1:
+    """Review fixes for --json (#211, #241)."""
+
+    def test_delivered_not_stored_at_the_stamp_step_is_a_document(self, mocker):
+        """A stamp bought and paid once, whose result the gateway could not return: still JSON."""
+        client = mocker.MagicMock()
+        client.purchase_stamp.side_effect = exceptions.PaymentDeliveredNotStoredError(
+            "succeeded and was paid once", transaction="0x" + "cd" * 32, payer=DUMMY_ADDRESS,
+            code="IDEMPOTENCY_KEY_DELIVERED_NOT_STORED", idempotency_key="retry-9")
+        mocker.patch("swarm_provenance_uploader.cli._get_gateway_client_with_x402", return_value=client)
+        runner_ = _json_runner()
+        with runner_.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/a.txt", "w") as f:
+                f.write("x")
+            result = runner_.invoke(app, ["upload-collection", "mydir", "--json"])
+
+        assert result.exit_code == 1, result.output
+        document = _one_json_document(result)
+        assert document["error"] == "delivered_not_stored"
+        assert document["transaction"] == "0x" + "cd" * 32
+        assert document["payer"] == DUMMY_ADDRESS
+        assert document["idempotency_key"] == "retry-9"
+        assert "stamps list --wallet" in result.stderr
+
+    def test_keyboard_interrupt_is_a_document(self, mocker):
+        client = _successful_chain_client(mocker)
+        client.balance.side_effect = KeyboardInterrupt()
+
+        result = _json_runner().invoke(app, ["chain", "balance", "--json"])
+
+        assert result.exit_code == 130
+        assert _one_json_document(result) == {"error": "interrupted", "message": "Interrupted."}
+
+    def test_keyboard_interrupt_after_the_document_adds_nothing(self, mocker):
+        """An interrupt after the error document does not print a second one."""
+        client = _successful_chain_client(mocker)
+
+        def fail(*a, **kw):
+            raise KeyboardInterrupt()
+
+        client.balance.side_effect = exceptions.ChainConnectionError("down", rpc_url=None)
+        mocker.patch("swarm_provenance_uploader.cli._print_chain_traceback", side_effect=fail)
+
+        result = _json_runner().invoke(app, ["chain", "balance", "--json"])
+
+        assert result.exit_code == 130
+        assert _one_json_document(result)["error"] == "connection_failed"
+
+    def test_keyboard_interrupt_without_json_prints_no_document(self, mocker):
+        client = _successful_chain_client(mocker)
+        client.balance.side_effect = KeyboardInterrupt()
+
+        result = _json_runner().invoke(app, ["chain", "balance"])
+
+        assert result.exit_code == 130
+        assert result.stdout == ""
+
+    @pytest.mark.parametrize("method,step", [("purchase_stamp", "stamp"), ("upload_manifest", "upload")])
+    @pytest.mark.parametrize("json_flag", [True, False], ids=["json", "text"])
+    def test_upload_failed_messages_are_redacted(self, mocker, method, step, json_flag):
+        from swarm_provenance_uploader.models import ManifestUploadResponse
+
+        client = mocker.MagicMock()
+        client.purchase_stamp.return_value = DUMMY_STAMP
+        client.get_stamp.return_value = _usable_stamp(DUMMY_STAMP)
+        client.upload_manifest.return_value = ManifestUploadResponse(
+            reference=DUMMY_SWARM_REF, file_count=1, message="ok")
+        getattr(client, method).side_effect = RuntimeError(f"refused by {RPC_URLS_WITH_KEY[0]}")
+        mocker.patch("swarm_provenance_uploader.cli._get_gateway_client_with_x402", return_value=client)
+        mocker.patch("swarm_provenance_uploader.cli.time.sleep")
+        runner_ = _json_runner()
+        with runner_.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/a.txt", "w") as f:
+                f.write("x")
+            result = runner_.invoke(app, ["upload-collection", "mydir", *(["--json"] if json_flag else [])])
+
+        assert result.exit_code == 1
+        assert RPC_KEY not in result.stdout + result.stderr
+        assert "https://base-sepolia.g.alchemy.com/" in result.stdout + result.stderr
+        if json_flag:
+            document = _one_json_document(result)
+            assert document["error"] == "upload_failed" and document["step"] == step
+            assert RPC_KEY not in document["message"]
+
+
+class TestJsonOnlyForCommandsWithJson:
+    """Group-level JSON errors apply only when the command's own --json option is set (#241)."""
+
+    def test_upload_has_no_json_option(self, mocker):
+        result = _json_runner().invoke(app, ["upload", "--file", "missing.txt", "--json"])
+        assert result.exit_code == 2
+        assert result.stdout == ""
+        assert "--json" in re.sub(r"\x1b\[[0-9;]*m", "", result.stderr)  # Rich colours under CI
+
+    def test_stamps_extend_has_no_json_option(self):
+        result = _json_runner().invoke(app, ["stamps", "extend", DUMMY_STAMP, "--json"])
+        assert result.exit_code == 2
+        assert result.stdout == ""
+
+    def test_unknown_command_prints_no_document(self):
+        result = _json_runner().invoke(app, ["chain", "verify-all", "--json"])
+        assert result.exit_code == 2
+        assert result.stdout == ""
+
+    def test_json_as_an_option_value_of_upload(self, mocker):
+        """upload --std --json: "--json" is the standard's name; the payment error stays text."""
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient").return_value.purchase_stamp.side_effect = (
+            exceptions.PaymentRequiredError("402 from the gateway"))
+        runner_ = _json_runner()
+        with runner_.isolated_filesystem():
+            with open("f.txt", "w") as f:
+                f.write("x")
+            result = runner_.invoke(app, ["upload", "--file", "f.txt", "--std", "--json"])
+
+        assert result.exit_code == 1, result.output
+        assert '"error"' not in result.stdout
+        assert "ERROR: Payment required" in result.stderr
+
+    def test_json_as_an_option_value_of_a_chain_command(self, mocker):
+        """chain transform --description --json records a text-mode transformation."""
+        client = _successful_chain_client(mocker)
+        client.transform.side_effect = _chain_error("connection")
+
+        result = _json_runner().invoke(
+            app, ["chain", "transform", DUMMY_SWARM_REF, "b" * 64, "--description", "--json"])
+
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert "ERROR: Cannot connect to chain" in result.stderr
+        assert client.transform.call_args.kwargs["description"] == "--json"
+
+    def test_json_after_double_dash_is_an_argument(self, mocker):
+        """chain get -- --json: "--json" is the hash, so the output is text."""
+        client = _successful_chain_client(mocker)
+        client.get.side_effect = _chain_error("not_registered")
+
+        result = _json_runner().invoke(app, ["chain", "get", "--", "--json"])
+
+        assert result.exit_code == 1
+        assert result.stdout.startswith("Not found: --json")
+        assert client.get.call_args.args[0] == "--json"
+
+    def test_usage_error_after_double_dash_json(self):
+        """chain wait -- --json: "--json" is the (invalid) hash; the usage error stays text."""
+        result = _json_runner().invoke(app, ["chain", "wait", "--", "--json"])
+        assert result.exit_code == 2
+        assert result.stdout == ""
+
+    def test_version_is_printed_once(self):
+        result = _json_runner().invoke(app, ["--version", "chain", "balance", "--json"])
+        assert result.exit_code == 0
+        assert result.stdout.count("swarm-prov-upload") == 1
+
+
+class TestJsonReviewRound2:
+    """Review round 2 fixes for --json (#211, #241)."""
+
+    def test_json_with_a_value_alone(self):
+        """--json=1 is a usage error, and --json was asked for: the error is a document."""
+        result = _json_runner().invoke(app, ["chain", "balance", "--json=1"])
+        assert result.exit_code == 2
+        assert _one_json_document(result)["error"] == "invalid_input"
+
+    @pytest.mark.parametrize("args", [
+        ["chain", "verify", DUMMY_SWARM_REF, "--verbose=1"],
+        ["--x402=1", "chain", "verify", DUMMY_SWARM_REF],
+        ["stamps", "extend", DUMMY_STAMP, "--verbose=1"],
+    ], ids=["chain-verify", "global-flag-before-chain-verify", "stamps-extend"])
+    def test_flag_with_value_on_a_text_command_stays_text(self, args):
+        result = _json_runner().invoke(app, args)
+        assert result.exit_code == 2
+        assert result.stdout == ""
+        assert "does not take a value" in re.sub(r"\x1b\[[0-9;]*m", "", result.stderr)
+
+    def _upload(self, mocker, *args, upload_error=None):
+        from swarm_provenance_uploader.models import ManifestUploadResponse
+
+        client = mocker.MagicMock()
+        client.purchase_stamp.return_value = DUMMY_STAMP
+        client.get_stamp.return_value = _usable_stamp(DUMMY_STAMP)
+        client.upload_manifest.return_value = ManifestUploadResponse(
+            reference=DUMMY_SWARM_REF, file_count=1, message="ok")
+        client.upload_manifest.side_effect = upload_error
+        mocker.patch("swarm_provenance_uploader.cli._get_gateway_client_with_x402", return_value=client)
+        mocker.patch("swarm_provenance_uploader.cli.time.sleep")
+        runner_ = _json_runner()
+        with runner_.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/a.txt", "w") as f:
+                f.write("x")
+            return runner_.invoke(app, ["upload-collection", "mydir", *args, "--json"])
+
+    def test_upload_failed_names_the_unused_stamp(self, mocker):
+        result = self._upload(mocker, upload_error=RuntimeError("upload refused"))
+        assert result.exit_code == 1
+        document = _one_json_document(result)
+        assert document["error"] == "upload_failed" and document["step"] == "upload"
+        assert document["unused_stamp_id"] == DUMMY_STAMP
+
+    def test_interrupted_names_the_unused_stamp(self, mocker):
+        result = self._upload(mocker, upload_error=KeyboardInterrupt())
+        assert result.exit_code == 130
+        document = _one_json_document(result)
+        assert document["error"] == "interrupted"
+        assert document["unused_stamp_id"] == DUMMY_STAMP
+
+    def test_no_unused_stamp_with_stamp_id(self, mocker):
+        """A stamp the user gave is not this command's to hand back."""
+        result = self._upload(mocker, "--stamp-id", DUMMY_STAMP, upload_error=RuntimeError("refused"))
+        assert result.exit_code == 1
+        assert "unused_stamp_id" not in _one_json_document(result)
+
+    def test_no_unused_stamp_on_chain_errors(self, mocker):
+        client = _successful_chain_client(mocker)
+        client.balance.side_effect = _chain_error("chain")
+        result = _json_runner().invoke(app, ["chain", "balance", "--json"])
+        assert "unused_stamp_id" not in _one_json_document(result)
+
+    def test_abort_is_a_document(self, mocker):
+        """click's Abort (for example from a prompt) keeps click's exit code 1."""
+        client = _successful_chain_client(mocker)
+        client.anchor.side_effect = click.exceptions.Abort()
+
+        result = _json_runner().invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
+
+        assert result.exit_code == 1
+        assert _one_json_document(result) == {"error": "aborted", "message": "Aborted."}
+
+    def test_abort_without_json_prints_no_document(self, mocker):
+        client = _successful_chain_client(mocker)
+        client.anchor.side_effect = click.exceptions.Abort()
+        result = _json_runner().invoke(app, ["chain", "anchor", DUMMY_SWARM_REF])
+        assert result.exit_code == 1
+        assert result.stdout == ""
+
+
+class TestJsonReviewRound3:
+    """Review round 3 fixes for --json (#211, #241)."""
+
+    def test_double_dash_as_an_option_value_alone(self, mocker):
+        """chain anchor H -t -- --json=1: "--" is the type, so --json=1 is the option."""
+        _successful_chain_client(mocker)
+        result = _json_runner().invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "-t", "--", "--json=1"])
+        assert result.exit_code == 2
+        assert _one_json_document(result)["error"] == "invalid_input"
+
+    @pytest.mark.parametrize("args", [
+        ["--gateway-url", "upload-collection", "--free=1", "chain", "balance", "--json"],
+        ["--gateway-url", "chain", "--x402=1", "chain", "balance", "--json"],
+        ["--idempotency-key", "stamps", "--free=1", "chain", "balance", "--json"],
+    ], ids=["value-is-another-command", "value-is-the-command", "value-is-a-group"])
+    def test_an_option_value_that_names_a_command_is_a_value(self, mocker, args):
+        """The walk skips an option's value, also when it is a command name, as the parser does."""
+        _successful_chain_client(mocker)
+        result = _json_runner().invoke(app, args)
+        assert result.exit_code == 2
+        assert _one_json_document(result)["error"] == "invalid_input"
+
+    def _collection(self, mocker, *args, setup=None):
+        from swarm_provenance_uploader.models import ManifestUploadResponse
+
+        client = mocker.MagicMock()
+        client.purchase_stamp.return_value = DUMMY_STAMP
+        client.get_stamp.return_value = _usable_stamp(DUMMY_STAMP)
+        client.upload_manifest.return_value = ManifestUploadResponse(
+            reference=DUMMY_SWARM_REF, file_count=1, message="ok")
+        mocker.patch("swarm_provenance_uploader.cli._get_gateway_client_with_x402", return_value=client)
+        mocker.patch("swarm_provenance_uploader.cli.time.sleep")
+        if setup:
+            setup(mocker)
+        runner_ = _json_runner()
+        with runner_.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/a.txt", "w") as f:
+                f.write("x")
+            return runner_.invoke(app, ["upload-collection", "mydir", *args])
+
+    @staticmethod
+    def _unreadable(mocker):
+        mocker.patch("swarm_provenance_uploader.cli.file_utils.calculate_directory_hash_and_files",
+                     side_effect=PermissionError(13, "Permission denied", "mydir/a.txt"))
+
+    @staticmethod
+    def _tar_error(mocker):
+        import tarfile
+        mocker.patch("swarm_provenance_uploader.cli.file_utils.create_tar_from_directory",
+                     side_effect=tarfile.TarError(f"bad member, see {RPC_URLS_WITH_KEY[0]}"))
+
+    @staticmethod
+    def _hashing_bug(mocker):
+        mocker.patch("swarm_provenance_uploader.cli.file_utils.calculate_directory_hash_and_files",
+                     side_effect=RuntimeError("hash state lost"))
+
+    @pytest.mark.parametrize("setup,step,text", [
+        (_unreadable.__func__, "scan", "Permission denied"),
+        (_tar_error.__func__, None, "TarError"),
+        (_hashing_bug.__func__, None, "RuntimeError: hash state lost"),
+    ], ids=["unreadable-file", "tar-error", "unexpected-runtime-error"])
+    @pytest.mark.parametrize("json_flag", [True, False], ids=["json", "text"])
+    def test_unexpected_upload_collection_errors(self, mocker, setup, step, text, json_flag):
+        result = self._collection(mocker, *(["--json"] if json_flag else []), setup=setup)
+
+        assert result.exit_code == 1, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit), result.exception
+        assert "Traceback" not in result.stderr
+        assert RPC_KEY not in result.stdout + result.stderr
+        assert "ERROR:" in result.stderr and text in result.stderr
+        if json_flag:
+            document = _one_json_document(result)
+            assert document["error"] == "upload_failed"
+            assert text in document["message"]
+            assert document.get("step") == step
+        else:
+            assert "{" not in result.stdout
+
+
+def _code_scenarios():
+    """One run per error code: (code, function(mocker) -> result)."""
+    from swarm_provenance_uploader.exceptions import (
+        ReceiptTimeoutError, TransactionNotRecordedError, TransactionNotVerifiedError,
+        TransactionOutcomeUnknownError, TransactionReplacedError)
+
+    def chain(method, error, args=("chain", "anchor", DUMMY_SWARM_REF)):
+        def run(mocker):
+            client = _successful_chain_client(mocker)
+            getattr(client, method).side_effect = error()
+            return _json_runner().invoke(app, [*args, "--json"])
+        return run
+
+    common = dict(tx_hash=JSON_TX, event_name="DataRegistered", expected_count=1,
+                  contract_address=DUMMY_ADDRESS, explorer_url=None)
+
+    def upload(setup):
+        def run(mocker):
+            return TestJsonReviewRound3()._collection(mocker, "--json", setup=setup)
+        return run
+
+    def argv(*args):
+        return lambda mocker: _json_runner().invoke(app, [*args, "--json"])
+
+    def missing_web3(mocker):
+        import sys
+        from swarm_provenance_uploader.chain import provider
+        mocker.patch.object(provider, "_Web3", None)
+        mocker.patch.dict(sys.modules, {"web3": None})
+        return _json_runner().invoke(app, ["chain", "balance", "--json"])
+
+    def stamp_not_usable(mocker):
+        def setup(m):
+            m.patch("swarm_provenance_uploader.cli._wait_for_stamp_usable.__defaults__", None)
+        result = None
+        from swarm_provenance_uploader.models import ManifestUploadResponse
+        client = mocker.MagicMock()
+        client.purchase_stamp.return_value = DUMMY_STAMP
+        client.get_stamp.return_value = _usable_stamp(DUMMY_STAMP, usable=False)
+        mocker.patch("swarm_provenance_uploader.cli._get_gateway_client_with_x402", return_value=client)
+        mocker.patch("swarm_provenance_uploader.cli.time.sleep")
+        runner_ = _json_runner()
+        with runner_.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/a.txt", "w") as f:
+                f.write("x")
+            result = runner_.invoke(app, ["upload-collection", "mydir", "--stamp-retries", "1", "--json"])
+        return result
+
+    def gateway(method, error):
+        def setup(mocker):
+            pass
+
+        def run(mocker):
+            from swarm_provenance_uploader.models import ManifestUploadResponse
+            client = mocker.MagicMock()
+            client.purchase_stamp.return_value = DUMMY_STAMP
+            client.get_stamp.return_value = _usable_stamp(DUMMY_STAMP)
+            client.upload_manifest.return_value = ManifestUploadResponse(
+                reference=DUMMY_SWARM_REF, file_count=1, message="ok")
+            getattr(client, method).side_effect = error()
+            mocker.patch("swarm_provenance_uploader.cli._get_gateway_client_with_x402", return_value=client)
+            mocker.patch("swarm_provenance_uploader.cli.time.sleep")
+            runner_ = _json_runner()
+            with runner_.isolated_filesystem():
+                import os
+                os.mkdir("mydir")
+                with open("mydir/a.txt", "w") as f:
+                    f.write("x")
+                return runner_.invoke(app, ["upload-collection", "mydir", "--json"])
+        return run
+
+    def not_active(mocker):
+        from swarm_provenance_uploader.models import DataStatusEnum
+        client = _successful_chain_client(mocker)
+        client.get.return_value.status = DataStatusEnum.RESTRICTED
+        return _json_runner().invoke(app, ["chain", "protect", DUMMY_SWARM_REF, "b" * 64, "--json"])
+
+    return [
+        ("connection_failed", chain("anchor", lambda: _chain_error("connection"))),
+        ("chain_error", chain("anchor", lambda: _chain_error("chain"))),
+        ("transaction_failed", chain("anchor", lambda: _chain_error("transaction"))),
+        ("insufficient_funds", chain("anchor", lambda: _chain_error("funds"))),
+        ("not_registered", chain("get", lambda: _chain_error("not_registered"),
+                                 ("chain", "get", DUMMY_SWARM_REF))),
+        ("already_registered", chain("anchor", lambda: exceptions.DataAlreadyRegisteredError(
+            "already registered", data_hash=DUMMY_SWARM_REF, owner=DUMMY_ADDRESS, timestamp=1,
+            data_type="swarm-provenance"))),
+        ("receipt_timeout", chain("anchor", lambda: _chain_error("timeout"))),
+        ("outcome_unknown", chain("anchor", lambda: TransactionOutcomeUnknownError(
+            "Outcome unknown", reason="connection reset", **common))),
+        ("replaced", chain("anchor", lambda: TransactionReplacedError("Replaced", nonce=5, **common))),
+        ("not_recorded", chain("anchor", lambda: TransactionNotRecordedError(
+            "Not recorded", emitted_count=0, **{**common, "expected_count": 1}))),
+        ("not_verified", chain("anchor", lambda: TransactionNotVerifiedError(
+            "Not verified", reason="no logs", **common))),
+        ("not_found", chain("wait_for_transaction", lambda: _chain_error("tx_not_found"),
+                            ("chain", "wait", JSON_TX))),
+        ("not_active", not_active),
+        ("invalid_input", argv("chain", "status", DUMMY_SWARM_REF, "--set", "bogus")),
+        ("configuration_error", argv("--backend", "local", "upload-collection", "mydir")),
+        ("missing_dependencies", missing_web3),
+        ("payment_required", gateway("purchase_stamp", lambda: exceptions.PaymentRequiredError("402"))),
+        ("payment_outcome_unknown", gateway("purchase_stamp", lambda: exceptions.PaymentOutcomeUnknownError(
+            "dropped", payer=DUMMY_ADDRESS))),
+        ("delivered_not_stored", gateway("purchase_stamp", lambda: exceptions.PaymentDeliveredNotStoredError(
+            "paid once", transaction="0x" + "cd" * 32, payer=DUMMY_ADDRESS,
+            code="IDEMPOTENCY_KEY_DELIVERED_NOT_STORED", idempotency_key="k"))),
+        ("stamp_not_usable", stamp_not_usable),
+        ("upload_failed", gateway("upload_manifest", lambda: RuntimeError("refused"))),
+        ("interrupted", chain("anchor", KeyboardInterrupt)),
+        ("aborted", chain("anchor", click.exceptions.Abort)),
+    ]
+
+
+class TestEveryErrorDocumentHasAMessage:
+    """Every error document, also the nested one of a composite failure, has "error" and "message"."""
+
+    @pytest.mark.parametrize("code,run", _code_scenarios(), ids=[c for c, _ in _code_scenarios()])
+    def test_error_and_message(self, mocker, code, run):
+        result = run(mocker)
+        document = _one_json_document(result)
+        error = document.get("unconfirmed") or document["error"]
+        if isinstance(error, str):
+            error = document
+        assert error["error"] == code, document
+        assert isinstance(error.get("message"), str) and error["message"], document
+
+    @pytest.mark.parametrize("step", ["transform", "restrict"])
+    def test_composite_unconfirmed_has_a_message(self, mocker, step):
+        client = _successful_chain_client(mocker)
+        method = "transform" if step == "transform" else "set_status"
+        getattr(client, method).side_effect = _chain_error("timeout")
+        result = _json_runner().invoke(app, ["chain", "protect", DUMMY_SWARM_REF, "b" * 64, "--json"])
+        document = _one_json_document(result)
+        assert document["failed_step"] == step
+        assert document["unconfirmed"]["message"]
+
+
+class TestJsonReviewRound4:
+    """Review round 4 fixes for --json (#211, #241)."""
+
+    def _collection(self, mocker, *args, error):
+        def setup(m):
+            m.patch("swarm_provenance_uploader.cli.file_utils.calculate_directory_hash_and_files",
+                    side_effect=error)
+        return TestJsonReviewRound3()._collection(mocker, *args, setup=setup)
+
+    @pytest.mark.parametrize("json_flag", [True, False], ids=["json", "text"])
+    def test_verbose_prints_a_redacted_traceback(self, mocker, json_flag):
+        import tarfile
+        result = self._collection(mocker, "-v", *(["--json"] if json_flag else []),
+                                  error=tarfile.TarError(f"bad member, see {RPC_URLS_WITH_KEY[0]}"))
+        assert result.exit_code == 1
+        assert "Traceback (most recent call last)" in result.stderr
+        assert "TarError" in result.stderr
+        assert RPC_KEY not in result.stdout + result.stderr
+        if json_flag:
+            assert _one_json_document(result)["error"] == "upload_failed"
+
+    def test_no_traceback_without_verbose(self, mocker):
+        import tarfile
+        result = self._collection(mocker, "--json", error=tarfile.TarError("bad member"))
+        assert "Traceback" not in result.stderr
+
+    def test_empty_message_has_no_trailing_colon(self, mocker):
+        result = self._collection(mocker, "--json", error=MemoryError())
+        assert result.exit_code == 1
+        assert _one_json_document(result)["message"] == "Upload failed: MemoryError"
+        assert "ERROR: Upload failed: MemoryError\n" in result.stderr
+
+    def test_click_exception_is_a_document(self, mocker):
+        """A ClickException that is not a usage error (FileError) keeps its exit code 1."""
+        client = _successful_chain_client(mocker)
+        client.anchor.side_effect = click.FileError("key.txt", hint="permission denied")
+
+        result = _json_runner().invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
+
+        assert result.exit_code == 1
+        document = _one_json_document(result)
+        assert document["error"] == "invalid_input"
+        assert "key.txt" in document["message"] and "permission denied" in document["message"]
+
+    def test_click_exception_without_json_prints_no_document(self, mocker):
+        client = _successful_chain_client(mocker)
+        client.anchor.side_effect = click.FileError("key.txt", hint="permission denied")
+        result = _json_runner().invoke(app, ["chain", "anchor", DUMMY_SWARM_REF])
+        assert result.exit_code == 1
+        assert result.stdout == ""
+
+    def test_upload_collection_wrapper_name(self):
+        from swarm_provenance_uploader import cli
+        assert hasattr(cli, "_upload_collection_command")
+        assert not hasattr(cli, "_json_command")
+
+
+def _reference_parse(command, name, args, parent):
+    """click's own option parser on args, not resilient, unknown options kept.
+
+    A flag given a value ("does not take a value") is rewritten to the flag at
+    the exact token click stopped at, and the parse is run again. Returns the
+    context, the parsed options, and the tokens left after the options
+    (rargs): for a group, rargs[0] is the subcommand.
+    """
+    from click.parser import ParsingState
+
+    args = list(args)
+    for _ in range(len(args) + 1):
+        ctx = click.Context(command, info_name=name, parent=parent, ignore_unknown_options=True)
+        parser = command.make_parser(ctx)
+        state = ParsingState(list(args))
+        current = []
+        original = parser._process_opts
+
+        def track(arg, state_, original=original):
+            current.append(len(args) - len(state_.rargs) - 1)  # the index of arg
+            return original(arg, state_)
+
+        parser._process_opts = track
+        try:
+            parser._process_args_for_options(state)
+        except click.BadOptionUsage as e:
+            if "does not take a value" in e.message:
+                index = current[-1]
+                args[index] = args[index].split("=", 1)[0]
+                continue
+        except click.UsageError:
+            pass  # for example an option at the end without its value: keep what was parsed
+        return ctx, state.opts, state.rargs
+    raise AssertionError("no progress")
+
+
+def _reference_json_requested(argv) -> bool:
+    """Would click's parse set --json on the command that argv names? (flags given a value ignored)"""
+    command = typer.main.get_command(app)
+    ctx, opts, rest = _reference_parse(command, "swarm-prov-upload", argv, None)
+    while isinstance(command, click.Group):
+        if not rest:
+            return False
+        command = command.get_command(ctx, rest[0])
+        if command is None:
+            return False
+        ctx, opts, rest = _reference_parse(command, rest[0], rest[1:], ctx)
+    return any(p.name == "output_json" for p in command.params) and bool(opts.get("output_json"))
+
+
+_MATRIX_PREFIXES = [
+    [], ["--x402=1"], ["-b", "chain"], ["-bchain"], ["--gateway-url", "chain"],
+    ["--gateway-url", "--json"], ["--bogus"], ["--"], ["--backend", "gateway", "--backend", "gateway"],
+    ["--", "-V"], ["-"],
+]
+_MATRIX_COMMANDS = [
+    ["chain", "balance"], ["chain", "anchor", "H"],
+    ["upload-collection", "d"], ["stamps", "extend", "S"], ["upload", "--file", "f"],
+    ["chain", "--", "-x", "balance"], ["chain", "-", "balance"],
+]
+_MATRIX_TAILS = [
+    ["--json"], ["--json=1"], ["-v=1", "--json"], ["--verbose=1", "--json"], ["--help=1", "--json"],
+    ["--json", "--help=1"], ["-vt", "--", "--verbose=1", "--json"], ["-t", "--", "--json=1"],
+    ["-t", "chain", "--json"], ["--bogus", "--json"], ["-v", "X", "--json"], ["-vd", "--json"],
+    ["-vtx", "--json"], ["--", "--json"],
+]
+
+
+class TestJsonDetectionMatrix:
+    """_json_requested agrees with click's own parse over a cross product of command lines."""
+
+    @pytest.mark.parametrize("prefix", _MATRIX_PREFIXES, ids=[" ".join(p) or "(none)" for p in _MATRIX_PREFIXES])
+    def test_matches_clicks_parse(self, prefix):
+        from swarm_provenance_uploader.cli import _JsonErrorsGroup
+
+        group = typer.main.get_command(app)
+        assert isinstance(group, _JsonErrorsGroup)
+        disagreements = []
+        for command in _MATRIX_COMMANDS:
+            for tail in _MATRIX_TAILS:
+                argv = [*prefix, *command, *tail]
+                expected = _reference_json_requested(argv)
+                if group._json_requested(argv) != expected:
+                    disagreements.append((argv, expected))
+        assert disagreements == []
+
+
+class TestJsonDetectionRandom:
+    """Seeded random command lines from the matrix's tokens (and "-"), compared with click's parse."""
+
+    def test_random_argv_match_clicks_parse(self):
+        import random
+        from swarm_provenance_uploader.cli import _JsonErrorsGroup
+
+        pool = sorted({token for group in (_MATRIX_PREFIXES, _MATRIX_COMMANDS, _MATRIX_TAILS)
+                       for argv in group for token in argv} | {"-", "-x", "-V", "--x402", "-vt"})
+        # Command names often, so that many argv reach a command
+        names = ["chain", "balance", "anchor", "upload-collection", "stamps", "extend", "upload"]
+        rng = random.Random(245)
+        group = typer.main.get_command(app)
+        assert isinstance(group, _JsonErrorsGroup)
+        disagreements = []
+        for _ in range(400):
+            argv = [rng.choice(names) if rng.random() < 0.35 else rng.choice(pool)
+                    for _ in range(rng.randint(1, 8))]
+            expected = _reference_json_requested(argv)
+            if group._json_requested(argv) != expected:
+                disagreements.append((argv, expected))
+        assert disagreements == []
+
+
+class TestJsonReviewRound5:
+    """Review round 5 fixes for --json detection (#241)."""
+
+    @pytest.mark.parametrize("args", [
+        ["chain", "anchor", DUMMY_SWARM_REF, "-vt", "--", "--verbose=1", "--json"],
+        ["chain", "anchor", DUMMY_SWARM_REF, "-vt", "chain", "--x402=1", "--json"],
+        ["chain", "balance", "--help=1", "--json"],
+        ["chain", "balance", "--json", "--help=1"],
+    ], ids=["cluster-takes-the-next-token", "cluster-value-is-a-command-name", "help-with-value-first",
+            "help-with-value-last"])
+    def test_usage_error_is_a_document(self, mocker, args):
+        _successful_chain_client(mocker)
+        result = _json_runner().invoke(app, args)
+        assert result.exit_code == 2, result.output
+        assert _one_json_document(result)["error"] == "invalid_input"
+
+    def test_attached_cluster_value_does_not_skip(self, mocker):
+        """-vtx: "x" is the type, so the next token is read as usual."""
+        client = _successful_chain_client(mocker)
+        result = _json_runner().invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "-vtx", "--json"])
+        assert result.exit_code == 0, result.output
+        _one_json_document(result)
+        assert client.anchor.call_args.kwargs["data_type"] == "x"
+
+    @pytest.mark.parametrize("args", [
+        ["--", "-V", "chain", "balance", "--json"],
+        ["chain", "--", "-x", "balance", "--json"],
+    ], ids=["top-level", "chain-group"])
+    def test_dash_token_after_double_dash_is_a_command_name(self, args):
+        """After "--", "-V" or "-x" is an unknown command: a text usage error, no document."""
+        result = _json_runner().invoke(app, args)
+        assert result.exit_code == 2
+        assert result.stdout == ""
+
+    def test_chain_catch_all_empty_message_has_no_trailing_colon(self, mocker):
+        client = _successful_chain_client(mocker)
+        client.balance.side_effect = RuntimeError()
+        result = _json_runner().invoke(app, ["chain", "balance", "--json"])
+        assert result.exit_code == 1
+        assert _one_json_document(result)["message"] == "Chain command failed: RuntimeError"
+        assert "ERROR: Chain command failed: RuntimeError\n" in result.stderr
+
+
+class TestJsonReviewRound6:
+    """A bare "-" is a positional for click: at group level it is the command name (#241)."""
+
+    @pytest.mark.parametrize("args", [
+        ["-", "chain", "balance", "--json"],
+        ["chain", "-", "balance", "--json"],
+        ["--x402", "-", "chain", "balance", "--json"],
+        ["-", "upload-collection", "d", "--json"],
+    ], ids=["top-level", "chain-group", "after-a-global-flag", "before-upload-collection"])
+    def test_bare_dash_is_an_unknown_command(self, args):
+        result = _json_runner().invoke(app, args)
+        assert result.exit_code == 2
+        assert result.stdout == ""
+
+
 class TestChainLineageAndDuplicateCheckWithRealClient:
     """CLI output for the #230 and #231 errors, with a real ChainClient.
 
@@ -9224,7 +10602,13 @@ class TestChainLineageAndDuplicateCheckWithRealClient:
             clear_registry()
 
         assert result.exit_code == 1, result.stdout + result.stderr
-        assert result.stdout.strip() == ""
+        if output_json:  # #245: one error document on stdout, the text error on stderr
+            output = json.loads(result.stdout)
+            assert output["error"] == "chain_error"
+            assert "may be incomplete" in output["message"]
+            assert "CHAIN_DEPLOY_BLOCK" in output["message"]
+        else:
+            assert result.stdout.strip() == ""
         assert "may be incomplete" in result.stderr
         assert "CHAIN_DEPLOY_BLOCK" in result.stderr
 
@@ -9245,7 +10629,10 @@ class TestChainLineageAndDuplicateCheckWithRealClient:
         result = _Runner(mix_stderr=False).invoke(app, args)
 
         assert result.exit_code == 1, result.stdout + result.stderr
-        assert result.stdout.strip() == ""
+        if output_json:  # #245: one error document on stdout, the text error on stderr
+            assert json.loads(result.stdout) == {"error": "chain_error", "message": self.REJECTED}
+        else:
+            assert result.stdout.strip() == ""
         assert f"ERROR: {self.REJECTED}" in result.stderr
         mock_chain_deps["account"].sign_transaction.assert_not_called()
         mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
@@ -9630,7 +11017,7 @@ class TestPaidResultUnreadableCli:
         assert self.PAYMENT["transaction"] in result.output
 
     def test_extend(self, mocker):
-        self._client(mocker, extend_stamp=self._error())
+        self._client(mocker, extend_stamp_details=self._error())
         result = runner.invoke(app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
         self._assert_common(result)
         assert "WARNING: The stamp extension most likely succeeded, but its result could not be read." \
@@ -9692,7 +11079,7 @@ class TestPaidResultUnreadableCli:
         assert "batch ID" in result.output
 
     def test_extend_with_amount_names_it(self, mocker):
-        self._client(mocker, extend_stamp=self._error())
+        self._client(mocker, extend_stamp_details=self._error())
         result = runner.invoke(app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--amount", "5000000000"])
         self._assert_common(result)
         assert "higher by 5000000000" in result.output
@@ -9780,7 +11167,7 @@ class TestPaidResultUnreadableCli:
 
     def test_other_settled_report_unchanged(self, mocker):
         err = exceptions.PaymentSettledNotDeliveredError("Collected, failed.", **self.PAYMENT)
-        self._client(mocker, extend_stamp=err)
+        self._client(mocker, extend_stamp_details=err)
         result = runner.invoke(app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
         assert result.exit_code == 1
         assert "ERROR: Payment was taken, but the stamp extension failed" in result.output
@@ -9816,3 +11203,294 @@ class TestPaidPoolAcquireNotAcquiredCli:
         assert "Try again immediately" not in result.output
         assert "\x1b" not in result.output
         assert "Payments sent: $0.050000 USDC (1 payment(s))" in result.output
+
+
+# --- --json on the paths of #242, #243, #244 and #246 (merge with #245) ---
+
+
+class TestJsonPaymentPathsAfterMerge:
+    """upload-collection --json: the #242 payment reports print one document on stdout."""
+
+    PAYER = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
+    PAYMENT = dict(payer=PAYER, nonce="0x" + "ab" * 32, amount_usd="$0.050000", network="base-sepolia",
+                   transaction="0x" + "cd" * 32, idempotency_key="key-216", status_code=201)
+
+    def _client(self, mocker):
+        from swarm_provenance_uploader.models import ManifestUploadResponse
+
+        client = mocker.MagicMock()
+        client.purchase_stamp.return_value = DUMMY_STAMP
+        client.get_stamp.return_value = _usable_stamp(DUMMY_STAMP)
+        client.upload_manifest.return_value = ManifestUploadResponse(
+            reference=DUMMY_SWARM_REF, file_count=1, message="Manifest uploaded")
+        mocker.patch("swarm_provenance_uploader.cli._get_gateway_client_with_x402", return_value=client)
+        mocker.patch("swarm_provenance_uploader.cli.time.sleep")
+        return client
+
+    @staticmethod
+    def _invoke(*args):
+        runner_ = _json_runner()
+        with runner_.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/data.csv", "w") as f:
+                f.write("a,b\n1,2")
+            return runner_.invoke(app, ["upload-collection", "mydir", *args, "--json"])
+
+    def _unreadable(self, label_prefix=None):
+        error = exceptions.PaymentResultUnreadableError(
+            "The payment was collected and the gateway answered HTTP 201, but its response "
+            "could not be read (ValueError: not JSON).", **self.PAYMENT)
+        error.label_prefix = label_prefix
+        return error
+
+    def test_unreadable_purchase_result(self, mocker):
+        """#216: payment_outcome_unknown with the check command; the #242 text stays on stderr."""
+        client = self._client(mocker)
+        client.purchase_stamp.side_effect = self._unreadable(label_prefix="paid-")
+
+        result = self._invoke()
+
+        assert result.exit_code == 1, result.output
+        document = _one_json_document(result)
+        assert document["error"] == "payment_outcome_unknown"
+        assert document["message"].startswith(
+            "Getting the stamp most likely succeeded, but its result could not be read.")
+        assert document["transaction"] == self.PAYMENT["transaction"]
+        assert document["payer"] == self.PAYER
+        assert document["idempotency_key"] == "key-216"
+        assert document["stamp_label"] == "paid-<suffix>"
+        assert document["check"] == f"swarm-prov-upload stamps list --wallet {self.PAYER} --full"
+        assert "WARNING: Getting the stamp most likely succeeded" in result.stderr
+        assert "Stamps the CLI buys have a label that starts with paid-" in result.stderr
+        assert "A gateway that supports Idempotency-Key answers a re-run with the same key" in result.stderr
+        assert "Usable: No" in result.stderr  # the purchase timing note
+        assert "A re-run without the key pays again." in result.stderr
+
+    def test_unreadable_upload_result(self, mocker):
+        """The collection upload answered 2xx but unreadable: no check command, exit 1."""
+        client = self._client(mocker)
+        client.upload_manifest.side_effect = self._unreadable()
+
+        result = self._invoke("--stamp-id", DUMMY_STAMP)
+
+        assert result.exit_code == 1, result.output
+        document = _one_json_document(result)
+        assert document["error"] == "payment_outcome_unknown"
+        assert "check" not in document
+        assert "The collection upload most likely succeeded" in document["message"]
+        assert "The Swarm reference was not received." in result.stderr
+
+    def test_pool_acquire_not_acquired(self, mocker):
+        """#209: a paid pool acquire answered 2xx with success: false."""
+        client = self._client(mocker)
+        client.acquire_stamp_from_pool.side_effect = exceptions.PaymentSettledNotDeliveredError(
+            "The gateway answered success: false.", **self.PAYMENT)
+
+        result = self._invoke("--usePool")
+
+        assert result.exit_code == 1, result.output
+        document = _one_json_document(result)
+        assert document["error"] == "payment_outcome_unknown"
+        assert document["message"].startswith("Payment was taken, but getting the stamp failed.")
+        assert "check" not in document
+        assert "ERROR: Payment was taken, but getting the stamp failed." in result.stderr
+
+    def test_not_charged_503_purchase(self, mocker, requests_mock):
+        """#215: a 503 sent before settlement is an ordinary error: upload_failed, nothing paid."""
+        from swarm_provenance_uploader.core.gateway_client import GatewayClient
+        from tests.test_gateway_client import SPEND_CEILING_503, _signed_header
+
+        gateway = "https://test.gateway.io"
+        mocker.patch.object(GatewayClient, "_approve_payment",
+                            return_value=(_signed_header(), "$0.050000", None))
+        requests_mock.post(f"{gateway}/api/v1/stamps/",
+                           [{"status_code": 402, "json": {"accepts": []}}, SPEND_CEILING_503])
+        runner_ = _json_runner()
+        with runner_.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/data.csv", "w") as f:
+                f.write("a,b\n1,2")
+            result = runner_.invoke(app, ["--x402", "--gateway-url", gateway,
+                                          "upload-collection", "mydir", "--json"])
+
+        assert result.exit_code == 1, result.output
+        document = _one_json_document(result)
+        assert document["error"] == "upload_failed"
+        assert document["step"] == "stamp"
+        assert "GATEWAY_DAILY_SPEND_CEILING" in document["message"]
+        assert "may have been taken" not in result.stderr
+        assert "Payments sent" not in result.stdout + result.stderr
+
+
+class TestJsonGasLimitSettingAfterMerge:
+    """#244: invalid_gas_limit is the only document, also under _json_mode."""
+
+    ERROR = "CHAIN_GAS_LIMIT is not a whole number of at least 21000: 'abc'"
+
+    @pytest.mark.parametrize("args", [
+        ["chain", "anchor", DUMMY_SWARM_REF],
+        ["chain", "transform", DUMMY_SWARM_REF, "b" * 64],
+        ["chain", "protect", DUMMY_SWARM_REF, "b" * 64],
+    ], ids=["anchor", "transform", "protect"])
+    def test_one_document(self, monkeypatch, mocker, args):
+        monkeypatch.setitem(_chain_config, "gas_limit_error", self.ERROR)
+        chain_client_class = mocker.patch("swarm_provenance_uploader.core.chain_client.ChainClient")
+
+        result = _json_runner().invoke(app, [*args, "--json"])
+
+        assert result.exit_code == 1
+        assert _one_json_document(result) == {"error": "invalid_gas_limit", "message": self.ERROR}
+        assert "invalid_gas_limit" not in result.stderr
+        chain_client_class.assert_not_called()
+
+
+class TestJsonChainPathsAfterMerge:
+    """#243, #246: the lineage, contract code, validation and chain setting errors under --json.
+
+    ChainClient is real here; web3 and eth-account are mocked by mock_chain_deps.
+    """
+
+    HASH = "a" * 64
+    KEY_ENV = "MY_SIGNER_KEY_FOR_TEST"
+
+    @pytest.mark.parametrize("args", [
+        ["chain", "get", HASH],
+        ["chain", "anchor", HASH],
+    ], ids=["read", "write"])
+    def test_bad_deploy_block_setting(self, mocker, args):
+        """A bad CHAIN_DEPLOY_BLOCK: configuration_error, and no wallet-key hint on either stream."""
+        node = _fake_rpc_node(mocker, 84532)
+        mocker.patch.dict(_chain_config, {
+            "chain": "base-sepolia", "rpc_url": "https://rpc.example.org",
+            "wallet_key_env": "PROVENANCE_WALLET_KEY", "deploy_block": "abc",
+        })
+
+        result = _json_runner().invoke(app, [*args, "--json"])
+
+        assert result.exit_code == 1
+        document = _one_json_document(result)
+        assert document["error"] == "configuration_error"
+        assert "CHAIN_DEPLOY_BLOCK" in document["message"]
+        assert "non-negative integer" in document["message"]
+        for stream in (result.stdout, result.stderr):
+            assert "PROVENANCE_WALLET_KEY" not in stream
+            assert "Check chain settings" not in stream
+        node.eth.send_raw_transaction.assert_not_called()
+
+    def test_deploy_block_after_chain_head(self, real_web3_exceptions, mock_chain_deps, monkeypatch):
+        """DeployBlockError while the lineage is read (#231): configuration_error."""
+        from swarm_provenance_uploader.chain.event_cache import clear_registry
+
+        _inject_real_exceptions(real_web3_exceptions)
+        clear_registry()
+        monkeypatch.setitem(_chain_config, "contract", "0x" + "12" * 20)
+        monkeypatch.setitem(_chain_config, "deploy_block", "70000")
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            bytes.fromhex(self.HASH), "0x" + "1" * 40, 1, "t", b"\x00" * 32, [], [], 0,
+        )
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = (
+            real_web3_exceptions.ContractLogicError("execution reverted")
+        )
+        mock_chain_deps["web3_instance"].eth.block_number = 60_000
+
+        try:
+            result = _json_runner().invoke(app, ["chain", "get", self.HASH, "--follow", "--json"])
+        finally:
+            clear_registry()
+
+        assert result.exit_code == 1, result.stdout + result.stderr
+        document = _one_json_document(result)
+        assert document["error"] == "configuration_error"
+        assert "later than the chain head" in document["message"]
+        assert "later than the chain head" in result.stderr
+
+    @pytest.mark.parametrize("args", [
+        ["chain", "anchor", HASH],
+        ["chain", "transform", HASH, "c" * 64, "--description", "d"],
+    ], ids=["write", "transform"])
+    def test_no_contract_code(self, real_web3_exceptions, mock_chain_deps, args):
+        """ContractCodeNotFoundError (#230): configuration_error, nothing sent."""
+        _inject_real_exceptions(real_web3_exceptions)
+        mock_chain_deps["web3_instance"].eth.get_code.return_value = b""
+
+        result = _json_runner().invoke(app, [*args, "--json"])
+
+        assert result.exit_code == 1, result.stdout + result.stderr
+        document = _one_json_document(result)
+        assert document["error"] == "configuration_error"
+        assert "No contract code at" in document["message"]
+        assert "No contract code at" in result.stderr
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    def test_validation_before_any_rpc_call(self, real_web3_exceptions, mock_chain_deps):
+        """The validate_only ChainValidationError (#230): one chain_error document."""
+        _inject_real_exceptions(real_web3_exceptions)
+
+        result = _json_runner().invoke(app, ["chain", "anchor", self.HASH, "--type", "x" * 65, "--json"])
+
+        assert result.exit_code == 1, result.stdout + result.stderr
+        document = _one_json_document(result)
+        assert document["error"] == "chain_error"
+        assert "64" in document["message"]
+        mock_chain_deps["web3_instance"].eth.get_code.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    def test_duplicate_check_connection_failure(self, real_web3_exceptions, mock_chain_deps):
+        """The duplicate check with no RPC left (#168, #230): connection_failed, "Nothing was sent."."""
+        _inject_real_exceptions(real_web3_exceptions)
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = (
+            ConnectionError("connection refused")
+        )
+
+        result = _json_runner().invoke(
+            app, ["chain", "transform", self.HASH, "c" * 64, "--description", "d", "--json"])
+
+        assert result.exit_code == 1, result.stdout + result.stderr
+        document = _one_json_document(result)
+        assert document["error"] == "connection_failed"
+        assert document["message"].endswith("Nothing was sent.")
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    @pytest.mark.parametrize("args,needs_key", [
+        (["chain", "get", HASH], False),
+        (["chain", "wait", "0x" + "bb" * 32], False),
+        (["chain", "anchor", HASH], True),
+        (["chain", "balance"], True),
+    ], ids=["get", "wait", "anchor", "balance"])
+    def test_configuration_hint_stays_on_stderr(self, monkeypatch, mock_chain_deps, args, needs_key):
+        """#219 with #245: one configuration_error document; the hint is on stderr only."""
+        monkeypatch.setitem(_chain_config, "chain", "no-such-chain")
+        monkeypatch.setitem(_chain_config, "wallet_key_env", self.KEY_ENV)
+
+        result = _json_runner().invoke(app, [*args, "--json"])
+
+        assert result.exit_code == 1, result.stdout + result.stderr
+        document = _one_json_document(result)
+        assert document["error"] == "configuration_error"
+        assert "Unsupported chain: no-such-chain" in document["message"]
+        assert "Check" not in result.stdout
+        if needs_key:
+            assert f"Check {self.KEY_ENV} environment variable and chain settings" in result.stderr
+        else:
+            assert "Check chain settings (CHAIN_NAME, CHAIN_CONTRACT, CHAIN_RPC_URL)." in result.stderr
+            assert self.KEY_ENV not in result.stderr
+
+    def test_outcome_unknown_has_message(self, real_web3_errors, mock_chain_deps):
+        """#246's outcome_unknown document keeps #245's message, redacted, as the only stdout output."""
+        _use_real_web3_errors(real_web3_errors)
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            bytes.fromhex(self.HASH), "0x" + "0" * 40, 0, "", b"\x00" * 32, [], [], 0,
+        )
+        mock_chain_deps["web3_instance"].eth.wait_for_transaction_receipt.side_effect = _rpc_error_answer(
+            real_web3_errors, "limit exceeded at https://user:secret@rpc.example.org"
+        )
+
+        result = _json_runner().invoke(app, ["chain", "anchor", self.HASH, "--json"])
+
+        assert result.exit_code == 3, result.stdout + result.stderr
+        document = _one_json_document(result)
+        assert document["error"] == "outcome_unknown"
+        assert document["message"]
+        assert "secret" not in result.stdout

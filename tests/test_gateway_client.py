@@ -3917,3 +3917,59 @@ class TestValidationFieldMessages:
         with pytest.raises(ConnectionError) as exc:
             GatewayClient(base_url=GW).purchase_stamp(duration_hours=24)
         assert f"body.label: {msg}" in str(exc.value)
+
+
+class TestExtendStampDetails:
+    """extend_stamp_details() returns the gateway's answer, with the expiry it reported (#217).
+
+    The gateway reads that expiry right after the top-up: an estimate that may
+    not include the extension yet.
+    """
+
+    ANSWER = {"batchID": DUMMY_STAMP, "message": "Postage stamp extended successfully",
+              "expires_at": "2026-12-01T10:00:00Z"}
+
+    def test_returns_expires_at(self, requests_mock):
+        requests_mock.patch(EXTEND_URL, json=self.ANSWER)
+
+        result = GatewayClient(base_url=GW).extend_stamp_details(DUMMY_STAMP, duration_hours=48)
+
+        assert result.batchID == DUMMY_STAMP
+        assert result.expires_at == "2026-12-01T10:00:00Z"
+        assert requests_mock.last_request.json() == {"duration_hours": 48}
+
+    @pytest.mark.parametrize("answer", [
+        {"batchID": DUMMY_STAMP, "message": "ok", "expires_at": None},
+        {"batchID": DUMMY_STAMP, "message": "ok"},
+    ], ids=["null", "absent"])
+    def test_unknown_expiry_is_none(self, requests_mock, answer):
+        requests_mock.patch(EXTEND_URL, json=answer)
+
+        assert GatewayClient(base_url=GW).extend_stamp_details(DUMMY_STAMP).expires_at is None
+
+    def test_extend_stamp_still_returns_the_batch_id(self, requests_mock):
+        """The library return type of extend_stamp() does not change (#214)."""
+        requests_mock.patch(EXTEND_URL, json=self.ANSWER)
+
+        assert GatewayClient(base_url=GW).extend_stamp(DUMMY_STAMP, duration_hours=48) == DUMMY_STAMP
+
+    def test_extend_stamp_details_refuses_bad_input(self, requests_mock):
+        with pytest.raises(ValueError, match="Not a stamp ID"):
+            GatewayClient(base_url=GW).extend_stamp_details("x" * 64)
+        with pytest.raises(ValueError, match="at least 24"):
+            GatewayClient(base_url=GW).extend_stamp_details(DUMMY_STAMP, duration_hours=23)
+        assert requests_mock.call_count == 0
+
+
+class TestExtendStampExpiryTypes:
+    """A non-string expires_at is None, so the extension still returns its batch ID (#217)."""
+
+    @pytest.mark.parametrize("expires_at", [1764583200, {"at": "2026-12-01T10:00:00Z"}, ["x"], True],
+                             ids=["int", "dict", "list", "bool"])
+    def test_non_string_is_none(self, requests_mock, expires_at):
+        requests_mock.patch(EXTEND_URL, json={"batchID": DUMMY_STAMP, "message": "ok",
+                                              "expires_at": expires_at})
+
+        client = GatewayClient(base_url=GW)
+        assert client.extend_stamp(DUMMY_STAMP, duration_hours=48) == DUMMY_STAMP
+        assert client.extend_stamp_details(DUMMY_STAMP, duration_hours=48).expires_at is None
