@@ -1268,8 +1268,15 @@ class GatewayClient:
             if response.status_code == 202:
                 self._raise_purchase_pending(response)
             self._raise_for_gateway_error(response)
-            with self._reading_paid_result(response):
-                result = StampPurchaseResponse.model_validate(response.json())
+            try:
+                with self._reading_paid_result(response):
+                    result = StampPurchaseResponse.model_validate(response.json())
+            except PaymentResultUnreadableError as unreadable:
+                # swarm_connect names a paid batch "<label>-<random hex>", or
+                # "paid-<random hex>" without a label: enough to find it (#216)
+                unreadable.label_prefix = f"{label}-" if label else "paid-"
+                unreadable.depth = depth
+                raise
             if verbose:
                 print(f"DEBUG: Purchased stamp ID: {result.batchID}")
             return result.batchID

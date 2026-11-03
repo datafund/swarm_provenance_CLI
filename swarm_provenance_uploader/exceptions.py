@@ -232,7 +232,15 @@ class PaymentResultUnreadableError(PaymentSettledNotDeliveredError):
     the work, so the request most likely succeeded; only its result (for
     example the batch ID or Swarm reference) is missing. Check the result
     before contacting the operator. Re-running pays again.
+
+    After a stamp purchase, `label_prefix` is how the new batch's label
+    starts (the gateway adds a random suffix to the label of a paid
+    purchase) and `depth` the depth the request asked for, when it named
+    one. Both are None otherwise.
     """
+
+    label_prefix = None
+    depth = None
 
 
 class PaymentDeliveredNotStoredError(PaymentSettledNotDeliveredError):

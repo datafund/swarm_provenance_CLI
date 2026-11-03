@@ -378,6 +378,8 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
     ]
     if isinstance(e, exceptions.StampPurchasePendingError):
         fields += [("Stamp label", e.label), ("Depth", e.depth)]
+    elif unreadable and e.label_prefix:
+        fields += [("Stamp label", f"{e.label_prefix}<suffix>"), ("Depth", e.depth)]
     for name, value in fields:
         if value is not None:
             typer.echo(f"  {name + ':':<17}{value}", err=True)
@@ -407,6 +409,9 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
             typer.echo(f"  {check}", err=True)
             if check_note:
                 typer.echo(check_note, err=True)
+            if e.label_prefix:
+                typer.echo(f"In that list, look for the stamp whose label starts with {e.label_prefix}",
+                           err=True)
         else:
             typer.echo(f"The {missing} was not received.", err=True)
         if e.idempotency_key:
@@ -1775,7 +1780,8 @@ def stamps_extend(
             # The CLI knows the amount added only when --amount was given
             check_note=("The extension worked if the Amount it shows is higher"
                         + (f" by {amount}" if amount is not None else "")
-                        + " and the TTL is longer than before the extension."),
+                        + " and the TTL is longer than before the extension. The new values "
+                        "may take a few minutes to show."),
         )
     except typer.Exit:
         raise  # already reported, e.g. an invalid auto-pay limit (#152)
