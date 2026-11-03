@@ -3252,12 +3252,18 @@ def chain_wait(
             explorer_url = None
         if not isinstance(explorer_url, str):
             explorer_url = None
+        again = f"swarm-prov-upload chain wait {tx_hash}"
+        if event:
+            again += f" --event {event}"
+            if count is not None and count != 1:
+                again += f" --count {count}"
         if output_json:
             typer.echo(json.dumps({
                 "error": "connection_failed",
                 "message": str(e),
                 "tx_hash": tx_hash,
                 "explorer_url": explorer_url,
+                "wait_command": again,
             }, indent=2))
         else:
             typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
@@ -3268,11 +3274,6 @@ def chain_wait(
                 "command again when the RPC is reachable:",
                 err=True,
             )
-            again = f"swarm-prov-upload chain wait {tx_hash}"
-            if event:
-                again += f" --event {event}"
-                if count is not None and count != 1:
-                    again += f" --count {count}"
             typer.echo(f"  {again}", err=True)
             if explorer_url:
                 typer.echo(f"  Explorer:    {explorer_url}", err=True)
