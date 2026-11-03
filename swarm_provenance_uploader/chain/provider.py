@@ -372,12 +372,19 @@ class ChainProvider:
 
         Raises:
             ChainConnectionError: If RPC call fails (after trying fallbacks).
+            Exception: A JSON-RPC error answer (web3's Web3RPCError) is raised
+                unchanged and does not cause a fallback: the node answered,
+                so another endpoint would give the same answer (#168).
         """
+        from ..core.chain_client import _is_rpc_rejection
+
         tried = set()
         while True:
             try:
                 return self._web3.eth.block_number
             except Exception as e:
+                if _is_rpc_rejection(e):
+                    raise
                 tried.add(self.rpc_url)
                 if not self._fallback_active and self._try_fallback(tried):
                     continue
