@@ -8517,6 +8517,16 @@ class TestReceiptTimeoutAndReplaced:
             timeout=120,
         )
 
+    def test_write_timeout_says_was_sent(self, mocker):
+        """A write sent the transaction itself: "The transaction was sent"."""
+        self._client(mocker, "access", self._timeout())
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 3, result.output
+        assert "Not confirmed yet. The transaction was sent, but no receipt" in result.output
+        assert "may have been sent" not in result.output
+
     def _replaced(self, event="DataAccessed"):
         from swarm_provenance_uploader.exceptions import TransactionReplacedError
 
@@ -8830,6 +8840,9 @@ class TestChainWait:
         assert "It may still be mined" in result.output
         assert "Running chain wait again is safe" in result.output
         assert "do not run" not in result.output.lower()
+        # chain wait was only given the hash: it does not know that it was sent
+        assert "may have been sent" in result.output
+        assert "The transaction was sent" not in result.output
         assert f"swarm-prov-upload chain wait {self.TX} --event DataRegistered" in result.output
 
         result = runner.invoke(app, ["chain", "wait", self.TX, "--json"])

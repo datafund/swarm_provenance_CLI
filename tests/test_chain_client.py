@@ -6708,3 +6708,83 @@ class TestNestedExceptionArgsAreRedacted:
         assert RPC_KEY not in repr(error.args)
         assert "ValueError" in repr(error.args)
         assert "failed" in str(error)
+
+
+class TestRedactValue:
+    """_redact_value redacts strings inside every container an exception attribute can hold (#234)."""
+
+    URL = f"https://base-sepolia.g.alchemy.com/v2/{RPC_KEY}"
+
+    @pytest.fixture(autouse=True)
+    def _secret(self):
+        from swarm_provenance_uploader.chain.redact import register_url_secrets
+
+        register_url_secrets([self.URL])
+
+    def test_mapping_that_is_not_a_dict(self):
+        """For example web3's AttributeDict: rebuilt as a dict."""
+        from collections.abc import Mapping
+        from swarm_provenance_uploader.core.chain_client import _redact_value
+
+        class ReadOnlyMapping(Mapping):
+            def __init__(self, data):
+                self._data = data
+
+            def __getitem__(self, key):
+                return self._data[key]
+
+            def __iter__(self):
+                return iter(self._data)
+
+            def __len__(self):
+                return len(self._data)
+
+        result = _redact_value(ReadOnlyMapping({"message": f"bad key {self.URL}", "code": -32005}))
+
+        assert isinstance(result, dict)
+        assert RPC_KEY not in repr(result)
+        assert result["code"] == -32005
+
+    def test_attribute_dict(self):
+        datastructures = pytest.importorskip("web3.datastructures")
+        from swarm_provenance_uploader.core.chain_client import _redact_value
+
+        result = _redact_value(datastructures.AttributeDict({"error": {"message": f"bad key {self.URL}"}}))
+
+        assert RPC_KEY not in repr(result)
+        assert result["error"]["message"].startswith("bad key https://base-sepolia.g.alchemy.com/")
+
+    @pytest.mark.parametrize("kind", [set, frozenset])
+    def test_set_and_frozenset(self, kind):
+        from swarm_provenance_uploader.core.chain_client import _redact_value
+
+        result = _redact_value(kind({f"bad key {self.URL}", "other"}))
+
+        assert type(result) is kind
+        assert RPC_KEY not in repr(result)
+        assert "other" in result
+
+    def test_bytes_are_kept(self):
+        """Bytes may be binary revert data: they are not decoded or changed."""
+        from swarm_provenance_uploader.core.chain_client import _redact_value
+
+        data = b"\x08\xc3\x79\xa0" + RPC_KEY.encode()
+        assert _redact_value(data) is data
+
+    def test_exception_notes(self, real_web3_exceptions, mock_chain_deps):
+        """__notes__ (add_note, Python 3.11+, or set by hand) are redacted too."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        _inject_real_exceptions(real_web3_exceptions)
+        raw = RuntimeError("read failed")
+        raw.__notes__ = [f"while calling {self.URL}"]
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.side_effect = raw
+        client = ChainClient(chain="base-sepolia", rpc_url=self.URL, rpc_fallbacks=[])
+
+        with pytest.raises(RuntimeError) as exc_info:
+            client.get(DUMMY_HASH)
+
+        assert exc_info.value is raw
+        assert RPC_KEY not in repr(raw.__notes__)
+        assert raw.__notes__[0].startswith("while calling https://base-sepolia.g.alchemy.com/")
+        _assert_raw_error_has_no_key(raw)
