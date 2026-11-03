@@ -6231,6 +6231,33 @@ class TestReceiptWaitErrorIsOutcomeUnknown:
         # Not a transport failure: no fallback
         client._provider._try_fallback.assert_not_called()
 
+    def test_error_the_wait_passes_up_unclassified(self, real_web3_exceptions, mock_chain_deps):
+        """An error _await_receipt raises unchanged, after the send returned the hash (#228).
+
+        A ChainConnectionError counts as a transport failure, so the wait
+        raises it unchanged when no fallback is left; it is not a raw RPC
+        failure, so _send_transaction's transport branch does not take it.
+        """
+        from swarm_provenance_uploader.exceptions import TransactionOutcomeUnknownError
+
+        _inject_real_exceptions(real_web3_exceptions)
+        web3 = mock_chain_deps["web3_instance"]
+        client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
+        client._provider._try_fallback = MagicMock(return_value=False)
+        web3.eth.wait_for_transaction_receipt.side_effect = ChainConnectionError(
+            "no endpoint left", rpc_url="https://rpc.example.org"
+        )
+
+        with pytest.raises(TransactionOutcomeUnknownError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        err = exc_info.value
+        assert err.tx_hash == _format_hash(DUMMY_TX_HASH_BYTES)
+        assert err.explorer_url.endswith(err.tx_hash)
+        assert err.reason == "no endpoint left"
+        assert "Transaction failed" not in str(err)
+        web3.eth.send_raw_transaction.assert_called_once()
+
     def test_rejection_on_the_fallback(self, real_web3_exceptions, mock_chain_deps):
         """A transport failure moves the wait to a fallback, which answers with an error."""
         import requests
