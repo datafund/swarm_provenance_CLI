@@ -1508,11 +1508,13 @@ class TestV2ContractDetection:
         )
         assert contract.supports_transformation_links() is True
 
-    def test_detects_v1_contract(self, mock_chain_deps):
+    def test_detects_v1_contract(self, real_web3_exceptions, mock_chain_deps):
         """Tests that v1 contract is detected when getTransformationLinks reverts."""
         from swarm_provenance_uploader.chain.contract import DataProvenanceContract
 
-        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = Exception("revert")
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = (
+            real_web3_exceptions.ContractLogicError("execution reverted")
+        )
 
         contract = DataProvenanceContract(
             web3=mock_chain_deps["web3_instance"],
@@ -6156,3 +6158,151 @@ class TestAbiEventNames:
         for name in WRITE_EVENTS:
             assert name in names
         assert names == sorted(names)
+
+
+class TestLinksProbeClassification:
+    """The transformation-links probe caches v1 only on a contract answer (#230).
+
+    With the real web3.exceptions classes. A revert or an empty result
+    means the function does not exist (v1). Any other error, such as a
+    transport failure or a JSON-RPC rejection, says nothing about the
+    contract: it is raised and not cached, so the next call probes again.
+    """
+
+    def _contract(self, mock_chain_deps, side_effect):
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        call = mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call
+        call.side_effect = side_effect
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"], contract_address=DUMMY_CONTRACT,
+        )
+        return contract, call
+
+    def test_revert_is_v1_and_cached(self, real_web3_exceptions, mock_chain_deps):
+        contract, call = self._contract(
+            mock_chain_deps, real_web3_exceptions.ContractLogicError("execution reverted")
+        )
+        assert contract.supports_transformation_links() is False
+        assert contract.supports_transformation_links() is False
+        assert call.call_count == 1
+
+    def test_empty_result_is_v1_and_cached(self, real_web3_exceptions, mock_chain_deps):
+        contract, call = self._contract(
+            mock_chain_deps, real_web3_exceptions.BadFunctionCallOutput("returned b''")
+        )
+        assert contract.supports_transformation_links() is False
+        assert contract.supports_transformation_links() is False
+        assert call.call_count == 1
+
+    @pytest.mark.parametrize("make_error", [
+        lambda exc: exc.ProviderConnectionError("connection refused"),
+        lambda exc: exc.Web3RPCError("limit exceeded"),
+        lambda exc: OSError("timed out"),
+    ])
+    def test_other_errors_are_raised_and_not_cached(self, real_web3_exceptions, mock_chain_deps, make_error):
+        error = make_error(real_web3_exceptions)
+        contract, call = self._contract(mock_chain_deps, [error, []])
+
+        with pytest.raises(type(error)):
+            contract.supports_transformation_links()
+        assert contract.supports_transformation_links() is True
+        assert call.call_count == 2
+
+
+class TestLinksProbeUsesFallbacks:
+    """A transport failure in the probe goes to a fallback, not to the v1 paths (#230)."""
+
+    def test_provenance_chain_uses_state_reads_after_probe_failure(self, real_web3_exceptions, mock_chain_deps):
+        _inject_real_exceptions(real_web3_exceptions)
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, OTHER_ADDRESS, 1, "t", b"\x00" * 32, [], [], 0,
+        )
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = [
+            real_web3_exceptions.ProviderConnectionError("down"), [], [],
+        ]
+        mock_chain_deps["contract"].functions.getTransformationParents.return_value.call.return_value = []
+        client = ChainClient(chain="base-sepolia", require_wallet=False)
+        client._provider._try_fallback = MagicMock(side_effect=[True, False])
+        client._contract.get_transformations_from = MagicMock(return_value=[])
+        client._contract.get_transformations_to = MagicMock(return_value=[])
+        client._contract.get_all_transformations = MagicMock(return_value=[])
+
+        chain = client.get_provenance_chain(DUMMY_HASH)
+
+        assert [r.data_hash for r in chain] == [DUMMY_HASH]
+        assert client._contract._supports_v2 is True
+        client._provider._try_fallback.assert_called_once()
+        client._contract.get_transformations_from.assert_not_called()
+        client._contract.get_all_transformations.assert_not_called()
+
+    def test_provenance_chain_probe_rejection_does_not_fall_back(self, real_web3_exceptions, mock_chain_deps):
+        _inject_real_exceptions(real_web3_exceptions)
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = (
+            real_web3_exceptions.Web3RPCError("invalid params")
+        )
+        client = ChainClient(chain="base-sepolia", require_wallet=False)
+        client._provider._try_fallback = MagicMock(side_effect=[True, False])
+        client._contract.get_transformations_from = MagicMock(return_value=[])
+
+        with pytest.raises(ChainConfigurationError) as exc_info:
+            client.get_provenance_chain(DUMMY_HASH)
+
+        assert not isinstance(exc_info.value, ChainConnectionError)
+        assert client._contract._supports_v2 is None
+        client._provider._try_fallback.assert_not_called()
+        client._contract.get_transformations_from.assert_not_called()
+
+    def test_transform_finds_duplicate_after_probe_failure(self, real_web3_exceptions, mock_chain_deps):
+        """With no deploy block (base preset), a dead primary no longer skips the check (#230 comment)."""
+        _inject_real_exceptions(real_web3_exceptions)
+        new_hash = "b" * 64
+        client = _fallback_client(mock_chain_deps, [_log("DataTransformed")])
+        client._provider.deploy_block = None
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = [
+            real_web3_exceptions.ProviderConnectionError("down"),
+            [],
+            [(bytes.fromhex(new_hash), "existing")],
+        ]
+
+        with pytest.raises(TransformationAlreadyExistsError):
+            client.transform(original_hash=DUMMY_HASH, new_hash=new_hash, description="d")
+
+        client._provider._try_fallback.assert_called_once()
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    def test_transform_probe_failure_on_every_endpoint_fails_closed(self, real_web3_exceptions, mock_chain_deps):
+        _inject_real_exceptions(real_web3_exceptions)
+        client = _fallback_client(mock_chain_deps, [_log("DataTransformed")])
+        client._provider.deploy_block = None
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = (
+            real_web3_exceptions.ProviderConnectionError("down")
+        )
+
+        with pytest.raises(ChainConnectionError, match="duplicate transformation check"):
+            client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
+
+        assert client._contract._supports_v2 is None
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    def test_transform_v1_without_deploy_block_warns(self, real_web3_exceptions, mock_chain_deps, caplog):
+        import logging
+
+        _inject_real_exceptions(real_web3_exceptions)
+        client = _fallback_client(mock_chain_deps, [_log("DataTransformed")])
+        client._provider.deploy_block = None
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = (
+            real_web3_exceptions.ContractLogicError("execution reverted")
+        )
+
+        with caplog.at_level(logging.WARNING, logger="swarm_provenance_uploader"):
+            client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
+
+        assert "Duplicate transformation check skipped" in caplog.text
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_called_once()
