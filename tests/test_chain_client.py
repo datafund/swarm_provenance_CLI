@@ -7722,6 +7722,52 @@ class TestLineageDoesNotTrustAnEndpointWithoutCode:
         assert net.urls("scan") == [net.URLS[0], net.URLS[2]]
         assert cache._forward == {DUMMY_HASH: [(self.CHILD, "step")]}
 
+    def test_code_check_rejection_does_not_fall_back(self, real_web3_exceptions, mock_chain_deps):
+        """A JSON-RPC error answer to eth_getCode is a rejection: ChainConfigurationError, no fallback."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        _inject_real_exceptions(real_web3_exceptions)
+        client = ChainClient(chain="base-sepolia", require_wallet=False)
+        net = _ThreeEndpoints(client, mock_chain_deps)
+        mock_chain_deps["web3_instance"].eth.get_code.side_effect = net.by_url("get_code", {
+            url: real_web3_exceptions.Web3RPCError("invalid api key") for url in net.URLS
+        })
+        client._contract.get_transformation_links = MagicMock(return_value=[])
+
+        with pytest.raises(ChainConfigurationError) as exc_info:
+            client.get_provenance_chain(DUMMY_HASH)
+
+        assert not isinstance(exc_info.value, ChainConnectionError)
+        assert "invalid api key" in str(exc_info.value)
+        client._provider._try_fallback.assert_not_called()
+        assert net.urls("get_code") == [net.URLS[0]]
+        client._contract.get_transformation_links.assert_not_called()
+
+    def test_code_check_transport_failure_falls_back(self, real_web3_exceptions, mock_chain_deps):
+        """eth_getCode fails on A (transport), B has no code, C has it: the walk completes on C."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        _inject_real_exceptions(real_web3_exceptions)
+        client = ChainClient(chain="base-sepolia", require_wallet=False)
+        net = _ThreeEndpoints(client, mock_chain_deps)
+        mock_chain_deps["web3_instance"].eth.get_code.side_effect = net.by_url("get_code", {
+            net.URLS[0]: real_web3_exceptions.ProviderConnectionError("down"),
+            net.URLS[1]: b"",
+            net.URLS[2]: DUMMY_CODE,
+        })
+        client._contract._supports_v2 = True
+        client._contract.get_transformation_links = MagicMock(side_effect=net.by_url("links", {
+            url: [(bytes.fromhex(self.CHILD), "step")] for url in net.URLS
+        }))
+        client._contract.get_transformation_parents = MagicMock(return_value=[])
+
+        chain = client.get_provenance_chain(DUMMY_HASH, max_depth=0)
+
+        assert [t.new_data_hash for t in chain[0].transformations] == [self.CHILD]
+        assert net.urls("get_code") == net.URLS
+        assert net.urls("links") == [net.URLS[2]]
+        assert client._contract_code_checked_url == net.URLS[2]
+
 
 class TestValidateAddress:
     """DataProvenanceContract._validate_address checks an address offline (#230 review 8)."""
