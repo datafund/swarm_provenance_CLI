@@ -79,11 +79,12 @@ def _json_error(error: str, message: str, **extra) -> None:
     _echo_json(json.dumps({"error": error, "message": message, **extra}, indent=2))
 
 
-def _json_command(func):
-    """Run a command in _json_mode when its --json option (output_json) is set.
+def _upload_collection_command(func):
+    """The upload-collection wrapper: runs it in _json_mode when --json (output_json) is set.
 
-    For upload-collection: an error the command does not handle exits 1 with
-    an upload_failed document (with --json) and a redacted text error.
+    An error the command does not handle exits 1 with an upload_failed
+    document (with --json) and a redacted text error; with -v, the redacted
+    traceback is printed to stderr first, as for the chain commands.
     """
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -93,8 +94,9 @@ def _json_command(func):
             except (click.exceptions.Exit, click.exceptions.Abort, click.ClickException):
                 raise
             except Exception as e:
-                # An error the command does not handle: one redacted line, no traceback
-                message = f"Upload failed: {type(e).__name__}: {redact_urls(str(e))}"
+                _print_chain_traceback(e, bool(kwargs.get("verbose")))
+                detail = redact_urls(str(e))
+                message = f"Upload failed: {type(e).__name__}" + (f": {detail}" if detail else "")
                 _json_error("upload_failed", message)
                 typer.secho(f"ERROR: {message}", fg=typer.colors.RED, err=True)
                 raise typer.Exit(code=1)
@@ -115,21 +117,33 @@ class _JsonErrorsGroup(TyperGroup):
         """--flag=value becomes --flag for a boolean flag of command.
 
         A value for a flag is a usage error, and click's resilient parsing
-        stops at it, before the tokens that follow (such as --json). Tokens
-        after "--" are rewritten too, because "--" can be an option's value;
-        the parser still reads a real "--" as the end of the options. For a
-        group, only the tokens before its subcommand are its own.
+        stops at it, before the tokens that follow (such as --json). The
+        tokens are walked as the parser reads them: the value of an option
+        given without "=" is skipped (it can be "--" or a command name), a
+        "--" that is not a value ends the options, and for a group the first
+        token that is neither an option nor a value is its subcommand.
         """
-        flags = {name for p in command.params if isinstance(p, click.Option) and p.is_flag
+        options = [p for p in command.params if isinstance(p, click.Option)]
+        flags = {name for p in options if p.is_flag
                  for name in (*p.opts, *p.secondary_opts) if name.startswith("--")}
-        subcommands = getattr(command, "commands", {})
+        takes_value = {name: p.nargs for p in options if not p.is_flag and not p.count
+                       for name in p.opts}
+        is_group = isinstance(command, click.Group)
         out = list(args)
-        for i, token in enumerate(out):
-            if token in subcommands:
+        i = 0
+        while i < len(out):
+            token = out[i]
+            if token == "--":
                 break
-            name = token.split("=", 1)[0]
-            if "=" in token and name in flags:
-                out[i] = name
+            if token.startswith("-") and token != "-":
+                name, has_value, _ = token.partition("=")
+                if has_value and name in flags:
+                    out[i] = name
+                elif not has_value and token in takes_value:
+                    i += takes_value[token]  # skip the option's value
+            elif is_group:
+                break  # the subcommand: the rest are its tokens
+            i += 1
         return out
 
     def _json_requested(self, args) -> bool:
@@ -170,6 +184,9 @@ class _JsonErrorsGroup(TyperGroup):
         try:
             return super().invoke(ctx)
         except click.UsageError as e:
+            _json_error("invalid_input", e.format_message())
+            raise
+        except click.ClickException as e:  # for example click.FileError; keeps its exit code
             _json_error("invalid_input", e.format_message())
             raise
         except KeyboardInterrupt:
@@ -1472,7 +1489,7 @@ def download(
 
 
 @app.command("upload-collection")
-@_json_command
+@_upload_collection_command
 def upload_collection(
     directory: Annotated[str, typer.Argument(help="Path to the directory to upload as a collection.")],
     provenance_standard: Annotated[Optional[str], typer.Option("--std", help="Identifier for the provenance standard used (optional).")] = None,
