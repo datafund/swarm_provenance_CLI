@@ -2618,10 +2618,17 @@ class TestChainIdMismatchHint:
             side_effect=exceptions.ChainConfigurationError("No private key"),
         )
 
-        result = _Runner(mix_stderr=False).invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "anchor", DUMMY_SWARM_REF])
 
         assert result.exit_code == 1
         assert "PROVENANCE_WALLET_KEY" in result.stderr
+
+        # A read-only command does not need the key, so the hint does not name it (#219)
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "verify", DUMMY_SWARM_REF])
+
+        assert result.exit_code == 1
+        assert "Check chain settings" in result.stderr
+        assert "PROVENANCE_WALLET_KEY" not in result.stderr
 
 
 CHAIN_OWNER = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"

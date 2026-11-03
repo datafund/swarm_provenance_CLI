@@ -134,8 +134,17 @@ def _get_chain_client(verbose: bool = False, require_wallet: bool = False):
     except exceptions.ChainConfigurationError as e:
         typer.secho(f"ERROR: Chain configuration invalid: {e}", fg=typer.colors.RED, err=True)
         if not isinstance(e, exceptions.ChainIdMismatchError):
-            # The mismatch message carries its own advice (CHAIN_NAME=localhost)
-            typer.echo("Check PROVENANCE_WALLET_KEY environment variable and chain settings.", err=True)
+            # The mismatch message carries its own advice (CHAIN_NAME=localhost).
+            # Only commands that sign need the key, so only they name it (#219)
+            settings = "CHAIN_NAME, CHAIN_CONTRACT, CHAIN_RPC_URL"
+            if require_wallet:
+                typer.echo(
+                    f"Check {_chain_config['wallet_key_env']} environment variable and "
+                    f"chain settings ({settings}).",
+                    err=True,
+                )
+            else:
+                typer.echo(f"Check chain settings ({settings}).", err=True)
         raise typer.Exit(code=1)
 
 
