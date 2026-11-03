@@ -2149,6 +2149,42 @@ class TestPaidRequestOutcomeReviewCases:
             paying_client.purchase_stamp()
         assert exc_info.value.nonce == NONCE
 
+    @pytest.mark.parametrize("call", ["purchase", "extend", "pool", "upload"])
+    def test_unreadable_success_after_payment_is_result_unreadable(self, paying_client, requests_mock, call):
+        """#216: a paid 2xx with an unreadable body is its own case, still a settled-not-delivered one."""
+        from swarm_provenance_uploader.exceptions import (
+            PaymentResultUnreadableError, PaymentSettledNotDeliveredError)
+
+        answer = {"status_code": 201, "text": "<html>proxy page</html>"}
+        if call == "purchase":
+            requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, answer])
+            run = paying_client.purchase_stamp
+        elif call == "extend":
+            requests_mock.patch(f"{GW}/api/v1/stamps/{DUMMY_STAMP}/extend", [PAYMENT_REQUIRED, answer])
+            run = lambda: paying_client.extend_stamp(DUMMY_STAMP, duration_hours=48)  # noqa: E731
+        elif call == "pool":
+            requests_mock.post(f"{GW}/api/v1/pool/acquire", [PAYMENT_REQUIRED, answer])
+            run = paying_client.acquire_stamp_from_pool
+        else:
+            requests_mock.post(f"{GW}/api/v1/data/", [PAYMENT_REQUIRED, {"status_code": 200, "json": {}}])
+            run = lambda: paying_client.upload_data(b"x", DUMMY_STAMP)  # noqa: E731
+        with pytest.raises(PaymentResultUnreadableError) as exc_info:
+            run()
+        assert isinstance(exc_info.value, PaymentSettledNotDeliveredError)
+        assert exc_info.value.settled is True
+        assert exc_info.value.nonce == NONCE
+
+    def test_settled_not_delivered_answer_is_not_result_unreadable(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import (
+            PaymentResultUnreadableError, PaymentSettledNotDeliveredError)
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 502, "headers": {"X-Payment-Status": "settled_not_delivered"},
+            "json": {"detail": "Bee failed."}}])
+        with pytest.raises(PaymentSettledNotDeliveredError) as exc_info:
+            paying_client.purchase_stamp()
+        assert not isinstance(exc_info.value, PaymentResultUnreadableError)
+
     def test_unreadable_success_without_payment_stays_plain(self, requests_mock):
         requests_mock.post(f"{GW}/api/v1/stamps/", status_code=201, text="<html>")
         with pytest.raises(ConnectionError):

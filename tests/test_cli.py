@@ -9084,3 +9084,85 @@ class TestPaidRefusalBeforeSettlementCli:
             result = runner.invoke(app, ["--x402", "--gateway-url", self.GW, "upload", "--file", "d.txt"])
         assert "Postage stamp purchased" in result.output, result.output
         assert "Payments sent: $0.050000 USDC (1 payment(s))" in result.output
+
+
+# --- A paid 2xx whose body could not be read (#216) ---
+
+class TestPaidResultUnreadableCli:
+    PAYER = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
+    PAYMENT = dict(payer=PAYER, nonce="0x" + "ab" * 32, amount_usd="$0.050000", network="base-sepolia",
+                   transaction="0x" + "cd" * 32, idempotency_key="key-216", status_code=201)
+
+    def _error(self):
+        return exceptions.PaymentResultUnreadableError(
+            "The payment was collected and the gateway answered HTTP 201, but its response "
+            "could not be read (ValueError: not JSON).", **self.PAYMENT)
+
+    def _client(self, mocker, **behaviour):
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.return_value = DUMMY_STAMP
+        mock_client.get_pool_available_count.return_value = 1
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=DUMMY_STAMP, usable=True, exists=True, depth=17, amount="1",
+            bucketDepth=16, immutableFlag=False, batchTTL=3600,
+        )
+        mock_client.upload_data.return_value = DUMMY_SWARM_REF
+        for name, effect in behaviour.items():
+            getattr(mock_client, name).side_effect = effect
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        return mock_client
+
+    def _upload(self, *args):
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            return runner.invoke(app, ["--x402", "upload", "--file", "d.txt", *args])
+
+    def _assert_common(self, result):
+        assert result.exit_code == 1
+        assert "its result could not be read" in result.output
+        assert "Payment was taken, but" not in result.output
+        assert "Re-running pays again" in result.output
+        assert self.PAYMENT["transaction"] in result.output
+
+    def test_extend(self, mocker):
+        self._client(mocker, extend_stamp=self._error())
+        result = runner.invoke(app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
+        self._assert_common(result)
+        assert "ERROR: The stamp extension most likely succeeded, but its result could not be read." \
+            in result.output
+        assert f"swarm-prov-upload stamps info {DUMMY_STAMP}" in result.output
+        assert "SUCCESS" not in result.output
+
+    def test_stamp_purchase(self, mocker):
+        self._client(mocker, purchase_stamp=self._error())
+        result = self._upload()
+        self._assert_common(result)
+        assert "ERROR: The stamp purchase most likely succeeded, but its result could not be read." \
+            in result.output
+        assert f"swarm-prov-upload stamps list --wallet {self.PAYER} --full" in result.output
+
+    def test_pool_acquisition(self, mocker):
+        self._client(mocker, acquire_stamp_from_pool=self._error())
+        result = self._upload("--usePool")
+        self._assert_common(result)
+        assert "ERROR: The pool stamp acquisition most likely succeeded, but its result could not be read." \
+            in result.output
+        assert f"swarm-prov-upload stamps list --wallet {self.PAYER} --full" in result.output
+
+    def test_upload(self, mocker):
+        self._client(mocker, upload_data=self._error())
+        result = self._upload()
+        self._assert_common(result)
+        assert "ERROR: The upload most likely succeeded, but its result could not be read." in result.output
+        assert "stamps info" not in result.output
+        assert "Swarm reference" in result.output
+
+    def test_other_settled_report_unchanged(self, mocker):
+        err = exceptions.PaymentSettledNotDeliveredError("Collected, failed.", **self.PAYMENT)
+        self._client(mocker, extend_stamp=err)
+        result = runner.invoke(app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
+        assert result.exit_code == 1
+        assert "Payment was taken, but the stamp extension failed" in result.output
+        assert "most likely succeeded" not in result.output
+        assert "Contact the gateway operator with the transaction above" in result.output
