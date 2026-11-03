@@ -8554,7 +8554,13 @@ class TestReceiptTimeoutAndReplaced:
         assert result.exit_code == 1, result.output
         assert "Replaced" in result.output
         assert "Transaction failed" not in result.output
-        assert "swarm-prov-upload chain get <data hash> before you run the command again" in result.output
+        if event == "DelegateAuthorized":
+            # No data record to read back: check the delegate state or the explorer
+            assert "chain get" not in result.output
+            assert "delegate" in result.output
+            assert "in the explorer" in result.output
+        else:
+            assert "swarm-prov-upload chain get <data hash> before you run the command again" in result.output
         assert self.STEP_TX in result.output
 
         result = runner.invoke(app, args + ["--json"])
@@ -8834,16 +8840,44 @@ class TestChainWait:
         assert output["tx_hash"] == self.TX
         assert output["explorer_url"] == self.EXPLORER
 
-    def test_connection_error(self, mocker):
+    def test_connection_error_is_pending(self, mocker):
+        """No RPC left during the wait: the transaction may still be pending, so exit 3 (#240 review)."""
         from swarm_provenance_uploader.exceptions import ChainConnectionError
 
-        self._client(mocker, error=ChainConnectionError("refused", rpc_url=RPC_URLS_WITH_KEY[0]))
+        client, _ = self._client(mocker, error=ChainConnectionError("refused", rpc_url=RPC_URLS_WITH_KEY[0]))
+        client._provider.get_explorer_tx_url.return_value = self.EXPLORER
 
         result = runner.invoke(app, ["chain", "wait", self.TX])
 
-        assert result.exit_code == 1, result.output
+        assert result.exit_code == 3, result.output
         assert "Cannot connect to chain" in result.output
+        assert "may still be pending" in result.output
+        assert f"swarm-prov-upload chain wait {self.TX}" in result.output
         assert RPC_KEY not in result.output
+
+    def test_connection_error_json(self, mocker):
+        from swarm_provenance_uploader.exceptions import ChainConnectionError
+
+        client, _ = self._client(mocker, error=ChainConnectionError(
+            f"Max retries exceeded for {RPC_URLS_WITH_KEY[0]}", rpc_url=RPC_URLS_WITH_KEY[0],
+        ))
+        client._provider.get_explorer_tx_url.return_value = self.EXPLORER
+
+        result = runner.invoke(app, ["chain", "wait", self.TX, "--json"])
+
+        assert result.exit_code == 3, result.output
+        output = json.loads(result.stdout)
+        assert output["error"] == "connection_failed"
+        assert output["tx_hash"] == self.TX
+        assert output["explorer_url"] == self.EXPLORER
+        assert RPC_KEY not in result.stdout
+
+    def test_not_found_stays_exit_1(self, mocker):
+        from swarm_provenance_uploader.exceptions import TransactionNotFoundError
+
+        self._client(mocker, error=TransactionNotFoundError("Not found", tx_hash=self.TX))
+
+        assert runner.invoke(app, ["chain", "wait", self.TX]).exit_code == 1
 
     def test_help(self):
         result = runner.invoke(app, ["chain", "wait", "--help"])

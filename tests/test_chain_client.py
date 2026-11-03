@@ -5859,6 +5859,20 @@ class TestReceiptTimeout:
         web3.eth.get_transaction_receipt.assert_called_once_with(DUMMY_TX_HASH_BYTES)
         web3.eth.send_raw_transaction.assert_called_once()
 
+    def test_replaced_delegate_advice_has_no_chain_get(self, real_web3_exceptions, mock_chain_deps):
+        """A delegate write has no data record to read back (#240 review)."""
+        from swarm_provenance_uploader.exceptions import TransactionReplacedError
+
+        client = _timeout_client(mock_chain_deps, real_web3_exceptions, [_log("DelegateAuthorized")], mined_nonce=6)
+
+        with pytest.raises(TransactionReplacedError) as exc_info:
+            client.set_delegate(OTHER_ADDRESS, True)
+
+        assert exc_info.value.event_name == "DelegateAuthorized"
+        assert "chain get" not in str(exc_info.value)
+        assert "delegate" in str(exc_info.value)
+        assert "block explorer" in str(exc_info.value)
+
     def test_replaced_when_second_lookup_returns_none(self, real_web3_exceptions, mock_chain_deps):
         from swarm_provenance_uploader.exceptions import TransactionReplacedError
 
