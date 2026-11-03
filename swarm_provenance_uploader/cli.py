@@ -113,19 +113,28 @@ class _JsonErrorsGroup(TyperGroup):
     """
 
     @staticmethod
-    def _drop_flag_values(command, args):
-        """--flag=value becomes --flag for a boolean flag of command.
+    def _drop_flag_values(command, args, help_names=("--help",)):
+        """--flag=value becomes --flag for a boolean flag of command (help included).
 
         A value for a flag is a usage error, and click's resilient parsing
         stops at it, before the tokens that follow (such as --json). The
-        tokens are walked as the parser reads them: the value of an option
-        given without "=" is skipped (it can be "--" or a command name), a
-        "--" that is not a value ends the options, and for a group the first
-        token that is neither an option nor a value is its subcommand.
+        tokens are walked as the parser reads them:
+        - a long option that takes a value and has no "=" skips its value
+          (which can be "--" or a command name);
+        - a short-option cluster such as -vt is read letter by letter: at the
+          first letter whose option takes a value, the value is the rest of
+          the token if letters follow, otherwise the next token(s);
+        - a "--" that is not a value ends the options;
+        - for a group, the first token that is neither an option nor a value
+          is its subcommand.
+
+        Returns the rewritten tokens and the index of the "--" that ended the
+        options, or None.
         """
         options = [p for p in command.params if isinstance(p, click.Option)]
         flags = {name for p in options if p.is_flag
                  for name in (*p.opts, *p.secondary_opts) if name.startswith("--")}
+        flags.update(name for name in help_names if name.startswith("--"))
         takes_value = {name: p.nargs for p in options if not p.is_flag and not p.count
                        for name in p.opts}
         is_group = isinstance(command, click.Group)
@@ -134,17 +143,23 @@ class _JsonErrorsGroup(TyperGroup):
         while i < len(out):
             token = out[i]
             if token == "--":
-                break
-            if token.startswith("-") and token != "-":
+                return out, i
+            if token.startswith("--"):
                 name, has_value, _ = token.partition("=")
                 if has_value and name in flags:
                     out[i] = name
                 elif not has_value and token in takes_value:
                     i += takes_value[token]  # skip the option's value
+            elif token.startswith("-") and token != "-":
+                for position, letter in enumerate(token[1:], start=2):
+                    if "-" + letter in takes_value:
+                        if position == len(token):
+                            i += takes_value["-" + letter]  # the value is the next token
+                        break  # otherwise the rest of the token is the value
             elif is_group:
                 break  # the subcommand: the rest are its tokens
             i += 1
-        return out
+        return out, None
 
     def _json_requested(self, args) -> bool:
         """True if the command that args name has a --json option, and args set it.
@@ -152,16 +167,25 @@ class _JsonErrorsGroup(TyperGroup):
         --json=<value> counts as set: the usage error is then a JSON document.
         """
         try:
-            ctx = self.make_context(self.name or "swarm-prov-upload", self._drop_flag_values(self, args),
+            help_names = self.context_settings.get("help_option_names") or ["--help"]
+            tokens, end = self._drop_flag_values(self, args, help_names)
+            # click's parser consumes the list it is given: pass copies
+            ctx = self.make_context(self.name or "swarm-prov-upload", list(tokens),
                                     resilient_parsing=True, ignore_unknown_options=True)
             command, rest = self, [*ctx.protected_args, *ctx.args]
             while isinstance(command, click.Group):
-                while rest and rest[0].startswith("-") and rest[0] != "--":
-                    rest.pop(0)  # an unknown option before the subcommand
+                if end is not None:
+                    rest = tokens[end + 1:]  # after "--", the next token is the command name
+                else:
+                    while rest and rest[0].startswith("-"):
+                        rest.pop(0)  # an unknown option before the subcommand
+                if not rest:
+                    return False
                 name, command, rest = command.resolve_command(ctx, rest)
                 if command is None:
                     return False
-                ctx = command.make_context(name, self._drop_flag_values(command, rest), parent=ctx,
+                tokens, end = self._drop_flag_values(command, rest, ctx.help_option_names)
+                ctx = command.make_context(name, list(tokens), parent=ctx,
                                            resilient_parsing=True, ignore_unknown_options=True)
                 rest = [*ctx.protected_args, *ctx.args]
             return any(p.name == "output_json" for p in command.params) and bool(ctx.params.get("output_json"))
@@ -2669,8 +2693,10 @@ def _report_unexpected_chain_error(e: Exception, verbose: bool = False) -> None:
         typer.secho(f"ERROR: Cannot connect to chain: {redact_urls(str(e))}",
                     fg=typer.colors.RED, err=True)
     else:
-        _json_error("chain_error", f"Chain command failed: {type(e).__name__}: {redact_urls(str(e))}")
-        typer.secho(f"ERROR: Chain command failed: {type(e).__name__}: {redact_urls(str(e))}",
+        detail = redact_urls(str(e))
+        message = f"Chain command failed: {type(e).__name__}" + (f": {detail}" if detail else "")
+        _json_error("chain_error", message)
+        typer.secho(f"ERROR: {message}",
                     fg=typer.colors.RED, err=True)
 
 
