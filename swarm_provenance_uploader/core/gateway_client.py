@@ -1730,9 +1730,10 @@ class GatewayClient:
 
             if not result.success:
                 # Gateway-authored text, cleaned before it is shown (#209, as #151)
-                # Without its own final period: one is added below (#209)
+                # One closing mark: a period is added unless it ends in ! or ? (#209)
                 message = (_sanitize_gateway_text(result.message, limit=300) or "").rstrip(". ") \
                     or "no reason given"
+                end = "" if message.endswith(("!", "?")) else "."
                 payment = getattr(response, "x402_payment", None)
                 if payment:
                     # swarm_connect settles every paid request it answers with
@@ -1741,11 +1742,11 @@ class GatewayClient:
                     # and delivered nothing. A retry would pay again (#209).
                     raise PaymentSettledNotDeliveredError(
                         f"The payment was collected, but the gateway answered HTTP "
-                        f"{response.status_code} without a stamp: {message}.",
+                        f"{response.status_code} without a stamp: {message}{end}",
                         status_code=response.status_code, **payment,
                     )
                 raise PoolAcquisitionError(
-                    f"Failed to acquire stamp from pool: {message}. "
+                    f"Failed to acquire stamp from pool: {message}{end} "
                     "Retry may succeed.",
                     available_count=0,
                 )
