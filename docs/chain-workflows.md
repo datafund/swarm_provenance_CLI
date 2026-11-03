@@ -691,7 +691,7 @@ swarm-prov-upload chain wait 0xe5e5... --event DataStatusChanged
 | `expected ACTIVE` | Original is RESTRICTED/DELETED | Set to ACTIVE first or use different hash |
 | `Transaction failed: reverted` | Not the owner or not authorized | Check owner with `chain get <hash>` |
 | `Cannot connect to chain` | RPC node unreachable | Check `CHAIN_RPC_URL` or network config |
-| `Outcome unknown` | RPC connection failed after the transaction was sent | Check the transaction in the explorer before you run the command again |
+| `Outcome unknown` | The transaction was sent, but it is not known whether it was mined: the RPC connection failed after the send, the RPC answered the send with "already known" or "nonce too low", or the RPC answered the receipt lookup with an error | Wait with the printed `chain wait` command, or check the transaction in the explorer, before you run the command again |
 | `Not confirmed yet` | No receipt arrived within 120 seconds; the transaction may still be mined | Run the printed `chain wait <tx_hash> --event <name>` command. Do not run the write again |
 | `Replaced` | Another transaction with the same nonce from the same address was mined instead | Check the record with `chain get <hash>` before you run the command again. For `chain delegate`, check the delegate state or the transaction in the explorer |
 
