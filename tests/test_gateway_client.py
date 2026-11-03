@@ -1367,6 +1367,22 @@ def paying_client():
 
 PAYMENT_REQUIRED = {"status_code": 402, "json": {"accepts": []}}
 
+# swarm_connect's answer when facilitator.verify() raises (x402/dependency.py), before
+# settlement, in the #381 envelope: not charged (#213, #215).
+FACILITATOR_VERIFY_FAILED_502 = {"status_code": 502, "json": {
+    "detail": {"error": "Payment verification failed",
+               "detail": "Could not verify payment with facilitator. Please try again."},
+    "code": "HTTP_502", "message": "Payment verification failed"}}
+
+# swarm_connect's answer when facilitator.settle() raises (x402/settlement.py): the
+# transfer may have gone through, so it stays possibly charged.
+SETTLEMENT_UNAVAILABLE_502 = {"status_code": 502, "json": {
+    "detail": {"code": "PAYMENT_SETTLEMENT_UNAVAILABLE",
+               "message": "The payment could not be settled, so nothing was delivered.",
+               "x402_status": "settlement_failed"},
+    "code": "PAYMENT_SETTLEMENT_UNAVAILABLE",
+    "message": "The payment could not be settled, so nothing was delivered."}}
+
 
 class TestPaidRequestOutcome:
     """Failures after the payment was sent must not look like plain failures."""
@@ -1994,8 +2010,11 @@ class TestPaymentSentHook:
         (503, {"detail": {"code": "PURCHASE_CAPACITY", "message": "You were not charged; retry shortly."}}),
         (503, {"detail": {"code": "GATEWAY_DAILY_SPEND_CEILING", "message": "Daily limit."}}),
         (500, {"detail": "Internal server error. You were not charged."}),
+        (502, {"detail": {"error": "Payment verification failed",
+                          "detail": "Could not verify payment with facilitator. Please try again."},
+               "code": "HTTP_502", "message": "Payment verification failed"}),
     ], ids=["403-ownership", "400-too-small", "400-cost-limit", "422", "400-funds",
-            "503-capacity", "503-spend-ceiling", "500-not-charged"])
+            "503-capacity", "503-spend-ceiling", "500-not-charged", "502-verify-failed"])
     def test_hook_not_called_when_refused_before_settlement(self, mock_x402, requests_mock, status, body):
         """#215: an answer the gateway sends before settling was not paid for."""
         from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
@@ -2027,7 +2046,12 @@ class TestPaymentSentHook:
         ({"status_code": 502, "text": "Bad Gateway"}, "PaymentOutcomeUnknownError"),
         ({"status_code": 503, "json": {"detail": {"code": "SOMETHING_ELSE", "message": "x"}}},
          "PaymentOutcomeUnknownError"),
-    ], ids=["409-settled", "400-settled", "500-delivery-failed", "502", "503-other"])
+        (dict(FACILITATOR_VERIFY_FAILED_502, headers={"X-Payment-Status": "settled_not_delivered",
+                                                      "X-Payment-Transaction": TX_HASH}),
+         "PaymentSettledNotDeliveredError"),
+        (SETTLEMENT_UNAVAILABLE_502, "PaymentOutcomeUnknownError"),
+    ], ids=["409-settled", "400-settled", "500-delivery-failed", "502", "503-other",
+            "502-verify-failed-settled", "502-settlement-unavailable"])
     def test_hook_still_called_when_possibly_charged(self, mock_x402, requests_mock, answer, error):
         from swarm_provenance_uploader import exceptions as exc
 
@@ -2307,13 +2331,13 @@ PRICING_FAILED_503 = _gateway_503({
 })
 
 
-class TestNotChargedBeforeSettlement503:
-    """503 answers that swarm_connect raises before settle_payment are not reported as possibly charged (#213)."""
+class TestNotChargedBeforeSettlement:
+    """5xx answers that swarm_connect raises before settle_payment are not reported as possibly charged (#213)."""
 
     @pytest.mark.parametrize("answer", [
-        SPEND_CEILING_503, SPEND_BUDGET_UNAVAILABLE_503, PRICING_FAILED_503,
-    ], ids=["spend-ceiling", "spend-budget-unavailable", "pricing-failed"])
-    def test_purchase_503_is_plain_failure(self, paying_client, requests_mock, answer):
+        SPEND_CEILING_503, SPEND_BUDGET_UNAVAILABLE_503, PRICING_FAILED_503, FACILITATOR_VERIFY_FAILED_502,
+    ], ids=["spend-ceiling", "spend-budget-unavailable", "pricing-failed", "verify-failed"])
+    def test_purchase_answer_is_plain_failure(self, paying_client, requests_mock, answer):
         from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
 
         requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, answer])
@@ -2323,8 +2347,9 @@ class TestNotChargedBeforeSettlement503:
 
     @pytest.mark.parametrize("answer", [
         SPEND_CEILING_503, SPEND_BUDGET_UNAVAILABLE_503, BEE_PRICE_ZERO_503, PRICING_FAILED_503,
-    ], ids=["spend-ceiling", "spend-budget-unavailable", "bee-price-zero", "pricing-failed"])
-    def test_extend_503_is_plain_failure(self, paying_client, requests_mock, answer):
+        FACILITATOR_VERIFY_FAILED_502,
+    ], ids=["spend-ceiling", "spend-budget-unavailable", "bee-price-zero", "pricing-failed", "verify-failed"])
+    def test_extend_answer_is_plain_failure(self, paying_client, requests_mock, answer):
         from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
 
         requests_mock.patch(f"{GW}/api/v1/stamps/{DUMMY_STAMP}/extend", [PAYMENT_REQUIRED, answer])
