@@ -2202,6 +2202,30 @@ class TestPaidRequestOutcomeReviewCases:
         assert exc_info.value.settled is True
         assert exc_info.value.nonce == NONCE
 
+    @pytest.mark.parametrize("kwargs,prefix,depth", [
+        ({}, "paid-", None),
+        ({"label": "mine", "depth": 20}, "mine-", 20),
+        ({"size": "small"}, "paid-", None),
+    ])
+    def test_unreadable_purchase_keeps_the_label_and_depth_sent(self, paying_client, requests_mock,
+                                                                kwargs, prefix, depth):
+        """#216: the gateway names a paid batch <label>-<suffix> or paid-<suffix> (swarm_connect stamps.py)."""
+        from swarm_provenance_uploader.exceptions import PaymentResultUnreadableError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {"status_code": 201, "text": "<html>"}])
+        with pytest.raises(PaymentResultUnreadableError) as exc_info:
+            paying_client.purchase_stamp(**kwargs)
+        assert exc_info.value.label_prefix == prefix
+        assert exc_info.value.depth == depth
+
+    def test_unreadable_pool_acquire_has_no_label(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentResultUnreadableError
+
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", [PAYMENT_REQUIRED, {"status_code": 200, "text": "<html>"}])
+        with pytest.raises(PaymentResultUnreadableError) as exc_info:
+            paying_client.acquire_stamp_from_pool()
+        assert exc_info.value.label_prefix is None
+
     def test_settled_not_delivered_answer_is_not_result_unreadable(self, paying_client, requests_mock):
         from swarm_provenance_uploader.exceptions import (
             PaymentResultUnreadableError, PaymentSettledNotDeliveredError)

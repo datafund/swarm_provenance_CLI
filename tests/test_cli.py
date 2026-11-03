@@ -9138,6 +9138,8 @@ class TestPaidResultUnreadableCli:
         assert f"swarm-prov-upload stamps info {DUMMY_STAMP}" in result.output
         assert ("The extension worked if the Amount it shows is higher and the TTL is longer "
                 "than before the extension.") in result.output
+        # A hedge: how soon Bee shows the new values is not verified
+        assert "may take a few minutes to show" in result.output
         assert "per chunk" not in result.output
         assert "SUCCESS" not in result.output
 
@@ -9222,6 +9224,24 @@ class TestPaidResultUnreadableCli:
         assert "--idempotency-key" not in result.output
         assert "Re-running pays again." in result.output
         assert "cannot be looked up" not in result.output
+
+    def test_stamp_purchase_shows_the_label_and_depth_sent(self, mocker):
+        """#216: like the pending report, so the new batch can be found in the wallet's stamp list."""
+        err = self._error()
+        err.label_prefix, err.depth = "paid-", 20
+        self._client(mocker, purchase_stamp=err)
+        result = self._upload()
+        self._assert_common(result)
+        assert "Stamp label:     paid-<suffix>" in result.output
+        assert "Depth:           20" in result.output
+        assert "look for the stamp whose label starts with paid-" in result.output
+
+    def test_pool_acquisition_shows_no_label(self, mocker):
+        self._client(mocker, acquire_stamp_from_pool=self._error())
+        result = self._upload("--usePool")
+        self._assert_common(result)
+        assert "Stamp label" not in result.output
+        assert "label starts with" not in result.output
 
     def test_other_settled_report_unchanged(self, mocker):
         err = exceptions.PaymentSettledNotDeliveredError("Collected, failed.", **self.PAYMENT)
