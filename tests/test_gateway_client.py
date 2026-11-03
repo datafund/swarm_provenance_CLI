@@ -2269,6 +2269,9 @@ class TestPaidRequestOutcomeReviewCases:
         ("Not acquired", "without a stamp: Not acquired."),
         ("Not acquired. ", "without a stamp: Not acquired."),
         ("Not acquired...", "without a stamp: Not acquired."),
+        ("Not acquired!", "without a stamp: Not acquired!"),
+        ("Not acquired?", "without a stamp: Not acquired?"),
+        ("Not acquired? ", "without a stamp: Not acquired?"),
     ])
     def test_paid_pool_acquire_success_false_message_ends_in_one_period(
             self, paying_client, requests_mock, message, expected):
@@ -2280,7 +2283,7 @@ class TestPaidRequestOutcomeReviewCases:
             paying_client.acquire_stamp_from_pool()
         text = str(exc_info.value)
         assert text.endswith(expected)
-        assert ".." not in text
+        assert ".." not in text and "!." not in text and "?." not in text
 
     def test_unpaid_pool_acquire_success_false_message_ends_in_one_period(self, requests_mock):
         from swarm_provenance_uploader.exceptions import PoolAcquisitionError
