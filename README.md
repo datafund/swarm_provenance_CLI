@@ -339,7 +339,7 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 | `CHAIN_RPC_URL` | Custom RPC URL (optional). With `base` or `base-sepolia`, it must report the preset chain ID | Uses preset |
 | `CHAIN_CONTRACT` | Custom contract address (optional) | Uses preset |
 | `CHAIN_EXPLORER_URL` | Custom block explorer URL (optional) | Uses preset |
-| `CHAIN_GAS_LIMIT` | Explicit gas limit (optional, skips RPC estimation, so a transaction that would revert is still sent and costs gas) | Auto-estimated |
+| `CHAIN_GAS_LIMIT` | Explicit gas limit (optional, skips RPC estimation, so a transaction that would revert is still sent and costs gas). A whole number of at least 21000, like `--gas`; a chain write exits 1 with an error for another value | Auto-estimated |
 | `CHAIN_RPC_URLS` | Comma-separated fallback RPC URLs, tried in order after the main RPC (optional, replaces the preset fallbacks). Like `CHAIN_RPC_URL`, applies whatever chain is selected | Uses preset fallbacks |
 
 When the RPC in use cannot be reached, times out, or does not answer with JSON-RPC, reads and the steps of a write before the transaction is sent (chain ID and contract code checks, gas estimate, nonce, gas price, balance check) move to the next fallback RPC that reports the same chain ID. Sending the transaction never moves to a fallback, so a write is never sent twice; waiting for the receipt may move to a fallback for the same transaction hash. See [docs/chain-setup.md](docs/chain-setup.md#which-operations-use-the-fallback-rpcs).

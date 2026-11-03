@@ -102,9 +102,25 @@ CHAIN_EXPLORER_URL = os.getenv("CHAIN_EXPLORER_URL")
 # Environment variable name that contains the wallet private key
 CHAIN_WALLET_KEY_ENV = os.getenv("CHAIN_WALLET_KEY_ENV", "PROVENANCE_WALLET_KEY")
 
-# Explicit gas limit (optional, overrides estimation when set)
-try:
-    _chain_gas_limit_str = os.getenv("CHAIN_GAS_LIMIT")
-    CHAIN_GAS_LIMIT = int(_chain_gas_limit_str) if _chain_gas_limit_str else None
-except (ValueError, TypeError):
-    CHAIN_GAS_LIMIT = None
+# Smallest gas limit accepted for --gas and CHAIN_GAS_LIMIT: the gas that
+# every transaction uses (#226)
+MIN_GAS_LIMIT = 21000
+
+# Explicit gas limit (optional, overrides estimation when set). A value that
+# is not a whole number of at least MIN_GAS_LIMIT is not used: the error is
+# kept in CHAIN_GAS_LIMIT_ERROR, and the CLI reports it when a chain write
+# would use the setting, so other commands still work (#226).
+CHAIN_GAS_LIMIT = None
+CHAIN_GAS_LIMIT_ERROR = None
+_chain_gas_limit_str = (os.getenv("CHAIN_GAS_LIMIT") or "").strip()
+if _chain_gas_limit_str:
+    try:
+        CHAIN_GAS_LIMIT = int(_chain_gas_limit_str)
+    except ValueError:
+        CHAIN_GAS_LIMIT = None
+    if CHAIN_GAS_LIMIT is None or CHAIN_GAS_LIMIT < MIN_GAS_LIMIT:
+        CHAIN_GAS_LIMIT = None
+        CHAIN_GAS_LIMIT_ERROR = (
+            f"CHAIN_GAS_LIMIT is not a whole number of at least {MIN_GAS_LIMIT}: "
+            f"{_chain_gas_limit_str!r}"
+        )
