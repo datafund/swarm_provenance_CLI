@@ -231,23 +231,33 @@ class TestUrlAfterWordCharacter:
         assert out.endswith(f"https://base-sepolia.g.alchemy.com/{PLACEHOLDER}")
 
 
-def _assert_linear_time(func, build, size, factor=10, max_ratio=20, fail_ratio=50, attempts=3):
+def _assert_linear_time(func, build, size, factor=10, max_ratio=20, fail_ratio=50, attempts=3,
+                        min_total=0.1):
     """Fail if func(build(size)) takes max_ratio times longer than func(build(size // factor)).
 
     A linear scan takes about factor times longer on the larger input, and a
     quadratic one about factor ** 2 times longer. A ratio, not a fixed time
     limit, stays the same on a slow machine (#238). The time is the CPU time
-    of this thread, so other processes on the machine do not count. A ratio
-    of fail_ratio or more fails at once. A ratio from max_ratio up to
+    of this thread, so other processes on the machine do not count. Each
+    input is run again until the calls took min_total seconds in total, and
+    the time per call is compared, the way timeit's autorange does: a clock
+    that ticks only every 15.6 ms (time.thread_time on Windows) then still
+    measures a call that takes less than a millisecond. A ratio of
+    fail_ratio or more fails at once. A ratio from max_ratio up to
     fail_ratio is measured again, up to attempts times, so that one pause
     does not fail the test.
     """
     import time
 
     def timed(text):
+        calls = 0
         start = time.thread_time()
-        func(text)
-        return time.thread_time() - start
+        while True:
+            func(text)
+            calls += 1
+            total = time.thread_time() - start
+            if total >= min_total:
+                return total / calls
 
     small, large = build(size // factor), build(size)
     ratios = []
