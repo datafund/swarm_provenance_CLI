@@ -5858,6 +5858,19 @@ class TestReceiptTimeout:
         # The nonce is not above the transaction's: no second receipt lookup
         web3.eth.get_transaction_receipt.assert_not_called()
 
+    def test_timeout_wording_was_sent(self, real_web3_exceptions, mock_chain_deps):
+        """A write sent the transaction itself: "was sent"."""
+        from swarm_provenance_uploader.exceptions import ReceiptTimeoutError
+
+        client = _timeout_client(mock_chain_deps, real_web3_exceptions, [_log("DataStatusChanged")])
+
+        with pytest.raises(ReceiptTimeoutError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        text = str(exc_info.value)
+        assert f"{exc_info.value.tx_hash} was sent, but no receipt arrived" in text
+        assert "may have been sent" not in text
+
     def test_replaced_when_nonce_used_and_no_receipt(self, real_web3_exceptions, mock_chain_deps):
         from swarm_provenance_uploader.exceptions import (
             TransactionOutcomeUnknownError,
@@ -6067,6 +6080,22 @@ class TestWaitForTransaction:
         web3.eth.wait_for_transaction_receipt.side_effect = real_web3_exceptions.TimeExhausted("timeout")
         web3.eth.get_transaction_receipt.side_effect = real_web3_exceptions.TransactionNotFound("not found")
         return web3
+
+    def test_timeout_wording_may_have_been_sent(self, real_web3_exceptions, mock_chain_deps):
+        """wait_for_transaction was only given a hash: it does not say the transaction was sent."""
+        from swarm_provenance_uploader.exceptions import ReceiptTimeoutError
+
+        client = _wait_client(mock_chain_deps, real_web3_exceptions)
+        web3 = self._time_out(mock_chain_deps, real_web3_exceptions)
+        web3.eth.get_transaction.return_value = {"from": OTHER_ADDRESS, "nonce": 7}
+        web3.eth.get_transaction_count.return_value = 7
+
+        with pytest.raises(ReceiptTimeoutError) as exc_info:
+            client.wait_for_transaction(TX_HASH, "DataRegistered", timeout=30)
+
+        text = str(exc_info.value)
+        assert text.startswith(f"Not confirmed yet: transaction {TX_HASH} may have been sent, but no receipt")
+        assert "was sent" not in text
 
     def test_timeout_pending_uses_sender_of_transaction(self, real_web3_exceptions, mock_chain_deps):
         from swarm_provenance_uploader.exceptions import ReceiptTimeoutError
