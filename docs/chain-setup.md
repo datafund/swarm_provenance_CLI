@@ -363,7 +363,7 @@ The nonce of a write comes from the RPC in use. After a fallback, that RPC may n
 
 ### "Outcome unknown"
 
-The connection to the RPC failed after the transaction was sent, so the CLI does not know whether it was mined. The transaction may still be mined. The CLI prints the transaction hash and the explorer link (with `--json`, `{"error": "outcome_unknown", "tx_hash": ...}`) and exits 3. Look up the transaction in the explorer, or read the record back with `chain get <data hash>` (the Swarm hash you wrote, not the transaction hash), before you run the command again: running it again can send the write twice and pay gas twice.
+The connection to the RPC failed after the transaction was sent, so the CLI does not know whether it was mined. The transaction may still be mined. The CLI prints the transaction hash, the explorer link and the `chain wait` command that resumes the wait (with `--json`, `{"error": "outcome_unknown", "tx_hash": ..., "wait_command": ...}`) and exits 3. Running that `chain wait` command is safe: it sends nothing. Look up the transaction in the explorer, or read the record back with `chain get <data hash>` (the Swarm hash you wrote, not the transaction hash), before you run the command again: running it again can send the write twice and pay gas twice.
 
 If the connection fails before the transaction is sent, the CLI prints "Cannot connect to chain" instead. Nothing was sent in that case.
 
