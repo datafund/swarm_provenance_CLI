@@ -9124,7 +9124,9 @@ class TestPaidResultUnreadableCli:
         assert "ERROR" not in result.output
         assert "its result could not be read" in result.output
         assert "Payment was taken, but" not in result.output
-        assert "Re-running pays again" in result.output
+        # With the key (PAYMENT has one) only a re-run without it pays again
+        assert "A re-run without the key pays again." in result.output
+        assert "cannot be looked up" not in result.output
         assert self.PAYMENT["transaction"] in result.output
 
     def test_extend(self, mocker):
@@ -9134,8 +9136,9 @@ class TestPaidResultUnreadableCli:
         assert "WARNING: The stamp extension most likely succeeded, but its result could not be read." \
             in result.output
         assert f"swarm-prov-upload stamps info {DUMMY_STAMP}" in result.output
-        assert "Compare the Amount and TTL it shows with the values before the extension" in result.output
-        assert "Amount grows by exactly the amount added" in result.output
+        assert ("The extension worked if the Amount it shows is higher and the TTL is longer "
+                "than before the extension.") in result.output
+        assert "per chunk" not in result.output
         assert "SUCCESS" not in result.output
 
     def test_stamp_purchase(self, mocker):
@@ -9185,6 +9188,40 @@ class TestPaidResultUnreadableCli:
         self._assert_common(result)
         assert "Swarm reference" not in result.output
         assert "batch ID" in result.output
+
+    def test_extend_with_amount_names_it(self, mocker):
+        self._client(mocker, extend_stamp=self._error())
+        result = runner.invoke(app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--amount", "5000000000"])
+        self._assert_common(result)
+        assert "higher by 5000000000" in result.output
+
+    @pytest.mark.parametrize("what", ["upload", "purchase"])
+    def test_with_key_offers_the_same_key_rerun(self, mocker, what):
+        """#216: the gateway answers a same-key re-run from the stored 2xx result, without settling again."""
+        if what == "upload":
+            self._client(mocker, upload_data=self._error())
+        else:
+            self._client(mocker, purchase_stamp=self._error())
+        result = self._upload()
+        self._assert_common(result)
+        assert ("A gateway that supports Idempotency-Key answers a re-run with the same key from the "
+                "first request, without charging again:") in result.output
+        assert "--idempotency-key key-216" in result.output
+
+    @pytest.mark.parametrize("what", ["upload", "purchase"])
+    def test_without_key_no_rerun_offer(self, mocker, what):
+        err = exceptions.PaymentResultUnreadableError(
+            "Unreadable.", **dict(self.PAYMENT, idempotency_key=None))
+        if what == "upload":
+            self._client(mocker, upload_data=err)
+        else:
+            self._client(mocker, purchase_stamp=err)
+        result = self._upload()
+        assert result.exit_code == 1
+        assert "Idempotency-Key" not in result.output
+        assert "--idempotency-key" not in result.output
+        assert "Re-running pays again." in result.output
+        assert "cannot be looked up" not in result.output
 
     def test_other_settled_report_unchanged(self, mocker):
         err = exceptions.PaymentSettledNotDeliveredError("Collected, failed.", **self.PAYMENT)
