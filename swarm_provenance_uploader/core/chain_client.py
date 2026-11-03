@@ -1455,8 +1455,10 @@ class ChainClient:
         # error), the write stops before anything is signed or sent
         # (_duplicate_check_error, #230). The contract version probe runs
         # through the fallbacks too, so a dead RPC is not taken as a v1
-        # contract. The only skip left is a confirmed v1 contract whose
-        # deploy block is unknown: it is logged as a warning.
+        # contract. On a v1 contract with no deploy block, the per-node
+        # query is used when its window reaches block 0 (#231); the only
+        # skip left is such a contract on a longer chain, logged as a
+        # warning.
         try:
             is_v2 = _with_fallback(
                 self._provider, lambda: self._contract.supports_transformation_links()
@@ -1489,11 +1491,41 @@ class ChainClient:
         else:
             deploy_block = self._provider.deploy_block
             if deploy_block is None:
-                logger.warning(
-                    "Duplicate transformation check skipped: the contract has no "
-                    "transformation links and its deploy block is unknown. "
-                    "Set CHAIN_DEPLOY_BLOCK to the block the contract was deployed in."
-                )
+                # The block number and the per-node query run again on a
+                # fallback together. The query scans up to the block
+                # checked, so the window checked is the window queried.
+                def per_node_check():
+                    latest = self._provider.web3.eth.block_number
+                    if latest > EVENT_LOOKBACK_BLOCKS:
+                        return None
+                    return self._contract.get_transformations_from(
+                        original_key, to_block=latest
+                    )
+
+                try:
+                    events = _with_fallback(self._provider, per_node_check)
+                except Exception as e:
+                    _raise_duplicate_check_error(e, self._provider.rpc_url)
+                if events is None:
+                    logger.warning(
+                        "Duplicate transformation check skipped: the contract has no "
+                        "transformation links and its deploy block is unknown. "
+                        "Set CHAIN_DEPLOY_BLOCK to the block the contract was deployed in."
+                    )
+                else:
+                    for _, existing_new, existing_desc in events:
+                        existing_hex = (
+                            existing_new.hex()
+                            if isinstance(existing_new, bytes)
+                            else str(existing_new)
+                        )
+                        if existing_hex.lower().removeprefix("0x") == new_key:
+                            raise TransformationAlreadyExistsError(
+                                f"Transformation {original_hash[:16]}... -> {new_hash[:16]}... already exists",
+                                original_hash=original_hash,
+                                new_hash=new_hash,
+                                existing_description=existing_desc,
+                            )
             else:
                 try:
                     from ..chain.event_cache import get_cache
@@ -2108,8 +2140,13 @@ class ChainClient:
                 ) from e
         elif not use_state_reads:
             # Per-node queries: complete only if their window reaches block 0
-            # (#231). A v1 contract emits no DataMerged events, so reading
-            # only DataTransformed loses no edges.
+            # (#231). They read only DataTransformed. That loses no edges:
+            # this path runs only for a contract without getTransformationLinks
+            # (the probe answered with a revert or an empty result), and
+            # DataMerged, its scan (get_all_merge_events) and
+            # getTransformationLinks arrived together in the
+            # ConsentsBasedDataProvenance contract, commit 10192a5 (#90). A
+            # contract from before that commit emits no DataMerged events.
             latest = self._provider.web3.eth.block_number
             per_node_latest = latest
             if latest > EVENT_LOOKBACK_BLOCKS:

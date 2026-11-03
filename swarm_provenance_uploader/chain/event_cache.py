@@ -89,9 +89,10 @@ class TransformationEventCache:
             if from_block > current_block:
                 return self._forward, self._reverse
 
-            # Read both event types before changing anything: if either
-            # scan fails, the maps and the scan marker stay as they were,
-            # so the next call scans the same range again (#230)
+            # Read and decode both event types before changing anything: if
+            # a scan or the decoding of one event fails, the maps and the
+            # scan marker stay as they were, so the next call scans the same
+            # range again and adds each edge once (#230)
             events = contract.get_all_transformations(
                 from_block=from_block,
                 to_block=current_block,
@@ -104,20 +105,27 @@ class TransformationEventCache:
                 to_block=current_block,
             )
 
+            forward: dict[str, list[tuple[str, str]]] = {}
+            reverse: dict[str, list[tuple[str, str]]] = {}
             for orig_bytes, new_bytes, desc in events:
                 orig_hex = _hex(orig_bytes)
                 new_hex = _hex(new_bytes)
-                self._forward.setdefault(orig_hex, []).append((new_hex, desc))
-                self._reverse.setdefault(new_hex, []).append((orig_hex, desc))
+                forward.setdefault(orig_hex, []).append((new_hex, desc))
+                reverse.setdefault(new_hex, []).append((orig_hex, desc))
 
             for evt in merge_events:
                 new_hex = _hex(evt.args.newDataHash)
                 desc = evt.args.transformation
                 for src_bytes in evt.args.sourceDataHashes:
                     src_hex = _hex(src_bytes)
-                    self._forward.setdefault(src_hex, []).append((new_hex, desc))
-                    self._reverse.setdefault(new_hex, []).append((src_hex, desc))
+                    forward.setdefault(src_hex, []).append((new_hex, desc))
+                    reverse.setdefault(new_hex, []).append((src_hex, desc))
 
+            # Everything decoded: merge the new edges and move the marker
+            for key, edges in forward.items():
+                self._forward.setdefault(key, []).extend(edges)
+            for key, edges in reverse.items():
+                self._reverse.setdefault(key, []).extend(edges)
             self._last_scanned_block = current_block
             logger.debug(
                 "Event cache updated: scanned blocks %d-%d, "
