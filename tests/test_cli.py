@@ -10237,12 +10237,12 @@ def _reference_json_requested(argv) -> bool:
 _MATRIX_PREFIXES = [
     [], ["--x402=1"], ["-b", "chain"], ["-bchain"], ["--gateway-url", "chain"],
     ["--gateway-url", "--json"], ["--bogus"], ["--"], ["--backend", "gateway", "--backend", "gateway"],
-    ["--", "-V"],
+    ["--", "-V"], ["-"],
 ]
 _MATRIX_COMMANDS = [
     ["chain", "balance"], ["chain", "anchor", "H"],
     ["upload-collection", "d"], ["stamps", "extend", "S"], ["upload", "--file", "f"],
-    ["chain", "--", "-x", "balance"],
+    ["chain", "--", "-x", "balance"], ["chain", "-", "balance"],
 ]
 _MATRIX_TAILS = [
     ["--json"], ["--json=1"], ["-v=1", "--json"], ["--verbose=1", "--json"], ["--help=1", "--json"],
@@ -10255,7 +10255,7 @@ _MATRIX_TAILS = [
 class TestJsonDetectionMatrix:
     """_json_requested agrees with click's own parse over a cross product of command lines."""
 
-    @pytest.mark.parametrize("prefix", _MATRIX_PREFIXES, ids=[" ".join(p) or "-" for p in _MATRIX_PREFIXES])
+    @pytest.mark.parametrize("prefix", _MATRIX_PREFIXES, ids=[" ".join(p) or "(none)" for p in _MATRIX_PREFIXES])
     def test_matches_clicks_parse(self, prefix):
         from swarm_provenance_uploader.cli import _JsonErrorsGroup
 
@@ -10268,6 +10268,30 @@ class TestJsonDetectionMatrix:
                 expected = _reference_json_requested(argv)
                 if group._json_requested(argv) != expected:
                     disagreements.append((argv, expected))
+        assert disagreements == []
+
+
+class TestJsonDetectionRandom:
+    """Seeded random command lines from the matrix's tokens (and "-"), compared with click's parse."""
+
+    def test_random_argv_match_clicks_parse(self):
+        import random
+        from swarm_provenance_uploader.cli import _JsonErrorsGroup
+
+        pool = sorted({token for group in (_MATRIX_PREFIXES, _MATRIX_COMMANDS, _MATRIX_TAILS)
+                       for argv in group for token in argv} | {"-", "-x", "-V", "--x402", "-vt"})
+        # Command names often, so that many argv reach a command
+        names = ["chain", "balance", "anchor", "upload-collection", "stamps", "extend", "upload"]
+        rng = random.Random(245)
+        group = typer.main.get_command(app)
+        assert isinstance(group, _JsonErrorsGroup)
+        disagreements = []
+        for _ in range(400):
+            argv = [rng.choice(names) if rng.random() < 0.35 else rng.choice(pool)
+                    for _ in range(rng.randint(1, 8))]
+            expected = _reference_json_requested(argv)
+            if group._json_requested(argv) != expected:
+                disagreements.append((argv, expected))
         assert disagreements == []
 
 
@@ -10312,3 +10336,18 @@ class TestJsonReviewRound5:
         assert result.exit_code == 1
         assert _one_json_document(result)["message"] == "Chain command failed: RuntimeError"
         assert "ERROR: Chain command failed: RuntimeError\n" in result.stderr
+
+
+class TestJsonReviewRound6:
+    """A bare "-" is a positional for click: at group level it is the command name (#241)."""
+
+    @pytest.mark.parametrize("args", [
+        ["-", "chain", "balance", "--json"],
+        ["chain", "-", "balance", "--json"],
+        ["--x402", "-", "chain", "balance", "--json"],
+        ["-", "upload-collection", "d", "--json"],
+    ], ids=["top-level", "chain-group", "after-a-global-flag", "before-upload-collection"])
+    def test_bare_dash_is_an_unknown_command(self, args):
+        result = _json_runner().invoke(app, args)
+        assert result.exit_code == 2
+        assert result.stdout == ""
