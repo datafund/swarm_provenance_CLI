@@ -2214,7 +2214,7 @@ class TestPaidRequestOutcomeReviewCases:
             paying_client.upload_manifest(str(tar), DUMMY_STAMP)
 
     POOL_NOT_ACQUIRED = {"status_code": 200, "json": {
-        "success": False, "batch_id": None, "message": "No\x1b[2K stamp‮ handed over",
+        "success": False, "batch_id": None, "message": "No\x1b[2K stamp\u202e handed over",
         "fallback_used": False}}
 
     def test_paid_pool_acquire_success_false_is_settled(self, mock_x402, requests_mock):
@@ -2236,7 +2236,7 @@ class TestPaidRequestOutcomeReviewCases:
         assert err.status_code == 200
         text = str(err)
         assert "Retry may succeed" not in text
-        assert "\x1b" not in text and "‮" not in text
+        assert "\x1b" not in text and "\u202e" not in text
         assert "No [2K stamp handed over" in text
         assert len(sent) == 1
 
@@ -2256,7 +2256,7 @@ class TestPaidRequestOutcomeReviewCases:
         with pytest.raises(PoolAcquisitionError) as exc_info:
             GatewayClient(base_url=GW).acquire_stamp_from_pool()
         text = str(exc_info.value)
-        assert "\x1b" not in text and "‮" not in text
+        assert "\x1b" not in text and "\u202e" not in text
         assert "No [2K stamp handed over" in text
 
     def test_pool_acquire_timeout_after_payment_is_outcome_unknown(self, paying_client, requests_mock):
@@ -2444,8 +2444,8 @@ class TestPresentationReviewCases:
     def test_bidi_and_zero_width_characters_stripped(self):
         from swarm_provenance_uploader.core.gateway_client import _sanitize_gateway_text
 
-        cleaned = _sanitize_gateway_text("abc‮evil​X⁦y﻿")
-        for ch in "‮​⁦﻿":
+        cleaned = _sanitize_gateway_text("abc\u202eevil\u200bX\u2066y\ufeff")
+        for ch in "\u202e\u200b\u2066\ufeff":
             assert ch not in cleaned
 
     @pytest.mark.parametrize("url", ["http://127.0.0.2:8000", "http://LOCALHOST:8000", "http://[::1]:8000"])
@@ -3150,7 +3150,7 @@ class TestGatewayErrorMessages:
 
     def test_gateway_text_is_sanitized(self, requests_mock):
         requests_mock.get(f"{GW}/api/v1/wallet", status_code=400, json={
-            "code": "BAD\x1b[2J", "message": "evil\x1b[31m text‮ here"})
+            "code": "BAD\x1b[2J", "message": "evil\x1b[31m text\u202e here"})
         client = GatewayClient(base_url=GW)
 
         with pytest.raises(ConnectionError) as exc:
@@ -3158,7 +3158,7 @@ class TestGatewayErrorMessages:
 
         text = str(exc.value)
         assert "\x1b" not in text
-        assert "‮" not in text
+        assert "\u202e" not in text
         assert "evil" in text
 
     def test_long_message_is_truncated(self, requests_mock):
@@ -3359,8 +3359,8 @@ class TestDefaultMode402:
     def test_gateway_text_is_sanitized(self, requests_mock):
         from swarm_provenance_uploader.exceptions import PaymentRequiredError
 
-        body = _allowance_402(resets_at="soon\x1b[2J‮")
-        body["message"] = "used up\x1b[31m‮"
+        body = _allowance_402(resets_at="soon\x1b[2J\u202e")
+        body["message"] = "used up\x1b[31m\u202e"
         requests_mock.post(f"{GW}/api/v1/pool/acquire", status_code=402, json=body)
         client = GatewayClient(base_url=GW, x402_enabled=False)
 
@@ -3368,8 +3368,8 @@ class TestDefaultMode402:
             client.acquire_stamp_from_pool(size="small")
 
         text = str(exc.value)
-        assert "\x1b" not in text and "‮" not in text
-        assert "\x1b" not in exc.value.resets_at and "‮" not in exc.value.resets_at
+        assert "\x1b" not in text and "\u202e" not in text
+        assert "\x1b" not in exc.value.resets_at and "\u202e" not in exc.value.resets_at
 
     def test_ordinary_402_keeps_generic_text(self, requests_mock):
         """The plain x402 payment request carries the placeholder code HTTP_402."""
