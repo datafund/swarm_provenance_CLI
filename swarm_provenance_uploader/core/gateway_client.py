@@ -1741,10 +1741,11 @@ class GatewayClient:
 
             if not result.success:
                 # Gateway-authored text, cleaned before it is shown (#209, as #151)
-                # One closing mark: a period is added unless it ends in ! or ? (#209)
+                # One closing mark: a period is added unless it ends in !, ? or
+                # the ellipsis of a message cut to length (#209)
                 message = (_sanitize_gateway_text(result.message, limit=300) or "").rstrip(". ") \
                     or "no reason given"
-                end = "" if message.endswith(("!", "?")) else "."
+                end = "" if message.endswith(("!", "?", "\u2026")) else "."
                 payment = getattr(response, "x402_payment", None)
                 if payment:
                     # swarm_connect settles every paid request it answers with
