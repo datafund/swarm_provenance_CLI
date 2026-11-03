@@ -499,7 +499,9 @@ class ChainClient:
         )
         self._gas_limit_multiplier = gas_limit_multiplier
         self._gas_limit = gas_limit
-        self._contract_code_checked = False
+        # The RPC URL whose contract code was checked; checked again after
+        # a switch to another endpoint (#230)
+        self._contract_code_checked_url = None
 
     @property
     def _wallet(self):
@@ -579,8 +581,10 @@ class ChainClient:
 
         First the RPC's chain ID is confirmed (ChainProvider.confirm_chain_id),
         then the code at the contract address is read: a transaction to an
-        address without code succeeds and records nothing. Both are checked
-        once per client, before the first signature.
+        address without code succeeds and records nothing. The code is read
+        once per endpoint: a switch to another RPC (a fallback) reads it
+        again there. It runs only before the send (in _build_tx and in
+        _send_transaction's prepare step), never after it.
 
         Raises:
             ChainIdMismatchError: If the RPC is on another chain than a named
@@ -594,7 +598,7 @@ class ChainClient:
             ChainConnectionError: If the RPC cannot be reached.
         """
         _with_fallback(self._provider, self._provider.confirm_chain_id)
-        if self._contract_code_checked:
+        if self._contract_code_checked_url == self._provider.rpc_url:
             return
         # The checksummed address: web3 rejects a lowercase one, and the
         # event check compares against the same value.
@@ -633,7 +637,26 @@ class ChainClient:
             raise ChainConfigurationError(
                 f"Could not check the contract code at {address}: {e}"
             ) from e
-        self._contract_code_checked = True
+        # The endpoint in use now: read_code may have switched to a fallback
+        self._contract_code_checked_url = self._provider.rpc_url
+
+    @staticmethod
+    def _validate_build(build, *args, **kwargs) -> None:
+        """Run a build_*_tx method's argument checks only (validate_only=True).
+
+        The checks make no RPC call, so bad input is a ChainValidationError
+        before the contract code check and the build (#230). Any other error
+        here is left to the real build, which reports it as before.
+
+        Raises:
+            ChainValidationError: If the arguments are invalid.
+        """
+        try:
+            build(*args, validate_only=True, **kwargs)
+        except ChainValidationError:
+            raise
+        except Exception:
+            pass
 
     def _build_tx(self, build, *args, **kwargs) -> dict:
         """
@@ -647,10 +670,12 @@ class ChainClient:
         ``gas``, so web3 does not run eth_estimateGas. A transaction that
         would revert is then not caught here: it is sent and costs gas.
 
-        The chain ID and contract code check (_check_contract_code, cached
-        per client) runs first, so a switch away from an RPC without the
-        contract code happens before the build, and the whole write runs on
-        one endpoint (#230).
+        The build method's offline argument checks run first
+        (_validate_build), so bad input is a ChainValidationError before any
+        RPC call. Then, in the same fallback loop as the build, the chain ID
+        and contract code check (_check_contract_code, cached per endpoint)
+        runs, so a switch away from an RPC without the contract code happens
+        before the build, and the whole write runs on one endpoint (#230).
 
         Raises:
             InsufficientFundsError: If the RPC reports insufficient funds.
@@ -658,15 +683,27 @@ class ChainClient:
                 with a JSON-RPC error, or building fails for another reason.
             ChainConnectionError: If the RPC cannot be reached or its answer
                 is not JSON-RPC.
+            ChainValidationError: If the arguments are invalid. No RPC call
+                was made.
             ChainConfigurationError: From the contract code check, for
                 example ContractCodeNotFoundError or ChainIdMismatchError.
         """
+        self._validate_build(build, *args, **kwargs)
+        # Outside the error mapping below, so its errors keep their class;
+        # check_and_build checks again only after a switch to another endpoint
         self._check_contract_code()
         if self._gas_limit is not None:
             kwargs["gas"] = self._gas_limit
+
+        def check_and_build():
+            # After a switch, the new endpoint's code is checked before the
+            # build runs there
+            self._check_contract_code()
+            return build(*args, **kwargs)
+
         try:
             # Nothing is sent here: building can run again on a fallback RPC
-            return _with_fallback(self._provider, lambda: build(*args, **kwargs))
+            return _with_fallback(self._provider, check_and_build)
         except ChainError:
             raise
         except Exception as e:
@@ -752,6 +789,9 @@ class ChainClient:
         self._check_contract_code()
 
         def prepare():
+            # After a switch to a fallback, its contract code is checked
+            # before anything is signed there (cached per endpoint, #230)
+            self._check_contract_code()
             # Fill in nonce. "pending" counts this wallet's transactions that
             # are not mined yet, so a second write does not reuse a nonce.
             tx["nonce"] = web3.eth.get_transaction_count(self._wallet.address, "pending")
@@ -815,6 +855,11 @@ class ChainClient:
         except (ChainTransactionError, InsufficientFundsError):
             raise
         except Exception as e:
+            if isinstance(e, ChainError) and raw_tx is None:
+                # From the contract code check in prepare() (for example
+                # ContractCodeNotFoundError after a switch, #230): nothing
+                # was signed or sent, so it keeps its class
+                raise
             reason = _error_reason(e)
             # Detect "insufficient funds" in RPC error messages and convert.
             # A contract revert is checked first, as in _build_tx: its reason
@@ -1211,6 +1256,14 @@ class ChainClient:
         """
         logger.debug("Anchor: hash=%s type=%s storage_ref=%s", swarm_hash, data_type, storage_ref)
 
+        # Bad input is a ChainValidationError before any RPC call (#230)
+        self._validate_build(
+            self._contract.build_register_data_tx,
+            data_hash=swarm_hash,
+            data_type=data_type,
+            sender=self._wallet.address,
+            storage_ref=storage_ref,
+        )
         # A read from an address without code fails with an unclear error:
         # check the code first so the user gets "No contract code"
         self._check_contract_code()
@@ -1293,6 +1346,15 @@ class ChainClient:
         """
         logger.debug("Anchor for: hash=%s owner=%s", swarm_hash, owner)
 
+        # Bad input is a ChainValidationError before any RPC call (#230)
+        self._validate_build(
+            self._contract.build_register_data_for_tx,
+            data_hash=swarm_hash,
+            data_type=data_type,
+            actual_owner=owner,
+            sender=self._wallet.address,
+            storage_ref=storage_ref,
+        )
         # A read from an address without code fails with an unclear error:
         # check the code first so the user gets "No contract code"
         self._check_contract_code()
@@ -1465,21 +1527,23 @@ class ChainClient:
             TransformResult with transaction details.
 
         Raises:
-            ChainValidationError: If a hash is invalid (raised before any
-                read) or the description is invalid. Nothing was sent.
+            ChainValidationError: If a hash or the description is invalid.
+                Raised before any RPC call. Nothing was sent.
             TransformationAlreadyExistsError: If the duplicate check finds
                 the same transformation. Nothing was sent.
             ChainConnectionError: If no RPC endpoint can be reached during
                 the duplicate check, or before the transaction is sent.
                 Nothing was sent.
             ContractCodeNotFoundError: If no RPC has contract code at the
-                address (the contract version check). Nothing was sent.
+                address: from the contract code check, or from the version
+                probe on a client whose code check already passed. Nothing
+                was sent.
             ChainIdMismatchError: If the RPC is on another chain than the
                 selected preset. Nothing was sent.
             ChainConfigurationError: If no wallet key is configured, the RPC
                 rejects a request of the duplicate check (a JSON-RPC error
-                answer), the deploy block is later than the chain head, or
-                the contract address has no code. Nothing was sent.
+                answer), or the deploy block is later than the chain head.
+                Nothing was sent.
             ChainError: If the duplicate check fails for another reason.
                 Nothing was sent.
             InsufficientFundsError: If the wallet balance is too low.
@@ -1514,9 +1578,18 @@ class ChainClient:
         original_key = _normalize_hash(original_hash).hex()
         new_key = _normalize_hash(new_hash).hex()
 
-        # The chain ID and contract code first, as in anchor(): an RPC
-        # without the code moves to a fallback before the version probe, and
-        # no code on any RPC gets the same error as every other write (#230)
+        # The other arguments (the description) are checked before any RPC
+        # call too. Then the chain ID and contract code, as in anchor(): an
+        # RPC without the code moves to a fallback before the version probe,
+        # and no code on any RPC gets the same error as every other write
+        # (#230)
+        self._validate_build(
+            self._contract.build_record_transformation_tx,
+            original_hash=original_hash,
+            new_hash=new_hash,
+            description=description,
+            sender=self._wallet.address,
+        )
         self._check_contract_code()
 
         # Pre-check: avoid wasting gas on duplicate transformations.

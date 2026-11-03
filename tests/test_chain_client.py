@@ -5321,7 +5321,9 @@ class TestOneTriedSetPerWriteCall:
         client = _write_client(mock_chain_deps, [_log("DataRegistered")])
         primary, fb1, fb2 = client._provider._rpc_urls
         probes.clear()
-        web3.eth.get_code.side_effect = [requests.exceptions.ConnectionError("down"), DUMMY_CODE]
+        # The code is read on fb1, then again on fb2 after the record read
+        # moved there: it is checked once per endpoint (#230)
+        web3.eth.get_code.side_effect = [requests.exceptions.ConnectionError("down"), DUMMY_CODE, DUMMY_CODE]
         record = mock_chain_deps["contract"].functions.getDataRecord.return_value.call
         record.side_effect = [
             requests.exceptions.ConnectionError("down"),
@@ -7212,7 +7214,7 @@ class TestUnsyncedPrimaryFallsBackForWrites:
         """
         _inject_real_exceptions(real_web3_exceptions)
         client = _fallback_client(mock_chain_deps, [_log("DataTransformed")])
-        client._contract_code_checked = True
+        client._contract_code_checked_url = client._provider.rpc_url
         client._provider._try_fallback = MagicMock(side_effect=[True, False, False])
         web3 = mock_chain_deps["web3_instance"]
         web3.eth.get_code.side_effect = [b"", DUMMY_CODE, DUMMY_CODE, DUMMY_CODE]
