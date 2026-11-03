@@ -130,8 +130,10 @@ class TransactionUnconfirmedError(ChainTransactionError):
     """Transaction was sent, but the write is not confirmed as recorded.
 
     Base class for TransactionNotRecordedError and TransactionNotVerifiedError
-    (the transaction was mined with status 1) and
-    TransactionOutcomeUnknownError (it is not known whether it was mined).
+    (the transaction was mined with status 1),
+    TransactionOutcomeUnknownError and its ReceiptTimeoutError subclass (it is
+    not known whether it was mined), and TransactionReplacedError (another
+    transaction with the same nonce was mined instead).
     Catch the subclass to decide whether a retry is safe.
     """
 
@@ -245,6 +247,129 @@ class TransactionOutcomeUnknownError(TransactionUnconfirmedError):
             explorer_url=explorer_url,
         )
         self.reason = redact_urls(reason)
+
+
+class ReceiptTimeoutError(TransactionOutcomeUnknownError):
+    """No receipt arrived for a sent transaction within ``timeout`` seconds (#167).
+
+    The transaction may still be mined, so the write may still happen.
+    ``timeout`` is the wait in seconds. ``reason`` is web3's timeout message.
+
+    Retry: NOT safe. Wait for the transaction with
+    ``ChainClient.wait_for_transaction(tx_hash, event_name, expected_count)``
+    (CLI: ``chain wait <tx_hash> --event <event_name>``) instead of sending
+    the write again.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        tx_hash: str = None,
+        event_name: str = None,
+        expected_count: int = None,
+        contract_address: str = None,
+        explorer_url: str = None,
+        reason: str = None,
+        timeout: float = None,
+    ):
+        super().__init__(
+            message,
+            tx_hash=tx_hash,
+            event_name=event_name,
+            expected_count=expected_count,
+            contract_address=contract_address,
+            explorer_url=explorer_url,
+            reason=reason,
+        )
+        self.timeout = timeout
+
+
+class TransactionReplacedError(TransactionUnconfirmedError):
+    """Another transaction with the same nonce was mined instead (#167).
+
+    The receipt wait timed out, the account's mined nonce is above the
+    transaction's ``nonce``, and the transaction has no receipt, so it will
+    never be mined. The replacement can be the same write, sent from
+    elsewhere with the same key.
+
+    Retry: NOT safe without checking first. Read the record back
+    (CLI: ``chain get``) before you send the write again.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        tx_hash: str = None,
+        event_name: str = None,
+        expected_count: int = None,
+        contract_address: str = None,
+        explorer_url: str = None,
+        nonce: int = None,
+    ):
+        super().__init__(
+            message,
+            tx_hash=tx_hash,
+            event_name=event_name,
+            expected_count=expected_count,
+            contract_address=contract_address,
+            explorer_url=explorer_url,
+        )
+        self.nonce = nonce
+
+
+# Events of writes that create or change a data record, which `chain get`
+# reads back. Other events (DelegateAuthorized) have no data record (#167).
+DATA_RECORD_EVENTS = frozenset({
+    "DataRegistered",
+    "StorageRefLinked",
+    "DataTransformed",
+    "DataMerged",
+    "DataAccessed",
+    "DataStatusChanged",
+    "DataOwnershipTransferred",
+})
+
+
+def replaced_check_kind(event_name: Optional[str]) -> str:
+    """What to check before a replaced write is sent again, by its event (#167).
+
+    The one place that decides it; the library message and the CLI text
+    both use it. Returns "record" for a write with a data record (read it
+    back with ``chain get``), "delegate" for a delegate write (no data
+    record: check the delegate state or the transaction in the block
+    explorer), and "unknown" without an event or for another event.
+    """
+    if event_name in DATA_RECORD_EVENTS:
+        return "record"
+    if event_name == "DelegateAuthorized":
+        return "delegate"
+    return "unknown"
+
+
+def replaced_check_advice(event_name: Optional[str]) -> str:
+    """The library wording of replaced_check_kind's advice."""
+    kind = replaced_check_kind(event_name)
+    if kind == "record":
+        return "read the record back (chain get <data hash>)"
+    if kind == "delegate":
+        return (
+            "check the delegate state (the contract's isAuthorizedDelegate) or the "
+            "transaction in the block explorer"
+        )
+    return "check the transaction in the block explorer, or read the record back (chain get <data hash>)"
+
+
+class TransactionNotFoundError(ChainTransactionError):
+    """The RPC does not know the transaction, and no receipt arrived (#167).
+
+    Raised by ChainClient.wait_for_transaction() for a hash that the RPC
+    does not return after the wait. ``explorer_url`` is the explorer link
+    for the hash, if the chain has an explorer.
+    """
+
+    def __init__(self, message: str, tx_hash: str = None, explorer_url: str = None):
+        super().__init__(message, tx_hash=tx_hash)
+        self.explorer_url = explorer_url
 
 
 class TransformationAlreadyExistsError(ChainError):

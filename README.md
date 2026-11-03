@@ -307,15 +307,21 @@ swarm-prov-upload chain set-storage-ref <data_hash> <storage_ref>
 # Look up data hash by storage reference
 swarm-prov-upload chain lookup <storage_ref>
 
+# Wait for a sent transaction, after a write reported "Not confirmed yet" (exit 3)
+swarm-prov-upload chain wait <tx_hash> --event DataRegistered
+swarm-prov-upload chain wait <tx_hash> --timeout 300 --json
+
 # Walk transformation chain (follow lineage)
 swarm-prov-upload chain get <hash> --follow               # full chain
 swarm-prov-upload chain get <hash> --follow --depth 2     # limit depth
 swarm-prov-upload chain get <hash> --follow --json        # JSON output
 ```
 
+> **Exit code 3: may still be mined**: when a write sent its transaction but no receipt arrived within 120 seconds, or the connection failed after the send, the command exits 3 and prints the transaction hash. Do not run the write again: wait with the printed `chain wait` command, or check the transaction in the explorer. A transaction that another one with the same nonce replaced is reported as "Replaced" (exit 1). See [docs/chain-workflows.md](docs/chain-workflows.md#exit-codes) for all exit codes.
+
 > **`chain get --follow` fails closed**: if any read fails during the walk, the command prints an error and exits with code 1 instead of printing a partial chain. In `--json` output, each record has a `parents` list (`null` for records at the depth limit).
 
-> **`chain protect` vs separate commands**: `chain protect` combines verify + anchor + transform + restrict into one command. If the restrict step fails, the command shows a warning (transform already succeeded) and exits 0 with `partial_failure: true` in JSON output. Use `chain transform --restrict-original` for the two-step version without the pre-flight ACTIVE check.
+> **`chain protect` vs separate commands**: `chain protect` combines verify + anchor + transform + restrict into one command. If the restrict step fails, the command lists the steps that were recorded (the transform transaction), prints the error and the command to restrict the original manually, and exits 1, or 3 when the restrict transaction may still be mined. The JSON output then has `partial_failure: true` and `failed_step: "restrict"`. Use `chain transform --restrict-original` for the two-step version without the pre-flight ACTIVE check.
 
 ### Global flags
 

@@ -363,9 +363,25 @@ The nonce of a write comes from the RPC in use. After a fallback, that RPC may n
 
 ### "Outcome unknown"
 
-The connection to the RPC failed after the transaction was sent, so the CLI does not know whether it was mined. The transaction may still be mined. The CLI prints the transaction hash and the explorer link (with `--json`, `{"error": "outcome_unknown", "tx_hash": ...}`) and exits 1. Look up the transaction in the explorer, or read the record back with `chain get <data hash>` (the Swarm hash you wrote, not the transaction hash), before you run the command again: running it again can send the write twice and pay gas twice.
+The connection to the RPC failed after the transaction was sent, so the CLI does not know whether it was mined. The transaction may still be mined. The CLI prints the transaction hash, the explorer link and the `chain wait` command that resumes the wait (with `--json`, `{"error": "outcome_unknown", "tx_hash": ..., "wait_command": ...}`) and exits 3. Running that `chain wait` command is safe: it sends nothing. Look up the transaction in the explorer, or read the record back with `chain get <data hash>` (the Swarm hash you wrote, not the transaction hash), before you run the command again: running it again can send the write twice and pay gas twice.
 
 If the connection fails before the transaction is sent, the CLI prints "Cannot connect to chain" instead. Nothing was sent in that case.
+
+### "Not confirmed yet"
+
+The transaction was sent, but no receipt arrived within 120 seconds. The transaction may still be mined, so do not run the write again. The CLI prints the transaction hash, the explorer link and the command that waits for the transaction, and exits 3. With `--json`, it prints `{"error": "receipt_timeout", "tx_hash": ..., "event": ..., "expected_count": ..., "timeout": 120, "wait_command": "swarm-prov-upload chain wait 0x... --event ...", ...}`. To wait again, run the printed command, for example:
+
+```bash
+swarm-prov-upload chain wait 0x<tx hash> --event DataRegistered
+```
+
+`chain wait` sends nothing and needs no wallet key, so running it again after its own timeout is safe. Use `--count N` for a batch write, and `--timeout SECONDS` to wait longer than 120 seconds. It exits 0 when the transaction is confirmed (with `--event`, when the contract emitted the events), 1 when it reverted, was not recorded, was replaced or is not found, and 3 when it is still pending or no RPC can be reached (with `--json`, `{"error": "connection_failed", ...}`).
+
+### "Replaced"
+
+The receipt wait timed out, and another transaction with the same nonce from the same address was mined instead, so this transaction will never be mined. This can happen when the same wallet key is used elsewhere at the same time. The other transaction may have made the same write. Check the record with `chain get <data hash>` before you run the command again. For `chain delegate`, which has no data record, check the delegate state or the transaction in the explorer. With `--json`, the error is `"replaced"`, and the command exits 1.
+
+"Replaced" can be a false positive behind a load-balanced RPC: the mined nonce and the receipt lookup may be answered by different backend nodes, and a node that is behind may not have the receipt yet. This is why the advice is to check before you run the write again.
 
 ### "Transaction reverted"
 

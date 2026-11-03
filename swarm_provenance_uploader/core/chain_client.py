@@ -26,6 +26,9 @@ from ..chain.exceptions import (
     TransactionNotRecordedError,
     TransactionNotVerifiedError,
     TransactionOutcomeUnknownError,
+    ReceiptTimeoutError,
+    TransactionReplacedError,
+    TransactionNotFoundError,
     DataAlreadyRegisteredError,
     DataNotRegisteredError,
     TransformationAlreadyExistsError,
@@ -39,8 +42,9 @@ from ..models import (
     DataStatusEnum,
     MergeTransformResult,
     TransformResult,
+    TransactionWaitResult,
 )
-from ..chain.exceptions import redact_exception_chain
+from ..chain.exceptions import redact_exception_chain, replaced_check_advice
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +105,18 @@ def _is_receipt_timeout(error: Exception) -> bool:
     it as an RPC failure; _send_transaction leaves it to its own handling.
     """
     return any(cls.__name__ == "TimeExhausted" for cls in type(error).__mro__)
+
+
+def _is_transaction_not_found(error: Exception) -> bool:
+    """True if web3 reports that the RPC does not know a transaction (TransactionNotFound).
+
+    Matched by class name, like _is_contract_revert.
+    """
+    return any(cls.__name__ == "TransactionNotFound" for cls in type(error).__mro__)
+
+
+# How long a write waits for its receipt, in seconds (also the chain wait default)
+RECEIPT_TIMEOUT = 120
 
 
 def _is_transport_failure(error: Exception) -> bool:
@@ -644,6 +660,10 @@ class ChainClient:
                 events could not be decoded.
             ChainConnectionError: If the RPC cannot be reached before the
                 transaction is sent. Nothing was sent.
+            ReceiptTimeoutError: If no receipt arrived within
+                RECEIPT_TIMEOUT seconds. The transaction may still be mined.
+            TransactionReplacedError: If the receipt wait timed out and
+                another transaction with the same nonce was mined instead.
             TransactionOutcomeUnknownError: If the connection to the RPC
                 fails after send_raw_transaction was called. The
                 transaction may have been sent. The client does not sign
@@ -657,8 +677,6 @@ class ChainClient:
         # failure does not mean that nothing was sent
         send_called = False
         raw_tx = None
-        # Receipt waits started: more than one means the wait moved to a fallback
-        receipt_waits = [0]
 
         self._check_contract_code()
 
@@ -700,48 +718,18 @@ class ChainClient:
             if verbose:
                 print(f"DEBUG: Transaction sent: {tx_hash.hex()}")
 
-            # Wait for receipt. Polling may move to a fallback RPC for the
-            # same hash; the transaction is never sent again.
-            def wait_for_receipt():
-                receipt_waits[0] += 1
-                return web3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-
-            receipt = _with_fallback(self._provider, wait_for_receipt)
-
-            if receipt["status"] != 1:
-                raise ChainTransactionError(
-                    "Transaction reverted (status=0)",
-                    tx_hash=tx_hash.hex(),
-                )
-
-            # Status 1 is not enough: a call to an address without the
-            # contract also succeeds. Require the contract's own events.
-            try:
-                emitted = self._contract.count_receipt_events(expected_event, receipt)
-            except Exception as e:
-                # Mined, so not "Transaction failed": say what is unknown
-                raise TransactionNotVerifiedError(
-                    f"Not verified: transaction {tx_hash.hex()} was mined, but its "
-                    f"{expected_event} events could not be verified: {e}",
-                    tx_hash=tx_hash.hex(),
-                    event_name=expected_event,
-                    expected_count=expected_count,
-                    contract_address=self._contract.address,
-                    explorer_url=self._provider.get_explorer_tx_url(tx_hash.hex()),
-                    reason=str(e),
-                ) from e
-            if emitted != expected_count:
-                raise TransactionNotRecordedError(
-                    f"Not recorded: transaction {tx_hash.hex()} succeeded, but the "
-                    f"contract at {self._contract.address} emitted {emitted} of "
-                    f"{expected_count} expected {expected_event} event(s)",
-                    tx_hash=tx_hash.hex(),
-                    event_name=expected_event,
-                    expected_count=expected_count,
-                    emitted_count=emitted,
-                    contract_address=self._contract.address,
-                    explorer_url=self._provider.get_explorer_tx_url(tx_hash.hex()),
-                )
+            # Wait for the receipt, then check its status and events. The
+            # wait may move to a fallback RPC for the same hash; the
+            # transaction is never sent again.
+            receipt, _ = self._await_receipt(
+                tx_hash,
+                tx_hash.hex(),
+                expected_event,
+                expected_count,
+                RECEIPT_TIMEOUT,
+                sender=self._wallet.address,
+                nonce=tx["nonce"],
+            )
 
             logger.debug(
                 "Transaction confirmed in block %d, gas used: %d",
@@ -781,25 +769,6 @@ class ChainClient:
                 # The send raised before it returned the hash: the hash of
                 # the signed bytes is the same value
                 tx_hash_str = _signed_tx_hash(raw_tx)
-            if _is_receipt_timeout(e) and receipt_waits[0] > 1:
-                # The RPC failed during the wait, and the fallback did not
-                # return a receipt in time. The transaction was sent and may
-                # be mined: do not report it as failed (#168 review; #167
-                # changes the timeout handling as a whole)
-                raise TransactionOutcomeUnknownError(
-                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} was "
-                    f"sent, but the RPC failed while waiting for its receipt, and the "
-                    f"fallback RPC did not return the receipt in time, so its outcome "
-                    f"is unknown: {reason}",
-                    tx_hash=tx_hash_str,
-                    event_name=expected_event,
-                    expected_count=expected_count,
-                    contract_address=self._contract.address,
-                    explorer_url=(
-                        self._provider.get_explorer_tx_url(tx_hash_str) if tx_hash_str else None
-                    ),
-                    reason=reason,
-                ) from e
             # Transport only: connection, timeout, or an answer that is not
             # JSON-RPC. A JSON-RPC error answer means the node answered. A
             # receipt-wait timeout keeps its own handling.
@@ -826,6 +795,318 @@ class ChainClient:
                 ) from e
             # No "Transaction failed:" prefix: the CLI adds its own
             raise ChainTransactionError(reason, tx_hash=tx_hash_str) from e
+
+    def _await_receipt(
+        self,
+        tx_hash,
+        tx_hash_str: str,
+        expected_event: Optional[str],
+        expected_count: int,
+        timeout: float,
+        sender: Optional[str] = None,
+        nonce: Optional[int] = None,
+    ):
+        """
+        Wait for a sent transaction's receipt, then check its status and events (#167).
+
+        Shared by _send_transaction and wait_for_transaction, so a write and
+        a resumed wait report a receipt the same way. The wait runs through
+        the fallback loop (#168): a transport failure moves the wait to a
+        fallback RPC for the same hash.
+
+        On a receipt timeout (web3 TimeExhausted), see _receipt_after_timeout.
+        A timeout after the wait moved to a fallback is reported as
+        TransactionOutcomeUnknownError, without the nonce check.
+
+        Args:
+            tx_hash: The hash as passed to web3 (bytes or hex string).
+            tx_hash_str: The hash as reported in errors.
+            expected_event: Event the contract must emit, or None to skip
+                the event check.
+            expected_count: Number of expected_event events.
+            timeout: Seconds to wait for the receipt.
+            sender: Address that sent the transaction, if known.
+            nonce: Nonce of the transaction, if known. Without sender and
+                nonce, they are read with get_transaction after a timeout.
+
+        Returns:
+            (receipt, emitted): emitted is the number of expected_event
+            events, or None when no event check ran.
+        """
+        web3 = self._provider.web3
+        waits = [0]
+
+        def wait_for_receipt():
+            waits[0] += 1
+            return web3.eth.wait_for_transaction_receipt(tx_hash, timeout=timeout)
+
+        try:
+            receipt = _with_fallback(self._provider, wait_for_receipt)
+        except Exception as e:
+            if not _is_receipt_timeout(e):
+                raise
+            reason = _error_reason(e)
+            explorer_url = self._provider.get_explorer_tx_url(tx_hash_str) if tx_hash_str else None
+            if waits[0] > 1:
+                # The RPC failed during the wait, and the fallback did not
+                # return a receipt in time. The transaction was sent and may
+                # be mined: do not report it as failed (#168 review)
+                raise TransactionOutcomeUnknownError(
+                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} was "
+                    f"sent, but the RPC failed while waiting for its receipt, and the "
+                    f"fallback RPC did not return the receipt in time, so its outcome "
+                    f"is unknown: {reason}",
+                    tx_hash=tx_hash_str,
+                    event_name=expected_event,
+                    expected_count=expected_count,
+                    contract_address=self._contract.address,
+                    explorer_url=explorer_url,
+                    reason=reason,
+                ) from e
+            receipt = self._receipt_after_timeout(
+                e, tx_hash, tx_hash_str, expected_event, expected_count,
+                timeout, sender, nonce, explorer_url,
+            )
+
+        emitted = self._check_receipt(receipt, tx_hash_str, expected_event, expected_count)
+        return receipt, emitted
+
+    def _receipt_after_timeout(
+        self,
+        error: Exception,
+        tx_hash,
+        tx_hash_str: str,
+        expected_event: Optional[str],
+        expected_count: int,
+        timeout: float,
+        sender: Optional[str],
+        nonce: Optional[int],
+        explorer_url: Optional[str],
+    ):
+        """
+        Classify a receipt timeout: pending, replaced, or mined after all (#167).
+
+        web3.py has no replacement detection, so the account's mined nonce
+        (``get_transaction_count(sender, "latest")``) is compared with the
+        transaction's nonce. If it is above, a transaction with this nonce
+        was mined: a second receipt lookup then either finds this one's
+        receipt (returned, for the normal checks) or nothing (replaced). If a
+        lookup fails for another reason, the transaction stays pending.
+
+        Without sender and nonce (a resumed wait), they are read from the
+        transaction. If the RPC does not know the transaction,
+        TransactionNotFoundError is raised.
+
+        Raises:
+            ReceiptTimeoutError: The transaction may still be mined.
+            TransactionReplacedError: Another transaction with the same
+                nonce was mined instead.
+            TransactionNotFoundError: The RPC does not know the transaction.
+        """
+        web3 = self._provider.web3
+        reason = _error_reason(error)
+        pending = ReceiptTimeoutError(
+            f"Not confirmed yet: transaction {tx_hash_str or '(hash unknown)'} was sent, "
+            f"but no receipt arrived within {timeout} seconds. It may still be mined: "
+            f"do not send it again. Wait for it with wait_for_transaction(), or check "
+            f"it in the block explorer.",
+            tx_hash=tx_hash_str,
+            event_name=expected_event,
+            expected_count=expected_count,
+            contract_address=self._contract.address,
+            explorer_url=explorer_url,
+            reason=reason,
+            timeout=timeout,
+        )
+
+        if sender is None or nonce is None:
+            try:
+                tx = web3.eth.get_transaction(tx_hash)
+            except Exception as lookup_error:
+                if not _is_transaction_not_found(lookup_error):
+                    raise pending from error
+                tx = None
+            if tx is None:
+                raise TransactionNotFoundError(
+                    f"Not found: the RPC does not know transaction {tx_hash_str}, and "
+                    f"no receipt arrived within {timeout} seconds. Check the hash in "
+                    f"the block explorer, or read the record back.",
+                    tx_hash=tx_hash_str,
+                    explorer_url=explorer_url,
+                ) from error
+            try:
+                sender, nonce = tx["from"], tx["nonce"]
+            except Exception:
+                raise pending from error
+
+        try:
+            mined_nonce = web3.eth.get_transaction_count(sender, "latest")
+            nonce_used = int(mined_nonce) > int(nonce)
+        except Exception:
+            raise pending from error
+        if not nonce_used:
+            raise pending from error
+
+        try:
+            receipt = web3.eth.get_transaction_receipt(tx_hash)
+        except Exception as lookup_error:
+            if not _is_transaction_not_found(lookup_error):
+                raise pending from error
+            receipt = None
+        if receipt is not None:
+            # Mined after the wait ended: continue with the normal checks
+            return receipt
+        raise TransactionReplacedError(
+            f"Replaced: transaction {tx_hash_str} was not mined, and another "
+            f"transaction with the same nonce ({nonce}) from {sender} was mined "
+            f"instead. The other transaction may have made the same write: "
+            f"{replaced_check_advice(expected_event)} before you send it again.",
+            tx_hash=tx_hash_str,
+            event_name=expected_event,
+            expected_count=expected_count,
+            contract_address=self._contract.address,
+            explorer_url=explorer_url,
+            nonce=nonce,
+        ) from error
+
+    def _check_receipt(
+        self,
+        receipt,
+        tx_hash_str: str,
+        expected_event: Optional[str],
+        expected_count: int,
+    ) -> Optional[int]:
+        """
+        Require status 1 and, if expected_event is set, its events in the receipt.
+
+        Returns:
+            The number of expected_event events, or None without an event check.
+
+        Raises:
+            ChainTransactionError: If the transaction reverted (status 0).
+            TransactionNotVerifiedError: If the events could not be decoded.
+            TransactionNotRecordedError: If the contract did not emit
+                expected_count expected_event events.
+        """
+        if receipt["status"] != 1:
+            raise ChainTransactionError(
+                "Transaction reverted (status=0)",
+                tx_hash=tx_hash_str,
+            )
+        if expected_event is None:
+            return None
+
+        explorer_url = self._provider.get_explorer_tx_url(tx_hash_str) if tx_hash_str else None
+        # Status 1 is not enough: a call to an address without the
+        # contract also succeeds. Require the contract's own events.
+        try:
+            emitted = self._contract.count_receipt_events(expected_event, receipt)
+        except Exception as e:
+            # Mined, so not "Transaction failed": say what is unknown
+            raise TransactionNotVerifiedError(
+                f"Not verified: transaction {tx_hash_str} was mined, but its "
+                f"{expected_event} events could not be verified: {e}",
+                tx_hash=tx_hash_str,
+                event_name=expected_event,
+                expected_count=expected_count,
+                contract_address=self._contract.address,
+                explorer_url=explorer_url,
+                reason=str(e),
+            ) from e
+        if emitted != expected_count:
+            raise TransactionNotRecordedError(
+                f"Not recorded: transaction {tx_hash_str} succeeded, but the "
+                f"contract at {self._contract.address} emitted {emitted} of "
+                f"{expected_count} expected {expected_event} event(s)",
+                tx_hash=tx_hash_str,
+                event_name=expected_event,
+                expected_count=expected_count,
+                emitted_count=emitted,
+                contract_address=self._contract.address,
+                explorer_url=explorer_url,
+            )
+        return emitted
+
+    @_read_method
+    def wait_for_transaction(
+        self,
+        tx_hash: str,
+        expected_event: Optional[str] = None,
+        expected_count: int = 1,
+        timeout: float = RECEIPT_TIMEOUT,
+        verbose: bool = False,
+    ) -> TransactionWaitResult:
+        """
+        Wait for a sent transaction and check its receipt, like a write does (#167).
+
+        Use it to resume after ReceiptTimeoutError. It sends nothing and does
+        not need a wallet key. The receipt, status, event and replacement
+        checks are the ones a write runs. An unknown hash is polled until
+        timeout.
+
+        Args:
+            tx_hash: Transaction hash: 64 hex digits, with or without "0x".
+            expected_event: Event the contract must emit (an ABI event name),
+                or None to skip the event check.
+            expected_count: Number of expected_event events.
+            timeout: Seconds to wait for the receipt.
+            verbose: Enable debug output.
+
+        Returns:
+            TransactionWaitResult. event and emitted_count are None when no
+            event check ran.
+
+        Raises:
+            ChainValidationError: If an argument is not valid.
+            ChainTransactionError: If the transaction reverted.
+            TransactionNotRecordedError, TransactionNotVerifiedError: As for
+                a write.
+            ReceiptTimeoutError: If no receipt arrived within timeout.
+            TransactionReplacedError: If another transaction with the same
+                nonce was mined instead.
+            TransactionNotFoundError: If the RPC does not know the hash after
+                the wait.
+            ChainConnectionError: If no RPC endpoint can be reached.
+
+        A transport failure runs the whole wait again on a fallback RPC
+        (#168), with the full timeout, so the total wait can be longer than
+        timeout. A timeout on the fallback then gets the nonce check, as
+        without a switch.
+        """
+        import re
+        from ..chain.contract import abi_event_names
+
+        if not isinstance(tx_hash, str) or not re.fullmatch(r"(0x)?[0-9a-fA-F]{64}", tx_hash.strip()):
+            raise ChainValidationError(
+                "Transaction hash must be 64 hex digits, with or without 0x"
+            )
+        tx_hash = tx_hash.strip()
+        if not tx_hash.startswith("0x"):
+            tx_hash = "0x" + tx_hash
+        if expected_event is not None and expected_event not in abi_event_names():
+            raise ChainValidationError(
+                f"Unknown event {expected_event!r}. Events: {', '.join(abi_event_names())}"
+            )
+        if isinstance(expected_count, bool) or not isinstance(expected_count, int) or expected_count < 1:
+            raise ChainValidationError("expected_count must be 1 or more")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise ChainValidationError("timeout must be more than 0 seconds")
+
+        logger.debug("Wait for transaction %s (event %s x%d)", tx_hash, expected_event, expected_count)
+        receipt, emitted = self._await_receipt(
+            tx_hash, tx_hash, expected_event, expected_count, timeout,
+        )
+        if verbose:
+            print(f"DEBUG: Confirmed in block {receipt['blockNumber']}, gas: {receipt['gasUsed']}")
+        return TransactionWaitResult(
+            tx_hash=tx_hash,
+            block_number=receipt["blockNumber"],
+            gas_used=receipt["gasUsed"],
+            status=receipt["status"],
+            explorer_url=self._provider.get_explorer_tx_url(tx_hash),
+            event=expected_event,
+            emitted_count=emitted,
+        )
 
     def _receipt_to_explorer_url(self, receipt: dict) -> Optional[str]:
         """Get explorer URL from a transaction receipt."""

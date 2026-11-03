@@ -327,6 +327,17 @@ class AccessResult(BaseModel):
     accessor: str = Field(description="Address of the accessor")
 
 
+class TransactionWaitResult(BaseModel):
+    """Result from waiting for a sent transaction (``chain wait``, #167)."""
+    tx_hash: str = Field(description="Transaction hash")
+    block_number: int = Field(description="Block number containing the transaction")
+    gas_used: int = Field(description="Gas consumed by the transaction")
+    status: int = Field(description="Receipt status (1: success)")
+    explorer_url: Optional[str] = Field(default=None, description="Block explorer URL for the transaction")
+    event: Optional[str] = Field(default=None, description="Event that was checked, or None when no event check ran")
+    emitted_count: Optional[int] = Field(default=None, description="Number of events of that kind the contract emitted, or None when no event check ran")
+
+
 class ChainWalletInfo(BaseModel):
     """Wallet information for chain operations."""
     address: str = Field(description="Ethereum wallet address")
