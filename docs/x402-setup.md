@@ -287,7 +287,7 @@ The paid request timed out, dropped, or failed with a server error after the pay
 
 Pressing Ctrl-C while a paid request is in progress is reported the same way, because the gateway finishes the request regardless.
 
-A server error that the gateway sends before it collects the payment is shown as an ordinary error instead, because nothing was charged: `PURCHASE_CAPACITY`, `GATEWAY_DAILY_SPEND_CEILING`, `SPEND_BUDGET_UNAVAILABLE`, `POOL_ALLOWANCE_UNAVAILABLE`, a Bee node that has not reported a stamp price yet, and a price that the gateway could not calculate.
+A server error that the gateway sends before it collects the payment is shown as an ordinary error instead, because nothing was charged: `PURCHASE_CAPACITY`, `GATEWAY_DAILY_SPEND_CEILING`, `SPEND_BUDGET_UNAVAILABLE`, `POOL_ALLOWANCE_UNAVAILABLE`, a Bee node that has not reported a stamp price yet, a price that the gateway could not calculate, and a payment that the gateway could not verify with the facilitator. A failed settlement (`PAYMENT_SETTLEMENT_UNAVAILABLE`) is still reported as possibly charged.
 
 ### "Payment was taken, but ... failed"
 

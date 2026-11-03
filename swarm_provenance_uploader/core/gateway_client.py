@@ -963,13 +963,16 @@ class GatewayClient:
     _NOT_CHARGED_CODES = {"PURCHASE_CAPACITY", "GATEWAY_DAILY_SPEND_CEILING", "SPEND_BUDGET_UNAVAILABLE",
                           "POOL_ALLOWANCE_UNAVAILABLE"}
 
-    # 503 texts without a code that the gateway sends before it settles (#213):
-    # the stamp extension's check that Bee reports a stamp price, and the x402
-    # dependency's pricing failure (for example a Bee price of 0), which comes
-    # before the payment is even verified.
+    # 5xx texts without a code that the gateway sends before it settles (#213):
+    # the stamp extension's check that Bee reports a stamp price (503), the
+    # x402 dependency's pricing failure (503, for example a Bee price of 0),
+    # which comes before the payment is even verified, and its 502 when the
+    # facilitator's verify call fails. PAYMENT_SETTLEMENT_UNAVAILABLE (502, the
+    # settle call failed) is not listed: that transfer may have gone through.
     _NOT_CHARGED_DETAIL_PREFIXES = (
         "The Bee node has not reported a current stamp price yet.",
         "Failed to calculate price for this operation.",
+        "Could not verify payment with facilitator.",
     )
 
     @classmethod
