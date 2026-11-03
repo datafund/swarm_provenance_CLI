@@ -287,6 +287,8 @@ The paid request timed out, dropped, or failed with a server error after the pay
 
 Pressing Ctrl-C while a paid request is in progress is reported the same way, because the gateway finishes the request regardless.
 
+A server error that the gateway sends before it collects the payment is shown as an ordinary error instead, because nothing was charged: `PURCHASE_CAPACITY`, `GATEWAY_DAILY_SPEND_CEILING`, `SPEND_BUDGET_UNAVAILABLE`, a Bee node that has not reported a stamp price yet, and a price that the gateway could not calculate.
+
 ### "Payment was taken, but ... failed"
 
 The gateway confirmed it collected the payment, but the request failed afterwards (or it answered success with a response the CLI could not read). Contact the gateway operator with the transaction hash shown; they can deliver the result or refund it. Re-running pays again.

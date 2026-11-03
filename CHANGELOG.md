@@ -59,6 +59,7 @@ All notable changes to this project will be documented in this file.
 - `ChainClient.get_provenance_chain(max_depth=...)` now raises `ChainValidationError` for a value below 0 or above 50; 0 still returns the start record only. **Behaviour change:** `max_depth=None` now means 10 levels instead of 50 (#170)
 
 - A positive auto-pay limit below 1e-15 is now shown in scientific notation, for example `$1E-16`, in the refusal message and in `x402 status`, in the same way as a limit of 1e15 or more. Before, every decimal digit was printed, so a limit such as `1e-100000000` produced a message of about 100 MB. Such a limit works as a limit of 0 (#236)
+- A paid request answered with one of the 503 answers that the gateway sends before it settles the payment is now reported as an ordinary error, without "The payment may have been taken". These are `GATEWAY_DAILY_SPEND_CEILING`, `SPEND_BUDGET_UNAVAILABLE`, the answer that the Bee node has not reported a stamp price yet, and the answer that the gateway failed to calculate the price. This applies to the stamp purchase in `upload` and `upload-collection`, and to `stamps extend`. Other 5xx answers are still reported as possibly charged (#213)
 ### Removed
 - Removed the `CHAIN_ENABLED` setting (`config.CHAIN_ENABLED`). It was documented but nothing read it: chain commands always run when you call them (#141)
 - Removed `config.X402_PRIVATE_KEY_ENV` and `config.X402_RPC_URL`. The environment variables still work: they are read when used, by `resolve_x402_private_key()` and `X402Client` (#141)

@@ -931,17 +931,33 @@ class GatewayClient:
             body = body["detail"]
         return body if isinstance(body, dict) else {}
 
-    # Server errors the gateway sends only before it settles a payment.
-    _NOT_CHARGED_CODES = {"PURCHASE_CAPACITY"}
+    # Server errors the gateway sends only before it settles a payment. In
+    # swarm_connect, PURCHASE_CAPACITY is raised just before settle_payment();
+    # GATEWAY_DAILY_SPEND_CEILING and SPEND_BUDGET_UNAVAILABLE come from the
+    # spend-limit check, which runs before it in both stamp purchase and
+    # stamp extension (#213).
+    _NOT_CHARGED_CODES = {"PURCHASE_CAPACITY", "GATEWAY_DAILY_SPEND_CEILING", "SPEND_BUDGET_UNAVAILABLE"}
+
+    # 503 texts without a code that the gateway sends before it settles (#213):
+    # the stamp extension's check that Bee reports a stamp price, and the x402
+    # dependency's pricing failure (for example a Bee price of 0), which comes
+    # before the payment is even verified.
+    _NOT_CHARGED_DETAIL_PREFIXES = (
+        "The Bee node has not reported a current stamp price yet.",
+        "Failed to calculate price for this operation.",
+    )
 
     @classmethod
     def _says_not_charged(cls, body: dict) -> bool:
         """True for a 5xx the gateway answers before collecting the payment."""
         if body.get("code") in cls._NOT_CHARGED_CODES:
             return True
-        # The gateway's answer to a paid request that crashed before settling.
         detail = body.get("detail")
-        return isinstance(detail, str) and detail.endswith("You were not charged.")
+        if not isinstance(detail, str):
+            return False
+        # The gateway's answer to a paid request that crashed before settling.
+        return (detail.endswith("You were not charged.")
+                or detail.startswith(cls._NOT_CHARGED_DETAIL_PREFIXES))
 
     @contextmanager
     def _reading_paid_result(self, response: requests.Response):
