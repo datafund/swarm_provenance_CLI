@@ -2299,6 +2299,18 @@ class TestPaidRequestOutcomeReviewCases:
         assert ".." not in str(exc_info.value)
         assert "Not acquired. Retry may succeed." in str(exc_info.value)
 
+    def test_paid_pool_acquire_success_false_truncated_message_gets_no_period(self, paying_client, requests_mock):
+        """A message cut to length ends in an ellipsis, with no period after it (#209)."""
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        answer = {"status_code": 200, "json": {"success": False, "message": "x" * 5000, "fallback_used": False}}
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", [PAYMENT_REQUIRED, answer])
+        with pytest.raises(PaymentSettledNotDeliveredError) as exc_info:
+            paying_client.acquire_stamp_from_pool()
+        text = str(exc_info.value)
+        assert text.endswith("x\u2026")
+        assert "\u2026." not in text
+
     def test_paid_pool_acquire_success_false_long_message_is_cut(self, paying_client, requests_mock):
         from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
 
