@@ -7127,6 +7127,10 @@ class TestLinksProbeEmptyResultChecksCode:
         mock_chain_deps["web3_instance"].eth.get_code.return_value = b""
         client = ChainClient(chain="base-sepolia", require_wallet=False)
         client._provider._try_fallback = MagicMock(side_effect=[True, False])
+        # The code check of this endpoint passed earlier, so the probe is the
+        # first read that meets the missing code (#230 review 8 added that
+        # check to the lineage; TestLineageDoesNotTrustAnEndpointWithoutCode)
+        client._contract_code_checked_url = client._provider.rpc_url
 
         chain = client.get_provenance_chain(DUMMY_HASH)
 
@@ -7717,3 +7721,22 @@ class TestLineageDoesNotTrustAnEndpointWithoutCode:
         assert [t.new_data_hash for t in chain[0].transformations] == [self.CHILD]
         assert net.urls("scan") == [net.URLS[0], net.URLS[2]]
         assert cache._forward == {DUMMY_HASH: [(self.CHILD, "step")]}
+
+
+class TestValidateAddress:
+    """DataProvenanceContract._validate_address checks an address offline (#230 review 8)."""
+
+    @pytest.mark.parametrize("address", ["zz", "", "0x" + "1" * 39, "0x" + "g" * 40, None, 123])
+    def test_invalid(self, mock_chain_deps, address):
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract(web3=mock_chain_deps["web3_instance"], contract_address=DUMMY_CONTRACT)
+        with pytest.raises(ChainValidationError, match="Invalid owner address"):
+            contract._validate_address(address, "owner")
+
+    @pytest.mark.parametrize("address", [OTHER_ADDRESS, OTHER_ADDRESS[2:], DUMMY_ADDRESS])
+    def test_valid(self, mock_chain_deps, address):
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract(web3=mock_chain_deps["web3_instance"], contract_address=DUMMY_CONTRACT)
+        assert contract._validate_address(address, "owner") == address  # the mock checksum is the identity

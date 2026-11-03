@@ -658,6 +658,29 @@ class ChainClient:
         except Exception:
             pass
 
+    def _check_read_contract_code(self) -> None:
+        """Check that the RPC in use has code at the contract address, for a read (#230).
+
+        Shares the per-endpoint cache with _check_contract_code, but reads
+        no chain ID (nothing is signed) and maps no error: an RPC failure
+        is raised as it is, for the read loop to move to a fallback and map
+        (_read_error), as for any other read.
+
+        Raises:
+            ContractCodeNotFoundError: If the RPC in use has no code at the
+                address. The read loop tries the fallbacks first.
+        """
+        if self._contract_code_checked_url == self._provider.rpc_url:
+            return
+        address = self._contract.address
+        if not self._provider.web3.eth.get_code(address):
+            raise ContractCodeNotFoundError(
+                f"No contract code at {address} on this RPC: it may not be synced, "
+                "or the contract address or chain is wrong.",
+                contract_address=address,
+            )
+        self._contract_code_checked_url = self._provider.rpc_url
+
     def _build_tx(self, build, *args, **kwargs) -> dict:
         """
         Call a build_*_tx method and map its errors to chain errors.
@@ -1604,17 +1627,23 @@ class ChainClient:
         # skip left is such a contract on a longer chain, logged as a
         # warning.
         try:
-            is_v2 = _with_fallback(
-                self._provider, lambda: self._contract.supports_transformation_links()
-            )
+            def probe():
+                # Each duplicate-check read first checks the contract code
+                # of the endpoint in use (cached per endpoint), so an answer
+                # from a fallback without the code is never trusted (#230)
+                self._check_contract_code()
+                return self._contract.supports_transformation_links()
+
+            is_v2 = _with_fallback(self._provider, probe)
         except Exception as e:
             _raise_duplicate_check_error(e, self._provider.rpc_url)
         if is_v2:
             try:
-                links = _with_fallback(
-                    self._provider,
-                    lambda: self._contract.get_transformation_links(original_hash),
-                )
+                def links_read():
+                    self._check_contract_code()
+                    return self._contract.get_transformation_links(original_hash)
+
+                links = _with_fallback(self._provider, links_read)
                 for existing_new, existing_desc in links:
                     existing_hex = (
                         existing_new.hex()
@@ -1639,6 +1668,7 @@ class ChainClient:
                 # fallback together. The query scans up to the block
                 # checked, so the window checked is the window queried.
                 def per_node_check():
+                    self._check_contract_code()
                     latest = self._provider.web3.eth.block_number
                     if latest > EVENT_LOOKBACK_BLOCKS:
                         return None
@@ -1680,6 +1710,9 @@ class ChainClient:
                     # The block number and the event scan (chunked
                     # eth_getLogs) run again on a fallback together
                     def scan():
+                        # Before the scan, so the shared event cache never
+                        # moves past events an endpoint without the code lacks
+                        self._check_contract_code()
                         current_block = self._provider.web3.eth.block_number
                         return cache.get_maps(self._contract, deploy_block, current_block)
 
@@ -2246,6 +2279,12 @@ class ChainClient:
             )
         else:
             effective_max = max_depth
+
+        # Every read below runs on an endpoint with the contract code: this
+        # method's read loop runs it whole again after a switch, and the
+        # check (cached per endpoint) runs first, so an answer or an event
+        # scan from an endpoint without the code is never used (#230)
+        self._check_read_contract_code()
 
         # Detect contract version — state reads are much faster than event
         # scans. A probe error fails the walk like any other read (#230):

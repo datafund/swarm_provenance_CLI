@@ -9,6 +9,7 @@ Requires optional dependencies (the `blockchain` extra): web3 and eth-account.
 
 import json
 import logging
+import re
 from enum import IntEnum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -206,6 +207,24 @@ class DataProvenanceContract:
 
     # --- Build transaction methods (return tx dicts) ---
 
+    def _validate_address(self, address: str, name: str) -> str:
+        """The checksummed form of an address argument, checked offline (#230).
+
+        40 hex digits, with or without 0x (as web3's to_checksum_address
+        accepts them); to_checksum_address makes no RPC call.
+
+        Raises:
+            ChainValidationError: If the address is not in that form.
+        """
+        if not isinstance(address, str) or not re.fullmatch(r"(0x)?[0-9a-fA-F]{40}", address):
+            raise ChainValidationError(
+                f"Invalid {name} address: {address!r} (expected 40 hex digits)"
+            )
+        try:
+            return self._web3.to_checksum_address(address)
+        except Exception as e:
+            raise ChainValidationError(f"Invalid {name} address: {address!r}: {e}") from e
+
     def _tx_params(self, sender: str, gas: Optional[int]) -> dict:
         """
         Transaction parameters for build_transaction.
@@ -227,7 +246,7 @@ class DataProvenanceContract:
         storage_ref: Optional[str] = None,
         gas: Optional[int] = None,
         validate_only: bool = False,
-    ) -> dict:
+    ) -> Optional[dict]:
         """
         Build transaction to register a data hash on-chain.
 
@@ -242,7 +261,7 @@ class DataProvenanceContract:
                 call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
         """
         hash_bytes = _normalize_hash(data_hash)
         _validate_data_type(data_type)
@@ -269,7 +288,7 @@ class DataProvenanceContract:
         storage_ref: Optional[str] = None,
         gas: Optional[int] = None,
         validate_only: bool = False,
-    ) -> dict:
+    ) -> Optional[dict]:
         """
         Build transaction to register data on behalf of another owner.
 
@@ -287,11 +306,11 @@ class DataProvenanceContract:
                 call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
         """
         hash_bytes = _normalize_hash(data_hash)
         _validate_data_type(data_type)
-        owner_addr = self._web3.to_checksum_address(actual_owner)
+        owner_addr = self._validate_address(actual_owner, "owner")
         tx_params = self._tx_params(sender, gas)
         if storage_ref is not None:
             ref_bytes = _normalize_hash(storage_ref)
@@ -314,7 +333,7 @@ class DataProvenanceContract:
         storage_refs: Optional[List[str]] = None,
         gas: Optional[int] = None,
         validate_only: bool = False,
-    ) -> dict:
+    ) -> Optional[dict]:
         """
         Build transaction to register multiple data hashes in one call.
 
@@ -330,7 +349,7 @@ class DataProvenanceContract:
                 call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
 
         Raises:
             ChainValidationError: If arrays have different lengths or exceed batch limit.
@@ -376,7 +395,7 @@ class DataProvenanceContract:
         sender: str,
         gas: Optional[int] = None,
         validate_only: bool = False,
-    ) -> dict:
+    ) -> Optional[dict]:
         """
         Build transaction to record a data transformation.
 
@@ -391,7 +410,7 @@ class DataProvenanceContract:
                 call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
         """
         orig_bytes = _normalize_hash(original_hash)
         new_bytes = _normalize_hash(new_hash)
@@ -408,7 +427,7 @@ class DataProvenanceContract:
         sender: str,
         gas: Optional[int] = None,
         validate_only: bool = False,
-    ) -> dict:
+    ) -> Optional[dict]:
         """
         Build transaction to record that data was accessed.
 
@@ -421,7 +440,7 @@ class DataProvenanceContract:
                 call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
         """
         hash_bytes = _normalize_hash(data_hash)
         if validate_only:
@@ -436,7 +455,7 @@ class DataProvenanceContract:
         sender: str,
         gas: Optional[int] = None,
         validate_only: bool = False,
-    ) -> dict:
+    ) -> Optional[dict]:
         """
         Build transaction to record access to multiple data hashes.
 
@@ -449,7 +468,7 @@ class DataProvenanceContract:
                 call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
 
         Raises:
             ChainValidationError: If batch size exceeds limit.
@@ -472,7 +491,7 @@ class DataProvenanceContract:
         sender: str,
         gas: Optional[int] = None,
         validate_only: bool = False,
-    ) -> dict:
+    ) -> Optional[dict]:
         """
         Build transaction to change the status of registered data.
 
@@ -486,7 +505,7 @@ class DataProvenanceContract:
                 call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
         """
         hash_bytes = _normalize_hash(data_hash)
         if validate_only:
@@ -502,7 +521,7 @@ class DataProvenanceContract:
         sender: str,
         gas: Optional[int] = None,
         validate_only: bool = False,
-    ) -> dict:
+    ) -> Optional[dict]:
         """
         Build transaction to change the status of multiple data hashes.
 
@@ -516,7 +535,7 @@ class DataProvenanceContract:
                 call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
 
         Raises:
             ChainValidationError: If arrays have different lengths or exceed batch limit.
@@ -544,7 +563,7 @@ class DataProvenanceContract:
         sender: str,
         gas: Optional[int] = None,
         validate_only: bool = False,
-    ) -> dict:
+    ) -> Optional[dict]:
         """
         Build transaction to transfer data ownership.
 
@@ -558,14 +577,15 @@ class DataProvenanceContract:
                 call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
         """
         hash_bytes = _normalize_hash(data_hash)
+        owner_addr = self._validate_address(new_owner, "new owner")
         if validate_only:
             return None
         return self._contract.functions.transferDataOwnership(
             hash_bytes,
-            self._web3.to_checksum_address(new_owner),
+            owner_addr,
         ).build_transaction(self._tx_params(sender, gas))
 
     def build_set_delegate_tx(
@@ -575,7 +595,7 @@ class DataProvenanceContract:
         sender: str,
         gas: Optional[int] = None,
         validate_only: bool = False,
-    ) -> dict:
+    ) -> Optional[dict]:
         """
         Build transaction to authorize or revoke a delegate.
 
@@ -589,12 +609,13 @@ class DataProvenanceContract:
                 call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
         """
+        delegate_addr = self._validate_address(delegate, "delegate")
         if validate_only:
             return None
         return self._contract.functions.setDelegate(
-            self._web3.to_checksum_address(delegate),
+            delegate_addr,
             authorized,
         ).build_transaction(self._tx_params(sender, gas))
 
@@ -605,7 +626,7 @@ class DataProvenanceContract:
         sender: str,
         gas: Optional[int] = None,
         validate_only: bool = False,
-    ) -> dict:
+    ) -> Optional[dict]:
         """
         Build transaction to set the storage reference for an existing record.
 
@@ -621,7 +642,7 @@ class DataProvenanceContract:
                 call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
         """
         hash_bytes = _normalize_hash(data_hash)
         ref_bytes = _normalize_hash(storage_ref)
@@ -891,7 +912,7 @@ class DataProvenanceContract:
         sender: str,
         gas: Optional[int] = None,
         validate_only: bool = False,
-    ) -> dict:
+    ) -> Optional[dict]:
         """
         Build tx for N-to-1 merge transformation (v2+).
 
@@ -907,7 +928,7 @@ class DataProvenanceContract:
                 call, so bad input is a ChainValidationError (#230).
 
         Returns:
-            Unsigned transaction dict.
+            Unsigned transaction dict, or None with validate_only.
 
         Raises:
             ChainValidationError: If source count or formats are invalid.
