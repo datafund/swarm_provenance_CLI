@@ -9916,10 +9916,15 @@ class TestJsonReviewRound3:
         assert result.exit_code == 2
         assert _one_json_document(result)["error"] == "invalid_input"
 
-    def test_group_flag_names_apply_to_group_tokens_only(self, mocker):
-        """--free is a global flag; a --free=1 after the subcommand is the subcommand's unknown option."""
+    @pytest.mark.parametrize("args", [
+        ["--gateway-url", "upload-collection", "--free=1", "chain", "balance", "--json"],
+        ["--gateway-url", "chain", "--x402=1", "chain", "balance", "--json"],
+        ["--idempotency-key", "stamps", "--free=1", "chain", "balance", "--json"],
+    ], ids=["value-is-another-command", "value-is-the-command", "value-is-a-group"])
+    def test_an_option_value_that_names_a_command_is_a_value(self, mocker, args):
+        """The walk skips an option's value, also when it is a command name, as the parser does."""
         _successful_chain_client(mocker)
-        result = _json_runner().invoke(app, ["chain", "balance", "--free=1", "--json"])
+        result = _json_runner().invoke(app, args)
         assert result.exit_code == 2
         assert _one_json_document(result)["error"] == "invalid_input"
 
@@ -10120,3 +10125,60 @@ class TestEveryErrorDocumentHasAMessage:
         document = _one_json_document(result)
         assert document["failed_step"] == step
         assert document["unconfirmed"]["message"]
+
+
+class TestJsonReviewRound4:
+    """Review round 4 fixes for --json (#211, #241)."""
+
+    def _collection(self, mocker, *args, error):
+        def setup(m):
+            m.patch("swarm_provenance_uploader.cli.file_utils.calculate_directory_hash_and_files",
+                    side_effect=error)
+        return TestJsonReviewRound3()._collection(mocker, *args, setup=setup)
+
+    @pytest.mark.parametrize("json_flag", [True, False], ids=["json", "text"])
+    def test_verbose_prints_a_redacted_traceback(self, mocker, json_flag):
+        import tarfile
+        result = self._collection(mocker, "-v", *(["--json"] if json_flag else []),
+                                  error=tarfile.TarError(f"bad member, see {RPC_URLS_WITH_KEY[0]}"))
+        assert result.exit_code == 1
+        assert "Traceback (most recent call last)" in result.stderr
+        assert "TarError" in result.stderr
+        assert RPC_KEY not in result.stdout + result.stderr
+        if json_flag:
+            assert _one_json_document(result)["error"] == "upload_failed"
+
+    def test_no_traceback_without_verbose(self, mocker):
+        import tarfile
+        result = self._collection(mocker, "--json", error=tarfile.TarError("bad member"))
+        assert "Traceback" not in result.stderr
+
+    def test_empty_message_has_no_trailing_colon(self, mocker):
+        result = self._collection(mocker, "--json", error=MemoryError())
+        assert result.exit_code == 1
+        assert _one_json_document(result)["message"] == "Upload failed: MemoryError"
+        assert "ERROR: Upload failed: MemoryError\n" in result.stderr
+
+    def test_click_exception_is_a_document(self, mocker):
+        """A ClickException that is not a usage error (FileError) keeps its exit code 1."""
+        client = _successful_chain_client(mocker)
+        client.anchor.side_effect = click.FileError("key.txt", hint="permission denied")
+
+        result = _json_runner().invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
+
+        assert result.exit_code == 1
+        document = _one_json_document(result)
+        assert document["error"] == "invalid_input"
+        assert "key.txt" in document["message"] and "permission denied" in document["message"]
+
+    def test_click_exception_without_json_prints_no_document(self, mocker):
+        client = _successful_chain_client(mocker)
+        client.anchor.side_effect = click.FileError("key.txt", hint="permission denied")
+        result = _json_runner().invoke(app, ["chain", "anchor", DUMMY_SWARM_REF])
+        assert result.exit_code == 1
+        assert result.stdout == ""
+
+    def test_upload_collection_wrapper_name(self):
+        from swarm_provenance_uploader import cli
+        assert hasattr(cli, "_upload_collection_command")
+        assert not hasattr(cli, "_json_command")
