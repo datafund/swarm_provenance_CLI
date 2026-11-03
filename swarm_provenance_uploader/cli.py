@@ -313,7 +313,7 @@ def _wallet_stamps_command(e: exceptions.PaymentOutcomeUnknownError) -> Optional
 def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: str,
                             final_step: bool = False, final_note: Optional[str] = None,
                             final_stdout: Optional[List[str]] = None,
-                            check: Optional[str] = None):
+                            check: Optional[str] = None, missing: str = "result"):
     """
     Explain a paid request whose payment may have been taken, then exit.
 
@@ -333,6 +333,8 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
         check: For a paid 2xx answer that could not be read
             (PaymentResultUnreadableError): a command that shows whether the
             request worked, for example `stamps info <id>` (#216).
+        missing: For that case without `check`: what the answer should have
+            given, for example "Swarm reference" or "batch ID".
 
     Raises:
         typer.Exit: Always; code 0 when the final step is known to have
@@ -400,7 +402,7 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
             typer.echo("If the result is not there, contact the operator with the transaction above. "
                        "Re-running pays again.", err=True)
         else:
-            typer.echo("The Swarm reference was not received, so the result cannot be looked up "
+            typer.echo(f"The {missing} was not received, so the result cannot be looked up "
                        "here. Contact the gateway operator with the transaction above for it. "
                        "Re-running pays again.", err=True)
     elif e.settled:
@@ -782,7 +784,8 @@ def upload(
         except exceptions.PaymentRequiredError as e:
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
-            _report_payment_outcome(e, "the pool stamp acquisition", check=_wallet_stamps_command(e))
+            _report_payment_outcome(e, "the pool stamp acquisition", check=_wallet_stamps_command(e),
+                                    missing="batch ID")
         except typer.Exit:
             # The availability check above already printed its error and chose
             # the exit code; the catch-all would re-report it as an empty
@@ -825,7 +828,8 @@ def upload(
         except exceptions.PaymentRequiredError as e:
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
-            _report_payment_outcome(e, "the stamp purchase", check=_wallet_stamps_command(e))
+            _report_payment_outcome(e, "the stamp purchase", check=_wallet_stamps_command(e),
+                                    missing="batch ID")
         except exceptions.StampPurchaseError as e:
             typer.secho(f"ERROR: Failed purchasing stamp: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -898,7 +902,7 @@ def upload(
     except exceptions.PaymentRequiredError as e:
         _report_payment_required(e)
     except exceptions.PaymentOutcomeUnknownError as e:
-        _report_payment_outcome(e, "the upload", final_step=True)
+        _report_payment_outcome(e, "the upload", final_step=True, missing="Swarm reference")
     except typer.Exit:
         raise  # already reported, e.g. an invalid auto-pay limit (#152)
     except Exception as e:
@@ -1447,7 +1451,8 @@ def upload_collection(
         except exceptions.PaymentRequiredError as e:
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
-            _report_payment_outcome(e, "getting the stamp", check=_wallet_stamps_command(e))
+            _report_payment_outcome(e, "getting the stamp", check=_wallet_stamps_command(e),
+                                    missing="batch ID")
         except typer.Exit:
             raise  # already reported, e.g. an invalid auto-pay limit (#152)
         except Exception as e:
@@ -1476,7 +1481,8 @@ def upload_collection(
             if output_json and isinstance(e, exceptions.PaymentDeliveredNotStoredError):
                 not_returned = e
             else:
-                _report_payment_outcome(e, "the collection upload", final_step=True)
+                _report_payment_outcome(e, "the collection upload", final_step=True,
+                                        missing="Swarm reference")
         except Exception as e:
             typer.secho(f"ERROR: Failed uploading collection: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
