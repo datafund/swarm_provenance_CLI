@@ -446,7 +446,7 @@ class TestCodeCheckRejection:
         from swarm_provenance_uploader.core.chain_client import ChainClient
 
         client = ChainClient.__new__(ChainClient)
-        client._contract_code_checked = False
+        client._contract_code_checked_url = None
         client._contract = MagicMock(address="0x" + "ab" * 20)
         client._provider = MagicMock(rpc_url=PATH_KEY_URL, chain="base-sepolia")
         return client

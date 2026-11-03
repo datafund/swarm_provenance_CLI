@@ -96,6 +96,11 @@ CHAIN_RPC_URLS = _split_urls(os.getenv("CHAIN_RPC_URLS"))
 # Custom contract address (optional, overrides preset for selected chain)
 CHAIN_CONTRACT = os.getenv("CHAIN_CONTRACT")
 
+# Block the contract was deployed in (optional), where event scans start.
+# Kept as written: ChainProvider checks it when a chain client is built, so
+# a bad value does not stop commands that do not use the chain.
+CHAIN_DEPLOY_BLOCK = os.getenv("CHAIN_DEPLOY_BLOCK")
+
 # Custom block explorer URL (optional, overrides preset for selected chain)
 CHAIN_EXPLORER_URL = os.getenv("CHAIN_EXPLORER_URL")
 

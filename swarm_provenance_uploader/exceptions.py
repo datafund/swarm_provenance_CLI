@@ -378,6 +378,8 @@ _CHAIN_EXCEPTIONS = frozenset({
     "ChainError",
     "ChainConfigurationError",
     "ChainIdMismatchError",
+    "ContractCodeNotFoundError",
+    "DeployBlockError",
     "ChainConnectionError",
     "ChainTransactionError",
     "ChainValidationError",

@@ -13,6 +13,7 @@ from swarm_provenance_uploader.models import (
     ChequebookResponse,
 )
 from tests.test_chain_client import mock_chain_deps  # noqa: F401 (pytest fixture)
+from tests.test_chain_client import real_web3_exceptions, _inject_real_exceptions  # noqa: F401 (pytest fixture)
 
 # Create a Typer Test Runner
 runner = CliRunner()
@@ -2641,7 +2642,47 @@ class TestChainIdMismatchHint:
         assert "PROVENANCE_WALLET_KEY" not in result.stderr
 
 
-CHAIN_OWNER = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
+class TestDeployBlockErrorHint:
+    """A bad CHAIN_DEPLOY_BLOCK names the setting, not the wallet key (#231, merge with #219)."""
+
+    @pytest.mark.parametrize("json_flag", [[], ["--json"]], ids=["text", "json"])
+    def test_write_command_names_only_the_setting(self, mocker, json_flag):
+        from typer.testing import CliRunner as _Runner
+
+        node = _fake_rpc_node(mocker, 84532)
+        mocker.patch.dict(_chain_config, {
+            "chain": "base-sepolia",
+            "rpc_url": "https://rpc.example.org",
+            "wallet_key_env": "PROVENANCE_WALLET_KEY",
+            "deploy_block": "abc",
+        })
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, *json_flag])
+
+        assert result.exit_code == 1
+        assert "Chain configuration invalid" in result.stderr
+        assert "CHAIN_DEPLOY_BLOCK" in result.stderr
+        assert "non-negative integer" in result.stderr
+        assert "PROVENANCE_WALLET_KEY" not in result.stderr
+        assert "PROVENANCE_WALLET_KEY" not in result.stdout
+        assert "Check chain settings" not in result.stderr
+        assert "Traceback" not in result.stderr + result.stdout
+        node.eth.send_raw_transaction.assert_not_called()
+
+    def test_chain_head_error_is_a_deploy_block_error(self):
+        """The deploy block above the chain head raises the same subclass."""
+        from unittest.mock import MagicMock as _Mock
+        from swarm_provenance_uploader.chain.event_cache import TransformationEventCache
+
+        contract = _Mock()
+        cache = TransformationEventCache()
+        with pytest.raises(exceptions.DeployBlockError, match="CHAIN_DEPLOY_BLOCK"):
+            cache.get_maps(contract, deploy_block=200, current_block=100)
+        contract.get_all_transformations.assert_not_called()
+        assert issubclass(exceptions.DeployBlockError, exceptions.ChainConfigurationError)
+
+
+CHAIN_OWNER ="0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
 
 
 def _verify_record(status="ACTIVE", owner=CHAIN_OWNER):
@@ -9137,6 +9178,105 @@ class TestReplacedAdviceOneSource:
         assert "delegate state" in cli._replaced_cli_advice("DataRegistered")
         mocker.patch("swarm_provenance_uploader.chain.exceptions.replaced_check_kind", return_value="record")
         assert "chain get" in cli._replaced_cli_advice("DelegateAuthorized")
+
+
+class TestChainLineageAndDuplicateCheckWithRealClient:
+    """CLI output for the #230 and #231 errors, with a real ChainClient.
+
+    web3 and eth-account are mocked by mock_chain_deps; the exception
+    classes are the real web3.exceptions ones.
+    """
+
+    HASH = "a" * 64
+    CUSTOM_CONTRACT = "0x" + "12" * 20
+    REJECTED = (
+        "The RPC rejected the request during the duplicate transformation check: "
+        "rate limited. Nothing was sent."
+    )
+
+    def _record(self, mock_chain_deps):
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.return_value = (
+            bytes.fromhex(self.HASH), "0x" + "1" * 40, 1, "t", b"\x00" * 32, [], [], 0,
+        )
+
+    @pytest.mark.parametrize("output_json", [False, True], ids=["text", "json"])
+    def test_follow_incomplete_lineage_fails_closed(
+        self, real_web3_exceptions, mock_chain_deps, monkeypatch, output_json
+    ):
+        """A v1 custom contract with no deploy block on a long chain exits 1, without a lineage (#231)."""
+        from typer.testing import CliRunner as _Runner
+        from swarm_provenance_uploader.chain.event_cache import clear_registry
+
+        _inject_real_exceptions(real_web3_exceptions)
+        clear_registry()
+        monkeypatch.setitem(_chain_config, "contract", self.CUSTOM_CONTRACT)
+        monkeypatch.setitem(_chain_config, "deploy_block", None)
+        self._record(mock_chain_deps)
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = (
+            real_web3_exceptions.ContractLogicError("execution reverted")
+        )
+        mock_chain_deps["web3_instance"].eth.block_number = 60_000
+        args = ["chain", "get", self.HASH, "--follow"] + (["--json"] if output_json else [])
+
+        try:
+            result = _Runner(mix_stderr=False).invoke(app, args)
+        finally:
+            clear_registry()
+
+        assert result.exit_code == 1, result.stdout + result.stderr
+        assert result.stdout.strip() == ""
+        assert "may be incomplete" in result.stderr
+        assert "CHAIN_DEPLOY_BLOCK" in result.stderr
+
+    @pytest.mark.parametrize("output_json", [False, True], ids=["text", "json"])
+    def test_transform_stops_when_the_duplicate_check_is_rejected(
+        self, real_web3_exceptions, mock_chain_deps, output_json
+    ):
+        """chain transform exits 1 and sends nothing when the RPC rejects the check (#230)."""
+        from typer.testing import CliRunner as _Runner
+
+        _inject_real_exceptions(real_web3_exceptions)
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = (
+            real_web3_exceptions.Web3RPCError("rate limited")
+        )
+        args = ["chain", "transform", self.HASH, "c" * 64, "--description", "d"]
+        args += ["--json"] if output_json else []
+
+        result = _Runner(mix_stderr=False).invoke(app, args)
+
+        assert result.exit_code == 1, result.stdout + result.stderr
+        assert result.stdout.strip() == ""
+        assert f"ERROR: {self.REJECTED}" in result.stderr
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    @pytest.mark.parametrize("output_json", [False, True], ids=["text", "json"])
+    def test_protect_stops_when_the_duplicate_check_is_rejected(
+        self, real_web3_exceptions, mock_chain_deps, output_json
+    ):
+        """chain protect reports the failed transform step, exits 1 and sends nothing (#230)."""
+        from typer.testing import CliRunner as _Runner
+
+        _inject_real_exceptions(real_web3_exceptions)
+        self._record(mock_chain_deps)
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = (
+            real_web3_exceptions.Web3RPCError("rate limited")
+        )
+        args = ["chain", "protect", self.HASH, "c" * 64, "--description", "d"]
+        args += ["--json"] if output_json else []
+
+        result = _Runner(mix_stderr=False).invoke(app, args)
+
+        assert result.exit_code == 1, result.stdout + result.stderr
+        if output_json:
+            output = json.loads(result.stdout)
+            assert output["failed_step"] == "transform"
+            assert output["partial_failure"] is False
+            assert output["error"] == {"error": "chain_error", "message": self.REJECTED}
+        else:
+            assert self.REJECTED in result.stderr
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
 
 
 # --- #219: the chain configuration hint names the key only for commands that need it ---

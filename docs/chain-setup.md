@@ -125,6 +125,14 @@ CHAIN_NAME=base-sepolia
 # Optional: Custom contract address (uses preset if not set)
 # CHAIN_CONTRACT=0x...
 
+# Optional: Block the contract was deployed in, where event scans start.
+# A custom CHAIN_CONTRACT does not use the preset's deploy block.
+# It also turns on the duplicate check of `chain transform` on a v1 contract
+# when the chain has more than 50,000 blocks.
+# It must not be later than the contract's real deploy block: events before
+# it are not read.
+# CHAIN_DEPLOY_BLOCK=12345678
+
 # Optional: Custom block explorer URL (uses preset if not set)
 # CHAIN_EXPLORER_URL=https://your-explorer.com
 ```
@@ -246,6 +254,8 @@ swarm-prov-upload chain get <hash> --follow --depth 2
 swarm-prov-upload chain get <hash> --follow --json
 ```
 
+On a v2 contract, the walk reads the transformation links from the contract state. On a v1 contract, it scans the contract's events from its deploy block. The preset's deploy block is used only for the preset's own contract. With a custom `CHAIN_CONTRACT`, set `CHAIN_DEPLOY_BLOCK` to the block the contract was deployed in. The value must not be later than that block, because events before it are not read. A value above the latest block of the chain, for example one left over after a change of `CHAIN_NAME`, stops the command with an error. Without a deploy block, only the last 50,000 blocks can be scanned. If the chain is longer, the lineage may be incomplete, so the command stops with an error that asks you to set `CHAIN_DEPLOY_BLOCK`, and exits with code 1. `CHAIN_DEPLOY_BLOCK` also turns on the duplicate transformation check of `chain transform` and `chain protect` on a v1 contract. Without it, the check reads the events of the original hash when the chain has at most 50,000 blocks, and is skipped with a warning on a longer chain.
+
 ### Record data access
 
 Log that data was accessed (idempotent — safe to record multiple times):
@@ -353,7 +363,7 @@ Like `CHAIN_RPC_URL`, `CHAIN_RPC_URLS` applies whatever chain is selected (`CHAI
 The CLI moves to the next fallback RPC when the RPC in use cannot be reached, times out, or answers with something that is not JSON-RPC (for example an HTML error page). Before a fallback is used, the CLI checks that it reports the chain ID in use. A fallback on another chain is skipped. Each RPC is tried at most once per chain client call: one read, or one write with all its steps. A command that makes several calls, such as `chain protect`, can try an RPC again in a later call. If no RPC is left, the command prints "Cannot connect to chain".
 
 - **Reads** use the fallbacks: `chain get` (also with `--follow`), `chain verify`, `chain lookup`, `chain status` without `--set`, `chain balance`, and the "already registered" check before an anchor.
-- **Writes** use the fallbacks only for the steps before the transaction is sent: the chain ID and contract code checks, the "already registered" and duplicate transformation checks, the gas estimate, the nonce, the gas price and the balance check. These steps send nothing, so running them again on another RPC is safe. The duplicate transformation check of `chain transform` reads the contract state on a v2 contract, or scans the transformation events (`eth_getLogs`) on a v1 contract; both reads use the fallbacks. If the check cannot reach any RPC, the command stops with "Cannot connect to chain" before anything is sent.
+- **Writes** use the fallbacks only for the steps before the transaction is sent: the chain ID and contract code checks, the "already registered" and duplicate transformation checks, the gas estimate, the nonce, the gas price and the balance check. These steps send nothing, so running them again on another RPC is safe. The duplicate transformation check of `chain transform` reads the contract state on a v2 contract, or scans the transformation events (`eth_getLogs`) on a v1 contract; both reads use the fallbacks. If the check cannot reach any RPC, the command stops with "Cannot connect to chain" before anything is sent. If the RPC answers the check with a JSON-RPC error, or the check fails for another reason, the command stops before anything is sent too, and exits with code 1.
 - **Sending the transaction** never moves to a fallback, and the CLI never repeats the request that sends it (web3's own retry is turned off for `eth_sendRawTransaction`). If the connection fails while the transaction is sent, the CLI prints "Outcome unknown" (see below) and does not send it again.
 - **Waiting for the receipt** can move to a fallback, for the same transaction hash. Nothing is sent again. If the wait moved to a fallback and that RPC does not return the receipt in time, the CLI prints "Outcome unknown", because the transaction may still be mined.
 
@@ -440,8 +450,8 @@ export CHAIN_CONTRACT=0x...your_contract_address...
 | RPC URL | https://sepolia.base.org |
 | Fallback RPCs | base-sepolia-rpc.publicnode.com, base-sepolia.drpc.org |
 | Block Explorer | https://base-sepolia.blockscout.com |
-| DataProvenance Contract | `0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a` |
-| Deploy Block | 39,075,766 |
+| DataProvenance Contract | `0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322` |
+| Deploy Block | 39,905,249 |
 
 ### Base (mainnet)
 

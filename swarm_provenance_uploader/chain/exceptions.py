@@ -52,6 +52,31 @@ class ChainIdMismatchError(ChainConfigurationError):
         self.actual_chain_id = actual_chain_id
 
 
+class DeployBlockError(ChainConfigurationError):
+    """CHAIN_DEPLOY_BLOCK (deploy_block) is not usable (#231).
+
+    Raised when the value is not a non-negative integer, or when the deploy
+    block is later than the chain head. The message names
+    CHAIN_DEPLOY_BLOCK, so the CLI prints no wallet-key or chain-settings
+    hint for it.
+    """
+
+
+class ContractCodeNotFoundError(ChainConfigurationError):
+    """The RPC in use has no contract code at the contract address (#230).
+
+    Raised by the contract version check when a call returns an empty
+    result and the address has no code on that RPC. The RPC may not be
+    synced, so ChainClient tries the fallback RPCs first; when none has
+    the code, the contract address or the chain is wrong. Nothing is
+    cached and nothing is sent.
+    """
+
+    def __init__(self, message: str, contract_address: str = None):
+        super().__init__(message)
+        self.contract_address = contract_address
+
+
 class ChainConnectionError(ChainError):
     """Failed to connect to RPC endpoint.
 
