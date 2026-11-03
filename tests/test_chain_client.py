@@ -6254,6 +6254,7 @@ class TestLinksProbeClassification:
         assert call.call_count == 1
 
     def test_empty_result_is_v1_and_cached(self, real_web3_exceptions, mock_chain_deps):
+        mock_chain_deps["web3_instance"].eth.get_code.return_value = DUMMY_CODE
         contract, call = self._contract(
             mock_chain_deps, real_web3_exceptions.BadFunctionCallOutput("returned b''")
         )
@@ -7058,3 +7059,133 @@ class TestProvenanceChainFullScanRejection:
         client._provider._try_fallback.assert_not_called()
         client._contract.get_all_transformations.assert_called_once()
         client._contract.get_transformations_from.assert_not_called()
+
+
+class TestLinksProbeEmptyResultChecksCode:
+    """An empty probe result counts as v1 only if the address has code on the RPC (#230 review 4).
+
+    web3 also raises BadFunctionCallOutput when the address has no code,
+    for example on a fallback RPC that is not synced. That was cached as v1.
+    """
+
+    def _contract(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = (
+            real_web3_exceptions.BadFunctionCallOutput("Could not decode contract function call")
+        )
+        return DataProvenanceContract(web3=mock_chain_deps["web3_instance"], contract_address=DUMMY_CONTRACT)
+
+    def test_code_present_is_v1(self, real_web3_exceptions, mock_chain_deps):
+        mock_chain_deps["web3_instance"].eth.get_code.return_value = DUMMY_CODE
+        contract = self._contract(real_web3_exceptions, mock_chain_deps)
+
+        assert contract.supports_transformation_links() is False
+        assert contract._supports_v2 is False
+        mock_chain_deps["web3_instance"].eth.get_code.assert_called_once_with(DUMMY_CONTRACT)
+
+    def test_no_code_is_an_error_and_not_cached(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import ContractCodeNotFoundError
+
+        mock_chain_deps["web3_instance"].eth.get_code.return_value = b""
+        contract = self._contract(real_web3_exceptions, mock_chain_deps)
+
+        with pytest.raises(ContractCodeNotFoundError) as exc_info:
+            contract.supports_transformation_links()
+
+        assert isinstance(exc_info.value, ChainConfigurationError)
+        assert f"No contract code at {DUMMY_CONTRACT} on this RPC" in str(exc_info.value)
+        assert contract._supports_v2 is None
+
+    def test_get_code_transport_failure_reaches_the_read_loop(self, real_web3_exceptions, mock_chain_deps):
+        mock_chain_deps["web3_instance"].eth.get_code.side_effect = (
+            real_web3_exceptions.ProviderConnectionError("down")
+        )
+        contract = self._contract(real_web3_exceptions, mock_chain_deps)
+
+        with pytest.raises(real_web3_exceptions.ProviderConnectionError):
+            contract.supports_transformation_links()
+        assert contract._supports_v2 is None
+
+    def test_provenance_chain_falls_back_to_a_synced_rpc(self, real_web3_exceptions, mock_chain_deps):
+        """No code on the RPC in use: the walk moves to a fallback, where the contract answers as v2."""
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        _inject_real_exceptions(real_web3_exceptions)
+        functions = mock_chain_deps["contract"].functions
+        functions.getTransformationLinks.return_value.call.side_effect = [
+            real_web3_exceptions.BadFunctionCallOutput("Could not decode contract function call"), [], [],
+        ]
+        functions.getTransformationParents.return_value.call.return_value = []
+        functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES, OTHER_ADDRESS, 1, "t", b"\x00" * 32, [], [], 0,
+        )
+        mock_chain_deps["web3_instance"].eth.get_code.return_value = b""
+        client = ChainClient(chain="base-sepolia", require_wallet=False)
+        client._provider._try_fallback = MagicMock(side_effect=[True, False])
+
+        chain = client.get_provenance_chain(DUMMY_HASH)
+
+        assert [r.data_hash for r in chain] == [DUMMY_HASH]
+        client._provider._try_fallback.assert_called_once()
+        assert client._contract._supports_v2 is True
+
+    def test_provenance_chain_no_code_on_every_rpc(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.exceptions import ContractCodeNotFoundError
+
+        _inject_real_exceptions(real_web3_exceptions)
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = (
+            real_web3_exceptions.BadFunctionCallOutput("Could not decode contract function call")
+        )
+        mock_chain_deps["web3_instance"].eth.get_code.return_value = b""
+        client = ChainClient(chain="base-sepolia", require_wallet=False)
+        client._provider._try_fallback = MagicMock(side_effect=[True, False])
+
+        with pytest.raises(ContractCodeNotFoundError):
+            client.get_provenance_chain(DUMMY_HASH)
+
+        assert client._provider._try_fallback.call_count == 2
+        assert client._contract._supports_v2 is None
+
+    def test_transform_no_code_on_every_rpc_sends_nothing(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import ContractCodeNotFoundError
+
+        _inject_real_exceptions(real_web3_exceptions)
+        client = _fallback_client(mock_chain_deps, [_log("DataTransformed")])
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = (
+            real_web3_exceptions.BadFunctionCallOutput("Could not decode contract function call")
+        )
+        mock_chain_deps["web3_instance"].eth.get_code.return_value = b""
+
+        with pytest.raises(ContractCodeNotFoundError):
+            client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
+
+        assert client._provider._try_fallback.call_count == 2
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+
+class TestProvenanceChainProbeOtherError:
+    """A probe error that is neither an RPC failure nor a ChainError is wrapped (#230 review 4)."""
+
+    def test_web3_value_error_is_a_chain_error(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+        from swarm_provenance_uploader.exceptions import ChainError
+
+        _inject_real_exceptions(real_web3_exceptions)
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = (
+            real_web3_exceptions.Web3ValueError("unexpected answer")
+        )
+        client = ChainClient(chain="base-sepolia", require_wallet=False)
+        client._provider._try_fallback = MagicMock(side_effect=[True, False])
+
+        with pytest.raises(ChainError) as exc_info:
+            client.get_provenance_chain(DUMMY_HASH)
+
+        assert type(exc_info.value) is ChainError
+        assert str(exc_info.value) == (
+            "Provenance chain read failed: the contract version check failed: unexpected answer"
+        )
+        assert isinstance(exc_info.value.__cause__, real_web3_exceptions.Web3ValueError)
+        client._provider._try_fallback.assert_not_called()
