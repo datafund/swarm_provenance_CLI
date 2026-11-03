@@ -3475,3 +3475,17 @@ class TestExtendStampDetails:
         with pytest.raises(ValueError, match="at least 24"):
             GatewayClient(base_url=GW).extend_stamp_details(DUMMY_STAMP, duration_hours=23)
         assert requests_mock.call_count == 0
+
+
+class TestExtendStampExpiryTypes:
+    """A non-string expires_at is None, so the extension still returns its batch ID (#217)."""
+
+    @pytest.mark.parametrize("expires_at", [1764583200, {"at": "2026-12-01T10:00:00Z"}, ["x"], True],
+                             ids=["int", "dict", "list", "bool"])
+    def test_non_string_is_none(self, requests_mock, expires_at):
+        requests_mock.patch(EXTEND_URL, json={"batchID": DUMMY_STAMP, "message": "ok",
+                                              "expires_at": expires_at})
+
+        client = GatewayClient(base_url=GW)
+        assert client.extend_stamp(DUMMY_STAMP, duration_hours=48) == DUMMY_STAMP
+        assert client.extend_stamp_details(DUMMY_STAMP, duration_hours=48).expires_at is None
