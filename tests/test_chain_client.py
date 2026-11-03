@@ -1851,14 +1851,16 @@ class TestV2TransformationParsing:
 class TestV1Fallback:
     """Tests for v1 fallback when getDataRecord decode fails."""
 
-    def test_get_data_record_v1_fallback(self, mock_chain_deps):
+    def test_get_data_record_v1_fallback(self, real_web3_exceptions, mock_chain_deps):
         """Tests fallback to dataRecords() when v4 ABI decode fails on v1."""
         from swarm_provenance_uploader.chain.contract import DataProvenanceContract
 
         # getDataRecord fails (v4 ABI decode error on v1 contract)
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.side_effect = OverflowError("decode")
         # getTransformationLinks also fails (v1 contract)
-        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = Exception("revert")
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = (
+            real_web3_exceptions.ContractLogicError("execution reverted")
+        )
         # dataRecords returns scalar-only tuple (v1: 5 fields, no storageRef)
         mock_chain_deps["contract"].functions.dataRecords.return_value.call.return_value = (
             DUMMY_HASH_BYTES, DUMMY_ADDRESS, 1700000000, "swarm-provenance", 0
@@ -1877,13 +1879,15 @@ class TestV1Fallback:
         assert record[5] == []  # transformations (empty)
         assert record[6] == []  # accessors (empty)
 
-    def test_get_data_record_v4_fallback_with_storage_ref(self, mock_chain_deps):
+    def test_get_data_record_v4_fallback_with_storage_ref(self, real_web3_exceptions, mock_chain_deps):
         """Tests fallback to dataRecords() on v4 contract (6-field tuple with storageRef)."""
         from swarm_provenance_uploader.chain.contract import DataProvenanceContract
 
         storage_ref = bytes.fromhex("bb" * 32)
         mock_chain_deps["contract"].functions.getDataRecord.return_value.call.side_effect = OverflowError("decode")
-        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = Exception("revert")
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = (
+            real_web3_exceptions.ContractLogicError("execution reverted")
+        )
         # dataRecords on v4 returns 6 fields including storageRef
         mock_chain_deps["contract"].functions.dataRecords.return_value.call.return_value = (
             DUMMY_HASH_BYTES, DUMMY_ADDRESS, 1700000000, "swarm-provenance", storage_ref, 0

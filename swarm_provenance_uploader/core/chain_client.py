@@ -1404,8 +1404,24 @@ class ChainClient:
         # Prefer state read on v2 contracts, fall back to event cache.
         # Transport failures go through the fallbacks; when no endpoint is
         # left, the write stops before anything is sent (#168). Other errors
-        # are logged and the write goes on.
-        if self._contract.supports_transformation_links():
+        # are logged and the write goes on. The contract version probe runs
+        # through the fallbacks too, so a dead RPC is not taken as a v1
+        # contract, which would skip the check (#230).
+        try:
+            is_v2 = _with_fallback(
+                self._provider, lambda: self._contract.supports_transformation_links()
+            )
+        except Exception as e:
+            if _is_transport_failure(e):
+                raise _duplicate_check_connection_error(e, self._provider.rpc_url) from e
+            logger.warning(
+                "Duplicate transformation check skipped: the contract version check failed: %s",
+                redact_urls(_error_reason(e)),
+            )
+            is_v2 = None
+        if is_v2 is None:
+            pass
+        elif is_v2:
             try:
                 links = _with_fallback(
                     self._provider,
@@ -1432,7 +1448,12 @@ class ChainClient:
                 logger.warning("State-based duplicate check failed: %s", redact_urls(str(e)))
         else:
             deploy_block = self._provider.deploy_block
-            if deploy_block is not None:
+            if deploy_block is None:
+                logger.warning(
+                    "Duplicate transformation check skipped: the contract has no "
+                    "transformation links and its deploy block is unknown."
+                )
+            else:
                 try:
                     from ..chain.event_cache import get_cache
 
@@ -2000,13 +2021,11 @@ class ChainClient:
         else:
             effective_max = max_depth
 
-        # Detect contract version — state reads are much faster than event scans
-        use_state_reads = False
-        try:
-            if self._contract.supports_transformation_links():
-                use_state_reads = True
-        except Exception:
-            pass
+        # Detect contract version — state reads are much faster than event
+        # scans. A probe error fails the walk like any other read (#230):
+        # a transport failure moves to a fallback (this method's read loop),
+        # and is never taken as a v1 contract.
+        use_state_reads = self._contract.supports_transformation_links()
 
         # Fall back to event cache for v1 contracts
         from ..chain.event_cache import get_cache

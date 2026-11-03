@@ -43,6 +43,17 @@ class DataStatus(IntEnum):
     DELETED = 2
 
 
+def _is_missing_function_answer(error: Exception) -> bool:
+    """True if a call's error is the contract's answer that the function does not exist.
+
+    A revert (web3 ContractLogicError, including ContractCustomError and
+    ContractPanicError) or an empty result (BadFunctionCallOutput). Matched
+    by class name, so web3 is not imported here.
+    """
+    names = {cls.__name__ for cls in type(error).__mro__}
+    return "ContractLogicError" in names or "BadFunctionCallOutput" in names
+
+
 # --- Validation helpers ---
 
 def _normalize_hash(data_hash: str) -> bytes:
@@ -701,17 +712,26 @@ class DataProvenanceContract:
         """Check if the deployed contract supports v2 TransformationLink functions.
 
         Performs a trial call on first invocation and caches the result.
-        Returns False for v1 contracts where the function reverts.
+        Returns False, and caches it, only when the contract answers that
+        the function does not exist: a revert (web3 ContractLogicError) or
+        an empty result (BadFunctionCallOutput). Any other error, such as a
+        connection failure, a timeout or a JSON-RPC error answer, says
+        nothing about the contract: it is raised and not cached, so the
+        next call probes again (#230).
         """
         if self._supports_v2 is not None:
             return self._supports_v2
         try:
             test_hash = b"\x00" * 32
             self._contract.functions.getTransformationLinks(test_hash).call()
-            self._supports_v2 = True
-        except Exception:
+        except Exception as e:
+            if not _is_missing_function_answer(e):
+                raise
+            logger.debug("getTransformationLinks not available, using v1 reads: %s", redact_urls(str(e)))
             self._supports_v2 = False
-        return self._supports_v2
+            return False
+        self._supports_v2 = True
+        return True
 
     def get_transformation_links(self, data_hash: str) -> List[Tuple[bytes, str]]:
         """
