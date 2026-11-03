@@ -313,7 +313,8 @@ def _wallet_stamps_command(e: exceptions.PaymentOutcomeUnknownError) -> Optional
 def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: str,
                             final_step: bool = False, final_note: Optional[str] = None,
                             final_stdout: Optional[List[str]] = None,
-                            check: Optional[str] = None, missing: str = "result"):
+                            check: Optional[str] = None, missing: str = "result",
+                            check_note: Optional[str] = None):
     """
     Explain a paid request whose payment may have been taken, then exit.
 
@@ -335,6 +336,7 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
             request worked, for example `stamps info <id>` (#216).
         missing: For that case without `check`: what the answer should have
             given, for example "Swarm reference" or "batch ID".
+        check_note: For that case with `check`: how to read its output.
 
     Raises:
         typer.Exit: Always; code 0 when the final step is known to have
@@ -352,7 +354,11 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
         headline = f"Payment was taken, but {action} failed."
     else:
         headline = f"The payment may have been taken: {action} did not complete."
-    typer.secho(f"\nERROR: {headline}", fg=typer.colors.RED, err=True)
+    if unreadable:
+        # Most likely worked, so a warning in the style of the others; still exit 1
+        typer.secho(f"\nWARNING: {headline}", fg=typer.colors.YELLOW, err=True)
+    else:
+        typer.secho(f"\nERROR: {headline}", fg=typer.colors.RED, err=True)
     typer.echo(f"  {e}", err=True)
 
     valid_until = None
@@ -399,7 +405,9 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
         if check:
             typer.echo("Check the result before you contact the gateway operator:", err=True)
             typer.echo(f"  {check}", err=True)
-            typer.echo("If the result is not there, contact the operator with the transaction above. "
+            if check_note:
+                typer.echo(check_note, err=True)
+            typer.echo("If it did not work, contact the operator with the transaction above. "
                        "Re-running pays again.", err=True)
         else:
             typer.echo(f"The {missing} was not received, so the result cannot be looked up "
@@ -1752,6 +1760,8 @@ def stamps_extend(
             final_note="The batch ID is the stamp ID you gave. Do not pay again.",
             final_stdout=["SUCCESS: Stamp extended.", f"Batch ID: {stamp_id}"],
             check=f"swarm-prov-upload stamps info {stamp_id}",
+            check_note=("Compare the TTL it shows with the TTL before the extension: "
+                        "a longer TTL means the extension worked."),
         )
     except typer.Exit:
         raise  # already reported, e.g. an invalid auto-pay limit (#152)
