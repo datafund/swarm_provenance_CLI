@@ -9158,6 +9158,29 @@ class TestPaidResultUnreadableCli:
         assert "stamps info" not in result.output
         assert "Swarm reference" in result.output
 
+    def test_stamp_purchase_without_payer(self, mocker):
+        """With no payer there is no check command, and the missing result is the batch ID."""
+        payment = dict(self.PAYMENT, payer=None)
+        self._client(mocker, purchase_stamp=exceptions.PaymentResultUnreadableError(
+            "The payment was collected and the gateway answered HTTP 201, but its response "
+            "could not be read (ValueError: not JSON).", **payment))
+        result = self._upload()
+        self._assert_common(result)
+        assert "ERROR: The stamp purchase most likely succeeded, but its result could not be read." \
+            in result.output
+        assert "stamps list" not in result.output
+        assert "Swarm reference" not in result.output
+        assert "batch ID" in result.output
+
+    def test_pool_acquisition_without_payer(self, mocker):
+        payment = dict(self.PAYMENT, payer=None)
+        self._client(mocker, acquire_stamp_from_pool=exceptions.PaymentResultUnreadableError(
+            "Unreadable.", **payment))
+        result = self._upload("--usePool")
+        self._assert_common(result)
+        assert "Swarm reference" not in result.output
+        assert "batch ID" in result.output
+
     def test_other_settled_report_unchanged(self, mocker):
         err = exceptions.PaymentSettledNotDeliveredError("Collected, failed.", **self.PAYMENT)
         self._client(mocker, extend_stamp=err)
