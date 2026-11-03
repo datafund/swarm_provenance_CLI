@@ -280,7 +280,7 @@ class TestRedactUrlsSpeed:
         [
             (lambda n: "a." * n, 100_000, 10_000),
             (lambda n: "Could not decode '<html><body>" + "a-" * n + "</body></html>'", 50_000, 10_000),
-            (lambda n: "a" * n, 1_000_000, 100_000),
+            (lambda n: "a" * n, 1_000_000, 10_000),
         ],
         ids=["dotted-run", "hyphenated-html-body", "letter-run"],
     )
