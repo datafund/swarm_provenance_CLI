@@ -7400,3 +7400,139 @@ class TestWriteRunsOnOneEndpoint:
         assert {"build_transaction", "get_transaction_count", "estimate_gas",
                 "send_raw_transaction", "wait_for_transaction_receipt"} <= names, calls
         web3.eth.send_raw_transaction.assert_called_once()
+
+
+_BAD_WRITE_INPUT = [
+    pytest.param("anchor", {"swarm_hash": "zz"}, id="anchor-hash"),
+    pytest.param("anchor", {"swarm_hash": DUMMY_HASH, "data_type": "x" * 65}, id="anchor-data-type"),
+    pytest.param("anchor_for", {"swarm_hash": "zz", "owner": DUMMY_ADDRESS}, id="anchor_for"),
+    pytest.param("batch_anchor", {"swarm_hashes": [DUMMY_HASH, _H2], "data_types": ["t"]}, id="batch_anchor"),
+    pytest.param("set_storage_ref", {"data_hash": DUMMY_HASH, "storage_ref": "zz"}, id="set_storage_ref"),
+    pytest.param("access", {"swarm_hash": "zz"}, id="access"),
+    pytest.param("batch_access", {"swarm_hashes": [DUMMY_HASH] * 101}, id="batch_access"),
+    pytest.param("set_status", {"swarm_hash": "zz", "status": 1}, id="set_status"),
+    pytest.param("batch_set_status", {"swarm_hashes": [DUMMY_HASH, _H2], "statuses": [1]}, id="batch_set_status"),
+    pytest.param("transfer_ownership", {"swarm_hash": "zz", "new_owner": OTHER_ADDRESS}, id="transfer_ownership"),
+    pytest.param("merge_transform", {"source_hashes": [DUMMY_HASH], "new_hash": _H3, "description": "d"},
+                 id="merge_transform"),
+    pytest.param("transform", {"original_hash": DUMMY_HASH, "new_hash": _H2, "description": "x" * 257},
+                 id="transform-description"),
+]
+
+
+class TestWriteInputValidatedBeforeAnyRpcCall:
+    """Bad write input is a ChainValidationError, raised before any RPC call (#230 review 7).
+
+    The contract code check runs before the build, so the build's offline
+    argument checks ran only after RPC calls: bad input could come back as
+    ContractCodeNotFoundError or ChainConnectionError.
+    """
+
+    @pytest.mark.parametrize("method, kwargs", _BAD_WRITE_INPUT)
+    def test_validation_error_without_rpc_calls(self, mock_chain_deps, method, kwargs):
+        client = _write_client(mock_chain_deps, [])
+        web3 = mock_chain_deps["web3_instance"]
+        chain_id = PropertyMock(return_value=84532)
+        type(web3.eth).chain_id = chain_id
+        try:
+            with pytest.raises(ChainValidationError):
+                getattr(client, method)(**kwargs)
+        finally:
+            del type(web3.eth).chain_id
+
+        chain_id.assert_not_called()
+        web3.eth.get_code.assert_not_called()
+        web3.eth.get_transaction_count.assert_not_called()
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.assert_not_called()
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.assert_not_called()
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+
+    def test_no_code_rpc_with_bad_input(self, mock_chain_deps):
+        """The example from the review: 2 hashes and 1 data type against an RPC without code."""
+        client = _write_client(mock_chain_deps, [])
+        mock_chain_deps["web3_instance"].eth.get_code.return_value = b""
+
+        with pytest.raises(ChainValidationError, match="must have the same length"):
+            client.batch_anchor(swarm_hashes=[DUMMY_HASH, _H2], data_types=["t"])
+
+
+class TestCodeCheckPerEndpoint:
+    """The contract code is checked again after a switch to another endpoint (#230 review 7).
+
+    The check was cached per client, so a transport failure in prepare()
+    that switched to a fallback without the code sent the transaction there.
+    """
+
+    URLS = ["https://a.example", "https://b.example", "https://c.example"]
+
+    def _client(self, mock_chain_deps, code_by_url, logs=(), fail=None):
+        client = _write_client(mock_chain_deps, [_log(e) for e in logs])
+        provider = client._provider
+        provider.rpc_url = self.URLS[0]
+        calls = []
+
+        def try_fallback(tried=None):
+            index = self.URLS.index(provider.rpc_url) + 1
+            if index >= len(self.URLS) or self.URLS[index] not in code_by_url:
+                return False
+            provider.rpc_url = self.URLS[index]
+            return True
+
+        provider._try_fallback = MagicMock(side_effect=try_fallback)
+        web3 = mock_chain_deps["web3_instance"]
+
+        def recorded(name, value):
+            def side_effect(*args, **kwargs):
+                calls.append((name, provider.rpc_url))
+                if fail and fail.get(name) == provider.rpc_url:
+                    import requests
+                    raise requests.exceptions.ConnectionError("down")
+                return value() if callable(value) else value
+            return side_effect
+
+        web3.eth.get_code.side_effect = recorded("get_code", lambda: code_by_url[provider.rpc_url])
+        for name in ("get_transaction_count", "send_raw_transaction", "wait_for_transaction_receipt"):
+            mock = getattr(web3.eth, name)
+            mock.side_effect = recorded(name, mock.return_value)
+        return client, calls
+
+    def test_switch_in_prepare_to_a_fallback_without_code_sends_nothing(self, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import ContractCodeNotFoundError
+
+        client, calls = self._client(
+            mock_chain_deps, {self.URLS[0]: DUMMY_CODE, self.URLS[1]: b""},
+            fail={"get_transaction_count": self.URLS[0]},
+        )
+
+        with pytest.raises(ContractCodeNotFoundError):
+            client.access(swarm_hash=DUMMY_HASH)
+
+        assert ("get_code", self.URLS[1]) in calls
+        assert not any(name == "get_transaction_count" and url == self.URLS[1] for name, url in calls)
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    def test_switch_in_prepare_skips_a_fallback_without_code(self, mock_chain_deps):
+        client, calls = self._client(
+            mock_chain_deps, {self.URLS[0]: DUMMY_CODE, self.URLS[1]: b"", self.URLS[2]: DUMMY_CODE},
+            logs=["DataAccessed"], fail={"get_transaction_count": self.URLS[0]},
+        )
+
+        client.access(swarm_hash=DUMMY_HASH)
+
+        assert ("get_code", self.URLS[1]) in calls and ("get_code", self.URLS[2]) in calls
+        assert [url for name, url in calls if name == "send_raw_transaction"] == [self.URLS[2]]
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_called_once()
+
+    def test_switch_after_the_send_does_not_check_again(self, mock_chain_deps):
+        """A switch in the receipt wait, after the send, runs no code check and sends nothing again."""
+        client, calls = self._client(
+            mock_chain_deps, {self.URLS[0]: DUMMY_CODE, self.URLS[1]: b""},
+            logs=["DataAccessed"], fail={"wait_for_transaction_receipt": self.URLS[0]},
+        )
+
+        client.access(swarm_hash=DUMMY_HASH)
+
+        assert [url for name, url in calls if name == "get_code"] == [self.URLS[0]]
+        assert ("wait_for_transaction_receipt", self.URLS[1]) in calls
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_called_once()
