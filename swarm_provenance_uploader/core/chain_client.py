@@ -201,6 +201,28 @@ def _duplicate_check_connection_error(error: Exception, rpc_url: Optional[str]) 
     )
 
 
+def _duplicate_check_error(error: Exception, rpc_url: Optional[str]) -> ChainError:
+    """The error for transform()'s duplicate check when it could not run (#168, #230).
+
+    The write stops before anything is signed or sent: without the check, a
+    duplicate transformation could be recorded. A transport failure with no
+    endpoint left becomes ChainConnectionError, a JSON-RPC error answer
+    ChainConfigurationError (the node answered; no fallback), and any other
+    error ChainError.
+    """
+    if _is_transport_failure(error):
+        return _duplicate_check_connection_error(error, rpc_url)
+    reason = _error_reason(error)
+    if _is_rpc_rejection(error):
+        return ChainConfigurationError(
+            f"The RPC rejected the request during the duplicate transformation check: "
+            f"{reason}. Nothing was sent."
+        )
+    return ChainError(
+        f"An error stopped the duplicate transformation check: {reason}. Nothing was sent."
+    )
+
+
 def _signed_tx_hash(raw_tx) -> Optional[str]:
     """The hash of a signed transaction (keccak-256 of its bytes), or None.
 
@@ -1408,26 +1430,20 @@ class ChainClient:
 
         # Pre-check: avoid wasting gas on duplicate transformations.
         # Prefer state read on v2 contracts, fall back to event cache.
-        # Transport failures go through the fallbacks; when no endpoint is
-        # left, the write stops before anything is sent (#168). Other errors
-        # are logged and the write goes on. The contract version probe runs
+        # Transport failures go through the fallbacks (#168). If the check
+        # cannot run (no endpoint left, a JSON-RPC error answer, any other
+        # error), the write stops before anything is signed or sent
+        # (_duplicate_check_error, #230). The contract version probe runs
         # through the fallbacks too, so a dead RPC is not taken as a v1
-        # contract, which would skip the check (#230).
+        # contract. The only skip left is a confirmed v1 contract whose
+        # deploy block is unknown: it is logged as a warning.
         try:
             is_v2 = _with_fallback(
                 self._provider, lambda: self._contract.supports_transformation_links()
             )
         except Exception as e:
-            if _is_transport_failure(e):
-                raise _duplicate_check_connection_error(e, self._provider.rpc_url) from e
-            logger.warning(
-                "Duplicate transformation check skipped: the contract version check failed: %s",
-                redact_urls(_error_reason(e)),
-            )
-            is_v2 = None
-        if is_v2 is None:
-            pass
-        elif is_v2:
+            raise _duplicate_check_error(e, self._provider.rpc_url) from e
+        if is_v2:
             try:
                 links = _with_fallback(
                     self._provider,
@@ -1449,9 +1465,7 @@ class ChainClient:
             except TransformationAlreadyExistsError:
                 raise
             except Exception as e:
-                if _is_transport_failure(e):
-                    raise _duplicate_check_connection_error(e, self._provider.rpc_url) from e
-                logger.warning("State-based duplicate check failed: %s", redact_urls(str(e)))
+                raise _duplicate_check_error(e, self._provider.rpc_url) from e
         else:
             deploy_block = self._provider.deploy_block
             if deploy_block is None:
@@ -1465,7 +1479,7 @@ class ChainClient:
                     from ..chain.event_cache import get_cache
 
                     cache = get_cache(
-                        self._provider.chain, self._provider.contract_address
+                        self._provider.chain, self._provider.contract_address, deploy_block
                     )
                     # The block number and the event scan (chunked
                     # eth_getLogs) run again on a fallback together
@@ -1485,9 +1499,7 @@ class ChainClient:
                 except TransformationAlreadyExistsError:
                     raise
                 except Exception as e:
-                    if _is_transport_failure(e):
-                        raise _duplicate_check_connection_error(e, self._provider.rpc_url) from e
-                    logger.warning("Duplicate check failed, proceeding: %s", redact_urls(str(e)))
+                    raise _duplicate_check_error(e, self._provider.rpc_url) from e
 
         tx = self._build_tx(
             self._contract.build_record_transformation_tx,
@@ -2049,6 +2061,8 @@ class ChainClient:
         reverse = {}  # new_hex -> [(original_hex, desc)]
         deploy_block = self._provider.deploy_block
         use_local_index = False
+        # The block the per-node queries scan up to: the one checked below
+        per_node_latest = None
 
         if not use_state_reads and deploy_block is not None:
             # A failed scan fails the walk (#231): the per-node queries
@@ -2056,7 +2070,9 @@ class ChainClient:
             # no fallback for it. An RPC failure is raised as it is, so
             # this method's read loop moves to a fallback RPC and maps it.
             try:
-                cache = get_cache(self._provider.chain, self._provider.contract_address)
+                cache = get_cache(
+                    self._provider.chain, self._provider.contract_address, deploy_block
+                )
                 current_block = self._provider.web3.eth.block_number
                 forward, reverse = cache.get_maps(
                     self._contract, deploy_block, current_block
@@ -2075,6 +2091,7 @@ class ChainClient:
             # (#231). A v1 contract emits no DataMerged events, so reading
             # only DataTransformed loses no edges.
             latest = self._provider.web3.eth.block_number
+            per_node_latest = latest
             if latest > EVENT_LOOKBACK_BLOCKS:
                 raise ChainConfigurationError(
                     "The provenance chain may be incomplete, so it was not read: "
@@ -2152,7 +2169,9 @@ class ChainClient:
                         parents = [orig for orig, _ in reverse.get(current_hash, [])]
                 else:
                     # Per-node event scanning (deploy block unknown, short chain)
-                    events = self._contract.get_transformations_from(current_hash)
+                    events = self._contract.get_transformations_from(
+                        current_hash, to_block=per_node_latest
+                    )
                     enriched = [
                         ChainTransformation(description=desc, new_data_hash=_hex(new_bytes))
                         for _, new_bytes, desc in events
@@ -2163,7 +2182,9 @@ class ChainClient:
                     if expand:
                         parents = [
                             _hex(orig_bytes)
-                            for orig_bytes, _, _ in self._contract.get_transformations_to(current_hash)
+                            for orig_bytes, _, _ in self._contract.get_transformations_to(
+                                current_hash, to_block=per_node_latest
+                            )
                         ]
             except Exception as e:
                 logger.debug(

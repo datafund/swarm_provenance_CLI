@@ -889,19 +889,21 @@ class DataProvenanceContract:
         self,
         data_hash: str,
         lookback_blocks: int = EVENT_LOOKBACK_BLOCKS,
+        to_block: Optional[int] = None,
     ) -> List[Tuple[bytes, bytes, str]]:
         """
         Query DataTransformed events where data_hash is the original.
 
         Args:
             data_hash: 64-char hex hash.
-            lookback_blocks: How many blocks to scan backwards from latest.
+            lookback_blocks: How many blocks to scan backwards from to_block.
+            to_block: Last block scanned. Defaults to the latest block.
 
         Returns:
             List of (originalDataHash, newDataHash, description) tuples.
         """
         hash_bytes = _normalize_hash(data_hash)
-        latest = self._web3.eth.block_number
+        latest = to_block if to_block is not None else self._web3.eth.block_number
         from_block = max(0, latest - lookback_blocks)
         events = self._get_logs_chunked(
             self._contract.events.DataTransformed,
@@ -918,19 +920,21 @@ class DataProvenanceContract:
         self,
         data_hash: str,
         lookback_blocks: int = EVENT_LOOKBACK_BLOCKS,
+        to_block: Optional[int] = None,
     ) -> List[Tuple[bytes, bytes, str]]:
         """
         Query DataTransformed events where data_hash is the new (reverse lookup).
 
         Args:
             data_hash: 64-char hex hash.
-            lookback_blocks: How many blocks to scan backwards from latest.
+            lookback_blocks: How many blocks to scan backwards from to_block.
+            to_block: Last block scanned. Defaults to the latest block.
 
         Returns:
             List of (originalDataHash, newDataHash, description) tuples.
         """
         hash_bytes = _normalize_hash(data_hash)
-        latest = self._web3.eth.block_number
+        latest = to_block if to_block is not None else self._web3.eth.block_number
         from_block = max(0, latest - lookback_blocks)
         events = self._get_logs_chunked(
             self._contract.events.DataTransformed,

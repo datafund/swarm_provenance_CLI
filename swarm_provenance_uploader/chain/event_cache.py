@@ -19,8 +19,9 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-# Module-level singleton registry keyed by (chain, contract_address_lower)
-_registry: dict[tuple[str, str], TransformationEventCache] = {}
+# Module-level singleton registry keyed by
+# (chain, contract_address_lower, deploy_block)
+_registry: dict[tuple[str, str, int], TransformationEventCache] = {}
 _registry_lock = threading.Lock()
 
 
@@ -117,17 +118,22 @@ class TransformationEventCache:
             return self._forward, self._reverse
 
 
-def get_cache(chain: str, contract_address: str) -> TransformationEventCache:
-    """Get or create the singleton cache for a (chain, contract) pair.
+def get_cache(chain: str, contract_address: str, deploy_block: int) -> TransformationEventCache:
+    """Get or create the singleton cache for a (chain, contract, deploy block).
+
+    The deploy block is part of the key: a cache scanned from a later
+    block would miss the events before it for a caller that starts
+    earlier (#231).
 
     Args:
         chain: Chain name (e.g. 'base-sepolia').
         contract_address: Contract address (case-insensitive).
+        deploy_block: The block the cache's first scan starts from.
 
     Returns:
         TransformationEventCache instance (shared across callers).
     """
-    key = (chain, contract_address.lower())
+    key = (chain, contract_address.lower(), deploy_block)
     with _registry_lock:
         if key not in _registry:
             _registry[key] = TransformationEventCache()
