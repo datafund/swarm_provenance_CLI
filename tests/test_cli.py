@@ -9134,7 +9134,8 @@ class TestPaidResultUnreadableCli:
         assert "WARNING: The stamp extension most likely succeeded, but its result could not be read." \
             in result.output
         assert f"swarm-prov-upload stamps info {DUMMY_STAMP}" in result.output
-        assert "Compare the TTL it shows with the TTL before the extension" in result.output
+        assert "Compare the Amount and TTL it shows with the values before the extension" in result.output
+        assert "Amount grows by exactly the amount added" in result.output
         assert "SUCCESS" not in result.output
 
     def test_stamp_purchase(self, mocker):
