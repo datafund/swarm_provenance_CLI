@@ -1710,10 +1710,15 @@ def stamps_extend(
 
     try:
         gw_client = _get_gateway_client_with_x402(gateway_url, verbose)
-        result_id = gw_client.extend_stamp(stamp_id, amount=amount, duration_hours=duration_hours,
-                                           verbose=verbose)
+        result = gw_client.extend_stamp_details(stamp_id, amount=amount, duration_hours=duration_hours,
+                                                verbose=verbose)
         typer.secho(f"SUCCESS: Stamp extended.", fg=typer.colors.GREEN)
-        typer.echo(f"Batch ID: {result_id}")
+        typer.echo(f"Batch ID: {result.batchID}")
+        if result.expires_at:
+            typer.echo(f"New expiry: {_sanitize_label(result.expires_at)} (estimate at today's price)")
+        else:
+            typer.echo("New expiry: not reported by the node yet. Check it later with: "
+                       f"swarm-prov-upload stamps info {result.batchID}")
     except exceptions.PaymentRequiredError as e:
         _report_payment_required(e)
     except exceptions.PaymentOutcomeUnknownError as e:

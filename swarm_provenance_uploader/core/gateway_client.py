@@ -1289,7 +1289,27 @@ class GatewayClient:
         duration_hours: Optional[int] = None,
     ) -> str:
         """
-        Extend an existing stamp.
+        Extend an existing stamp and return its batch ID.
+
+        Takes the same arguments, and raises the same errors, as
+        extend_stamp_details(), which also returns the new expiry.
+
+        Returns:
+            The batch ID of the extended stamp.
+        """
+        return self.extend_stamp_details(
+            stamp_id, amount=amount, verbose=verbose, duration_hours=duration_hours,
+        ).batchID
+
+    def extend_stamp_details(
+        self,
+        stamp_id: str,
+        amount: Optional[int] = None,
+        verbose: bool = False,
+        duration_hours: Optional[int] = None,
+    ) -> StampExtensionResponse:
+        """
+        Extend an existing stamp and return the gateway's answer.
 
         The gateway charges for an extension like a purchase (x402, or the
         free tier), and with x402 on it extends a stamp registered to a payer
@@ -1306,7 +1326,8 @@ class GatewayClient:
                             is given, the gateway adds its default (25 hours).
 
         Returns:
-            The batch ID of the extended stamp.
+            The StampExtensionResponse: batchID, message and expires_at (the
+            estimated new expiry, or None if the node has not reported it yet).
 
         Raises:
             ValueError: Bad stamp ID, both amount and duration_hours given,
@@ -1350,7 +1371,7 @@ class GatewayClient:
                 result = StampExtensionResponse.model_validate(response.json())
             if verbose:
                 print(f"DEBUG: Extended stamp ID: {result.batchID}")
-            return result.batchID
+            return result
         except requests.exceptions.RequestException as e:
             if verbose:
                 print(f"ERROR: Extend stamp failed: {e}")
