@@ -941,6 +941,14 @@ class TestX402StatusDetails:
         assert "Enabled" in result.stdout
         assert "10.00" in result.stdout or "$10.00" in result.stdout
 
+    def test_x402_status_tiny_max_pay_in_scientific_notation(self):
+        """#236: a tiny limit is shown as 1E-100000000, not as 100 MB of zeros."""
+        result = runner.invoke(app, ["--x402", "--max-pay", "1e-100000000", "x402", "status"])
+
+        assert result.exit_code == 0, result.output[:500]
+        assert "Max auto-pay: $1E-100000000" in result.stdout
+        assert len(result.stdout) < 5000
+
 
 # =============================================================================
 # POOL TESTS

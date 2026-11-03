@@ -1806,6 +1806,55 @@ class TestAutoPayHugeLimit:
         finally:
             patcher.stop()
 
+    def test_refusal_message_with_tiny_limit_is_short(self, mock_x402, requests_mock):
+        """#236: a limit such as 1e-100000000 is shown in scientific notation, not as 100 MB of zeros."""
+        from swarm_provenance_uploader.exceptions import PaymentRequiredError
+
+        mock_x402.select_payment_option.return_value = _option(amount="50000")
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True,
+                                       x402_max_auto_pay_usd="1e-100000000")
+        try:
+            with pytest.raises(PaymentRequiredError, match=r"limit of \$1E-100000000;") as exc_info:
+                client.purchase_stamp()
+        finally:
+            patcher.stop()
+        assert len(str(exc_info.value)) < 400
+        mock_x402.sign_payment.assert_not_called()
+
+
+class TestFormatAutoPayLimit:
+    """format_auto_pay_limit keeps every digit, without very long output (#152, #235, #236)."""
+
+    @pytest.mark.parametrize("limit,expected", [
+        ("0", "0.000000"),
+        ("0.30", "0.300000"),
+        ("0.2999999", "0.2999999"),
+        ("1e30", "1E+30"),
+        ("1e-6", "0.000001"),
+        ("1.5e-7", "0.00000015"),
+        ("1e-15", "0.000000000000001"),
+        ("1.25e-15", "0.00000000000000125"),
+        ("9.99e-16", "9.99E-16"),
+        ("1e-16", "1E-16"),
+        ("1e-100000000", "1E-100000000"),
+        ("1.2345e-40", "1.2345E-40"),
+    ])
+    def test_format(self, limit, expected):
+        from swarm_provenance_uploader.core.gateway_client import (
+            format_auto_pay_limit, parse_auto_pay_limit)
+
+        assert format_auto_pay_limit(parse_auto_pay_limit(limit)) == expected
+
+    @pytest.mark.parametrize("limit", ["1e-16", "3.1415926535e-20", "1e-100000000"])
+    def test_scientific_form_is_exact(self, limit):
+        from decimal import Decimal
+        from swarm_provenance_uploader.core.gateway_client import (
+            format_auto_pay_limit, parse_auto_pay_limit)
+
+        value = parse_auto_pay_limit(limit)
+        assert Decimal(format_auto_pay_limit(value)) == value
+
 
 class TestAutoPayLimitValidation:
     """The auto-pay limit must be a finite, non-negative number (#152)."""
