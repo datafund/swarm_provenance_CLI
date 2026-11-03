@@ -319,7 +319,7 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 
 > **Exit code 3: may still be mined**: when a write sent its transaction but no receipt arrived within 120 seconds, or the connection failed after the send, the command exits 3 and prints the transaction hash. Do not run the write again: wait with the printed `chain wait` command, or check the transaction in the explorer. A transaction that another one with the same nonce replaced is reported as "Replaced" (exit 1). See [docs/chain-workflows.md](docs/chain-workflows.md#exit-codes) for all exit codes.
 
-> **`chain get --follow` fails closed**: if any read fails during the walk, the command prints an error and exits with code 1 instead of printing a partial chain. In `--json` output, each record has a `parents` list (`null` for records at the depth limit).
+> **`chain get --follow` fails closed**: if any read fails during the walk, the command prints an error and exits with code 1 instead of printing a partial chain. This includes a chain that may be incomplete: on a v1 contract (no transformation links) whose deploy block is unknown, only the last 50,000 blocks can be scanned, so on a longer chain the command asks you to set `CHAIN_DEPLOY_BLOCK`. In `--json` output, each record has a `parents` list (`null` for records at the depth limit).
 
 > **`chain protect` vs separate commands**: `chain protect` combines verify + anchor + transform + restrict into one command. If the restrict step fails, the command lists the steps that were recorded (the transform transaction), prints the error and the command to restrict the original manually, and exits 1, or 3 when the restrict transaction may still be mined. The JSON output then has `partial_failure: true` and `failed_step: "restrict"`. Use `chain transform --restrict-original` for the two-step version without the pre-flight ACTIVE check.
 
@@ -338,6 +338,7 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 | `PROVENANCE_WALLET_KEY` | Wallet private key (keep secret!) | - |
 | `CHAIN_RPC_URL` | Custom RPC URL (optional). With `base` or `base-sepolia`, it must report the preset chain ID | Uses preset |
 | `CHAIN_CONTRACT` | Custom contract address (optional) | Uses preset |
+| `CHAIN_DEPLOY_BLOCK` | Block the contract was deployed in, where event scans start (optional, a non-negative integer). Needed for `chain get --follow` on a v1 contract with a custom `CHAIN_CONTRACT`: a custom contract does not use the preset's deploy block | Preset's, for the preset contract only |
 | `CHAIN_EXPLORER_URL` | Custom block explorer URL (optional) | Uses preset |
 | `CHAIN_GAS_LIMIT` | Explicit gas limit (optional, skips RPC estimation, so a transaction that would revert is still sent and costs gas) | Auto-estimated |
 | `CHAIN_RPC_URLS` | Comma-separated fallback RPC URLs, tried in order after the main RPC (optional, replaces the preset fallbacks). Like `CHAIN_RPC_URL`, applies whatever chain is selected | Uses preset fallbacks |

@@ -125,6 +125,10 @@ CHAIN_NAME=base-sepolia
 # Optional: Custom contract address (uses preset if not set)
 # CHAIN_CONTRACT=0x...
 
+# Optional: Block the contract was deployed in, where event scans start.
+# A custom CHAIN_CONTRACT does not use the preset's deploy block.
+# CHAIN_DEPLOY_BLOCK=12345678
+
 # Optional: Custom block explorer URL (uses preset if not set)
 # CHAIN_EXPLORER_URL=https://your-explorer.com
 ```
@@ -245,6 +249,8 @@ swarm-prov-upload chain get <hash> --follow --depth 2
 # JSON output for scripting
 swarm-prov-upload chain get <hash> --follow --json
 ```
+
+On a v2 contract, the walk reads the transformation links from the contract state. On a v1 contract, it scans the contract's events from its deploy block. The preset's deploy block is used only for the preset's own contract. With a custom `CHAIN_CONTRACT`, set `CHAIN_DEPLOY_BLOCK` to the block the contract was deployed in. Without a deploy block, only the last 50,000 blocks can be scanned. If the chain is longer, the lineage may be incomplete, so the command stops with an error that asks you to set `CHAIN_DEPLOY_BLOCK`, and exits with code 1.
 
 ### Record data access
 
@@ -432,8 +438,8 @@ export CHAIN_CONTRACT=0x...your_contract_address...
 | RPC URL | https://sepolia.base.org |
 | Fallback RPCs | base-sepolia-rpc.publicnode.com, base-sepolia.drpc.org |
 | Block Explorer | https://base-sepolia.blockscout.com |
-| DataProvenance Contract | `0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a` |
-| Deploy Block | 39,075,766 |
+| DataProvenance Contract | `0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322` |
+| Deploy Block | 39,905,249 |
 
 ### Base (mainnet)
 
