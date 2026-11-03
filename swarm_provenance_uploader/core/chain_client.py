@@ -380,6 +380,11 @@ def _redact_in_place(error: Exception) -> None:
     ``args`` (what str() shows) and its ``message``, ``data`` and
     ``user_message`` attributes are redacted; other attributes, such as
     OffchainLookup's ``payload``, are kept.
+
+    redact_urls also cuts every registered URL secret out of the text. If a
+    secret is hex only and appears inside hex revert data, that part of
+    the data is cut too. This is intended: the key must not leak, and the
+    data is then incomplete.
     """
     try:
         error.args = _redact_value(error.args)

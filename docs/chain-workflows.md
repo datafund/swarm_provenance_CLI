@@ -704,7 +704,7 @@ These exit codes apply to every chain command, including the composite commands 
 | 0 | Success | (no error) |
 | 1 | Error: hash not found, transaction reverted, not recorded, not verified, replaced, transaction not found (`chain wait`), connection error | `transaction_failed`, `not_recorded`, `not_verified`, `replaced`, `not_found`, and others |
 | 2 | Usage error: an option or argument is not valid | (no JSON) |
-| 3 | The transaction was sent and may still be mined: receipt timeout, or outcome unknown. Do not run the command again; wait with `chain wait`, or check the transaction in the explorer. `chain wait` also exits 3 when it cannot reach any RPC, because the transaction may still be pending | `receipt_timeout`, `outcome_unknown`, `connection_failed` (`chain wait` only) |
+| 3 | The transaction was sent and may still be mined: receipt timeout, or outcome unknown. Do not run the command again; wait with `chain wait`, or check the transaction in the explorer. `chain wait` also exits 3 when the RPC answers the receipt lookup with an error (`outcome_unknown`), and when it cannot reach any RPC, because the transaction may still be pending | `receipt_timeout`, `outcome_unknown`, `connection_failed` (`chain wait` only) |
 
 In the JSON output of a composite command, the error object of an unconfirmed step is under `unconfirmed`.
 
@@ -717,7 +717,7 @@ swarm-prov-upload chain wait <tx_hash> --event DataRegistered --count 3 # batch 
 swarm-prov-upload chain wait <tx_hash> --timeout 300 --json
 ```
 
-`chain wait` waits for the receipt of a sent transaction and runs the same checks as a write: the receipt status, the contract's events when `--event` is given, and the replaced check after a timeout. It sends nothing and needs no wallet key, and it uses the fallback RPCs. For a hash the RPC does not know, it waits until `--timeout`, and then reports `not_found` (exit 1). If no RPC can be reached during the wait, it exits 3, because the transaction may still be pending, and with `--json` prints `{"error": "connection_failed", "message": ..., "tx_hash": ..., "explorer_url": ..., "wait_command": "swarm-prov-upload chain wait 0x... --event ..."}`. Success output in JSON:
+`chain wait` waits for the receipt of a sent transaction and runs the same checks as a write: the receipt status, the contract's events when `--event` is given, and the replaced check after a timeout. It sends nothing and needs no wallet key, and it uses the fallback RPCs. For a hash the RPC does not know, it waits until `--timeout`, and then reports `not_found` (exit 1). If the RPC answers the receipt lookup with an error, such as a rate limit (-32005), it reports "Outcome unknown" (`outcome_unknown`) and exits 3. If no RPC can be reached during the wait, it exits 3, because the transaction may still be pending, and with `--json` prints `{"error": "connection_failed", "message": ..., "tx_hash": ..., "explorer_url": ..., "wait_command": "swarm-prov-upload chain wait 0x... --event ..."}`. Success output in JSON:
 
 ```json
 {

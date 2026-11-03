@@ -381,7 +381,7 @@ The transaction was sent, but no receipt arrived within 120 seconds. The transac
 swarm-prov-upload chain wait 0x<tx hash> --event DataRegistered
 ```
 
-`chain wait` sends nothing and needs no wallet key, so running it again after its own timeout is safe. Use `--count N` for a batch write, and `--timeout SECONDS` to wait longer than 120 seconds. It exits 0 when the transaction is confirmed (with `--event`, when the contract emitted the events), 1 when it reverted, was not recorded, was replaced or is not found, and 3 when it is still pending or no RPC can be reached (with `--json`, `{"error": "connection_failed", ...}`).
+`chain wait` sends nothing and needs no wallet key, so running it again after its own timeout is safe. Use `--count N` for a batch write, and `--timeout SECONDS` to wait longer than 120 seconds. It exits 0 when the transaction is confirmed (with `--event`, when the contract emitted the events), 1 when it reverted, was not recorded, was replaced or is not found, and 3 when it is still pending (`receipt_timeout`), when the RPC answered the receipt lookup with an error (`outcome_unknown`), or when no RPC can be reached (with `--json`, `{"error": "connection_failed", ...}`).
 
 ### "Replaced"
 
