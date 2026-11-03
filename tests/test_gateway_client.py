@@ -2202,13 +2202,12 @@ class TestPaidRequestOutcomeReviewCases:
         assert exc_info.value.settled is True
         assert exc_info.value.nonce == NONCE
 
-    @pytest.mark.parametrize("kwargs,prefix,depth", [
-        ({}, "paid-", None),
-        ({"label": "mine", "depth": 20}, "mine-", 20),
-        ({"size": "small"}, "paid-", None),
+    @pytest.mark.parametrize("kwargs,prefix", [
+        ({}, "paid-"),
+        ({"label": "mine", "depth": 20}, "mine-"),
+        ({"size": "small", "depth": 20}, "paid-"),
     ])
-    def test_unreadable_purchase_keeps_the_label_and_depth_sent(self, paying_client, requests_mock,
-                                                                kwargs, prefix, depth):
+    def test_unreadable_purchase_keeps_the_label_prefix(self, paying_client, requests_mock, kwargs, prefix):
         """#216: the gateway names a paid batch <label>-<suffix> or paid-<suffix> (swarm_connect stamps.py)."""
         from swarm_provenance_uploader.exceptions import PaymentResultUnreadableError
 
@@ -2216,7 +2215,8 @@ class TestPaidRequestOutcomeReviewCases:
         with pytest.raises(PaymentResultUnreadableError) as exc_info:
             paying_client.purchase_stamp(**kwargs)
         assert exc_info.value.label_prefix == prefix
-        assert exc_info.value.depth == depth
+        # No depth: the gateway may use a size preset over the depth asked for
+        assert not hasattr(exc_info.value, "depth")
 
     def test_unreadable_purchase_with_label_gives_its_prefix(self, paying_client, requests_mock):
         """A library call of purchase_stamp(label=...) gets "<label>-" (swarm_connect stamps.py:813-814)."""
@@ -2226,7 +2226,7 @@ class TestPaidRequestOutcomeReviewCases:
         with pytest.raises(PaymentResultUnreadableError) as exc_info:
             paying_client.purchase_stamp(label="mine")
         assert exc_info.value.label_prefix == "mine-"
-        assert exc_info.value.depth is None
+        assert not hasattr(exc_info.value, "depth")
 
     def test_unreadable_pool_acquire_has_no_label(self, paying_client, requests_mock):
         from swarm_provenance_uploader.exceptions import PaymentResultUnreadableError

@@ -9227,32 +9227,34 @@ class TestPaidResultUnreadableCli:
         assert "Re-running pays again." in result.output
         assert "cannot be looked up" not in result.output
 
-    def test_stamp_purchase_shows_the_label_and_depth_sent(self, mocker):
-        """#216: like the pending report, so the new batch can be found in the wallet's stamp list."""
+    def test_stamp_purchase_shows_the_label_and_no_depth_or_ttl(self, mocker):
+        """#216: only claims that hold for every CLI purchase (the gateway may use a size preset over
+        --depth, and --amount sets the TTL), so neither depth nor TTL is stated."""
         err = self._error()
-        err.label_prefix, err.depth = "paid-", 20
+        err.label_prefix = "paid-"
+        err.depth = 20  # even if a caller sets it, the CLI does not state it
         self._client(mocker, purchase_stamp=err)
-        result = self._upload()
+        result = self._upload("--size", "small", "--depth", "20")
         self._assert_common(result)
         assert "Stamp label:     paid-<suffix>" in result.output
-        assert "Depth:           20" in result.output
-        # The CLI never sends a label, so the prefix cannot single out the new stamp
-        assert ("Stamps the CLI buys have a label that starts with paid- (stamps from the pool start "
-                "with pool-). The new one has utilization 0% and a TTL close to the requested duration "
-                "(the gateway's default when no duration was given), and depth 20.") in result.output
-        assert "newest" not in result.output
-        assert "look for the stamp whose label starts with" not in result.output
+        assert ("Stamps the CLI buys have a label that starts with paid- (most stamps from the pool "
+                "start with pool-). The new one has utilization 0%.") in result.output
         assert ("It may show Usable: No, or not be listed yet, for a few minutes after the purchase."
                 in result.output)
+        report = result.output.split("most likely succeeded")[1]
+        assert "Depth" not in report and "depth" not in report
+        assert "TTL" not in report and "duration" not in report
+        assert "newest" not in report
+        assert "look for the stamp whose label starts with" not in report
 
-    def test_stamp_purchase_without_depth_names_no_depth(self, mocker):
+    def test_stamp_purchase_with_amount_states_no_ttl(self, mocker):
         err = self._error()
         err.label_prefix = "paid-"
         self._client(mocker, purchase_stamp=err)
-        result = self._upload()
-        assert ("The new one has utilization 0% and a TTL close to the requested duration "
-                "(the gateway's default when no duration was given).") in result.output
-        assert "depth" not in result.output.split("The new one has")[1].split("\n")[0]
+        result = self._upload("--amount", "100000000")
+        report = result.output.split("most likely succeeded")[1]
+        assert "The new one has utilization 0%." in report
+        assert "TTL" not in report and "duration" not in report
 
     def test_library_label_prefix_is_looked_for(self, mocker):
         """Only a library call of purchase_stamp(label=...) gives a prefix of its own."""
