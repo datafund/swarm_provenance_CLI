@@ -2019,19 +2019,62 @@ class TestEventCache:
         assert src1.hex() in reverse_srcs
         assert src2.hex() in reverse_srcs
 
-    def test_merge_events_skipped_on_v1(self):
-        """Tests that DataMerged scan failure is silently skipped (v1 contracts)."""
+    def test_merge_events_empty_on_v1(self):
+        """A v1 contract emits no DataMerged events: the merge scan finds none."""
         from swarm_provenance_uploader.chain.event_cache import TransformationEventCache
 
         cache = TransformationEventCache()
         mock_contract = MagicMock()
         mock_contract.get_all_transformations.return_value = []
-        mock_contract.get_all_merge_events.side_effect = Exception("no DataMerged event")
+        mock_contract.get_all_merge_events.return_value = []
 
-        # Should not raise
         forward, reverse = cache.get_maps(mock_contract, deploy_block=0, current_block=1000)
         assert forward == {}
         assert reverse == {}
+
+    def test_merge_scan_failure_raises_and_scans_the_range_again(self):
+        """A failed DataMerged scan raises and changes nothing, so no merge is lost (#230).
+
+        It was logged and skipped while the scan marker still moved on, so
+        the merges in that block range were never read again.
+        """
+        from swarm_provenance_uploader.chain.event_cache import TransformationEventCache
+
+        orig = bytes.fromhex("aa" * 32)
+        new = bytes.fromhex("bb" * 32)
+        merged = bytes.fromhex("cc" * 32)
+        merge_event = MagicMock()
+        merge_event.args.newDataHash = merged
+        merge_event.args.sourceDataHashes = [orig, new]
+        merge_event.args.transformation = "merged"
+
+        cache = TransformationEventCache()
+        mock_contract = MagicMock()
+        mock_contract.get_all_transformations.return_value = [(orig, new, "step")]
+        mock_contract.get_all_merge_events.side_effect = [OSError("timed out"), [merge_event]]
+
+        with pytest.raises(OSError):
+            cache.get_maps(mock_contract, deploy_block=0, current_block=1000)
+        assert cache._last_scanned_block is None
+        assert cache._forward == {}
+        assert cache._reverse == {}
+
+        forward, reverse = cache.get_maps(mock_contract, deploy_block=0, current_block=1000)
+        assert forward[orig.hex()] == [(new.hex(), "step"), (merged.hex(), "merged")]
+        assert reverse[new.hex()] == [(orig.hex(), "step")]
+        assert sorted(src for src, _ in reverse[merged.hex()]) == [orig.hex(), new.hex()]
+        assert mock_contract.get_all_merge_events.call_args.kwargs == {"from_block": 0, "to_block": 1000}
+
+    def test_get_all_merge_events_raises_rpc_errors(self, mock_chain_deps):
+        """get_all_merge_events no longer turns an RPC error into an empty list (#230)."""
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        mock_chain_deps["contract"].events.DataMerged.get_logs.side_effect = OSError("timed out")
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"], contract_address=DUMMY_CONTRACT,
+        )
+        with pytest.raises(OSError):
+            contract.get_all_merge_events(from_block=0, to_block=100)
 
 
 class TestChunkedEventQueries:
