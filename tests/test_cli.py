@@ -10182,3 +10182,133 @@ class TestJsonReviewRound4:
         from swarm_provenance_uploader import cli
         assert hasattr(cli, "_upload_collection_command")
         assert not hasattr(cli, "_json_command")
+
+
+def _reference_parse(command, name, args, parent):
+    """click's own option parser on args, not resilient, unknown options kept.
+
+    A flag given a value ("does not take a value") is rewritten to the flag at
+    the exact token click stopped at, and the parse is run again. Returns the
+    context, the parsed options, and the tokens left after the options
+    (rargs): for a group, rargs[0] is the subcommand.
+    """
+    from click.parser import ParsingState
+
+    args = list(args)
+    for _ in range(len(args) + 1):
+        ctx = click.Context(command, info_name=name, parent=parent, ignore_unknown_options=True)
+        parser = command.make_parser(ctx)
+        state = ParsingState(list(args))
+        current = []
+        original = parser._process_opts
+
+        def track(arg, state_, original=original):
+            current.append(len(args) - len(state_.rargs) - 1)  # the index of arg
+            return original(arg, state_)
+
+        parser._process_opts = track
+        try:
+            parser._process_args_for_options(state)
+        except click.BadOptionUsage as e:
+            if "does not take a value" in e.message:
+                index = current[-1]
+                args[index] = args[index].split("=", 1)[0]
+                continue
+        except click.UsageError:
+            pass  # for example an option at the end without its value: keep what was parsed
+        return ctx, state.opts, state.rargs
+    raise AssertionError("no progress")
+
+
+def _reference_json_requested(argv) -> bool:
+    """Would click's parse set --json on the command that argv names? (flags given a value ignored)"""
+    command = typer.main.get_command(app)
+    ctx, opts, rest = _reference_parse(command, "swarm-prov-upload", argv, None)
+    while isinstance(command, click.Group):
+        if not rest:
+            return False
+        command = command.get_command(ctx, rest[0])
+        if command is None:
+            return False
+        ctx, opts, rest = _reference_parse(command, rest[0], rest[1:], ctx)
+    return any(p.name == "output_json" for p in command.params) and bool(opts.get("output_json"))
+
+
+_MATRIX_PREFIXES = [
+    [], ["--x402=1"], ["-b", "chain"], ["-bchain"], ["--gateway-url", "chain"],
+    ["--gateway-url", "--json"], ["--bogus"], ["--"], ["--backend", "gateway", "--backend", "gateway"],
+    ["--", "-V"],
+]
+_MATRIX_COMMANDS = [
+    ["chain", "balance"], ["chain", "anchor", "H"],
+    ["upload-collection", "d"], ["stamps", "extend", "S"], ["upload", "--file", "f"],
+    ["chain", "--", "-x", "balance"],
+]
+_MATRIX_TAILS = [
+    ["--json"], ["--json=1"], ["-v=1", "--json"], ["--verbose=1", "--json"], ["--help=1", "--json"],
+    ["--json", "--help=1"], ["-vt", "--", "--verbose=1", "--json"], ["-t", "--", "--json=1"],
+    ["-t", "chain", "--json"], ["--bogus", "--json"], ["-v", "X", "--json"], ["-vd", "--json"],
+    ["-vtx", "--json"], ["--", "--json"],
+]
+
+
+class TestJsonDetectionMatrix:
+    """_json_requested agrees with click's own parse over a cross product of command lines."""
+
+    @pytest.mark.parametrize("prefix", _MATRIX_PREFIXES, ids=[" ".join(p) or "-" for p in _MATRIX_PREFIXES])
+    def test_matches_clicks_parse(self, prefix):
+        from swarm_provenance_uploader.cli import _JsonErrorsGroup
+
+        group = typer.main.get_command(app)
+        assert isinstance(group, _JsonErrorsGroup)
+        disagreements = []
+        for command in _MATRIX_COMMANDS:
+            for tail in _MATRIX_TAILS:
+                argv = [*prefix, *command, *tail]
+                expected = _reference_json_requested(argv)
+                if group._json_requested(argv) != expected:
+                    disagreements.append((argv, expected))
+        assert disagreements == []
+
+
+class TestJsonReviewRound5:
+    """Review round 5 fixes for --json detection (#241)."""
+
+    @pytest.mark.parametrize("args", [
+        ["chain", "anchor", DUMMY_SWARM_REF, "-vt", "--", "--verbose=1", "--json"],
+        ["chain", "anchor", DUMMY_SWARM_REF, "-vt", "chain", "--x402=1", "--json"],
+        ["chain", "balance", "--help=1", "--json"],
+        ["chain", "balance", "--json", "--help=1"],
+    ], ids=["cluster-takes-the-next-token", "cluster-value-is-a-command-name", "help-with-value-first",
+            "help-with-value-last"])
+    def test_usage_error_is_a_document(self, mocker, args):
+        _successful_chain_client(mocker)
+        result = _json_runner().invoke(app, args)
+        assert result.exit_code == 2, result.output
+        assert _one_json_document(result)["error"] == "invalid_input"
+
+    def test_attached_cluster_value_does_not_skip(self, mocker):
+        """-vtx: "x" is the type, so the next token is read as usual."""
+        client = _successful_chain_client(mocker)
+        result = _json_runner().invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "-vtx", "--json"])
+        assert result.exit_code == 0, result.output
+        _one_json_document(result)
+        assert client.anchor.call_args.kwargs["data_type"] == "x"
+
+    @pytest.mark.parametrize("args", [
+        ["--", "-V", "chain", "balance", "--json"],
+        ["chain", "--", "-x", "balance", "--json"],
+    ], ids=["top-level", "chain-group"])
+    def test_dash_token_after_double_dash_is_a_command_name(self, args):
+        """After "--", "-V" or "-x" is an unknown command: a text usage error, no document."""
+        result = _json_runner().invoke(app, args)
+        assert result.exit_code == 2
+        assert result.stdout == ""
+
+    def test_chain_catch_all_empty_message_has_no_trailing_colon(self, mocker):
+        client = _successful_chain_client(mocker)
+        client.balance.side_effect = RuntimeError()
+        result = _json_runner().invoke(app, ["chain", "balance", "--json"])
+        assert result.exit_code == 1
+        assert _one_json_document(result)["message"] == "Chain command failed: RuntimeError"
+        assert "ERROR: Chain command failed: RuntimeError\n" in result.stderr
