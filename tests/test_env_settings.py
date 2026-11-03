@@ -582,3 +582,26 @@ def test_bad_gas_limit_setting_json(tmp_path, raw):
         "error": "invalid_gas_limit",
         "message": f"CHAIN_GAS_LIMIT is not a whole number of at least 21000: {raw!r}",
     }
+
+
+def test_chain_client_does_not_load_dotenv(tmp_path):
+    """Building a ChainClient does not import config, so a library caller's .env is not loaded (#226)."""
+    pytest.importorskip("web3")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / ".env").write_text("SWARM_PROV_DOTENV_SENTINEL=loaded\n")
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("CHAIN_", "PROVENANCE_", "X402_", "SWARM_")) and k != "PYTHONPATH"}
+    env["PYTHONPATH"] = str(ROOT)  # this checkout, not another installed copy
+    code = "\n".join([
+        "import os, socket, sys",
+        "def _blocked(*args, **kwargs):",
+        "    raise OSError('network blocked in this test')",
+        "socket.socket.connect = _blocked",
+        "socket.create_connection = _blocked",
+        "from swarm_provenance_uploader.core.chain_client import ChainClient",
+        "ChainClient(chain='base-sepolia', gas_limit=21000, require_wallet=False)",
+        "print('swarm_provenance_uploader.config' in sys.modules)",
+        "print('SWARM_PROV_DOTENV_SENTINEL' in os.environ)",
+    ])
+    assert _run(code, work, env) == ["False", "False"]
