@@ -372,7 +372,7 @@ Uses python-dotenv for environment configuration. `config.py` loads `find_dotenv
 - `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs (optional, replaces the preset fallbacks)
 - `CHAIN_CONTRACT`: Custom contract address (optional, overrides preset)
 - `CHAIN_EXPLORER_URL`: Custom block explorer URL (optional, overrides preset)
-- `CHAIN_GAS_LIMIT`: Explicit gas limit (optional, skips RPC estimation when set)
+- `CHAIN_GAS_LIMIT`: Explicit gas limit (optional, skips RPC estimation, so a transaction that would revert is still sent and costs gas)
 - `PROVENANCE_WALLET_KEY`: Wallet private key for signing transactions. Only chain writes and `chain balance` need it; `_get_chain_client(require_wallet=True)` loads it up front for those commands, and read-only commands use a client that reads the key on first use (#140)
 
 ## Testing approach
