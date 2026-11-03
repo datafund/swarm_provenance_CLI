@@ -262,7 +262,7 @@ swarm-prov-upload chain anchor <swarm_hash>
 swarm-prov-upload chain anchor <swarm_hash> --type "dataset"
 swarm-prov-upload chain anchor <swarm_hash> --owner <address>  # anchor as delegate
 swarm-prov-upload chain anchor <swarm_hash> --storage-ref <ref>  # anchor with Swarm storage reference
-swarm-prov-upload chain anchor <swarm_hash> --gas 500000      # explicit gas limit
+swarm-prov-upload chain anchor <swarm_hash> --gas 500000      # explicit gas limit, at least 21000; a transaction that would revert is still sent (see CHAIN_GAS_LIMIT below)
 
 # Record data access
 swarm-prov-upload chain access <swarm_hash>

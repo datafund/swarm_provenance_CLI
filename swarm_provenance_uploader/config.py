@@ -114,10 +114,10 @@ CHAIN_GAS_LIMIT = None
 CHAIN_GAS_LIMIT_ERROR = None
 _chain_gas_limit_str = (os.getenv("CHAIN_GAS_LIMIT") or "").strip()
 if _chain_gas_limit_str:
-    try:
+    # Only ASCII digits: int() would also take "50_000", "+50000" and
+    # non-ASCII digits such as full-width ones
+    if _chain_gas_limit_str.isascii() and _chain_gas_limit_str.isdigit():
         CHAIN_GAS_LIMIT = int(_chain_gas_limit_str)
-    except ValueError:
-        CHAIN_GAS_LIMIT = None
     if CHAIN_GAS_LIMIT is None or CHAIN_GAS_LIMIT < MIN_GAS_LIMIT:
         CHAIN_GAS_LIMIT = None
         CHAIN_GAS_LIMIT_ERROR = (
