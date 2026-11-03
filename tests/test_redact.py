@@ -231,21 +231,23 @@ class TestUrlAfterWordCharacter:
         assert out.endswith(f"https://base-sepolia.g.alchemy.com/{PLACEHOLDER}")
 
 
-def _assert_linear_time(func, build, size, factor=10, max_ratio=20, attempts=3):
+def _assert_linear_time(func, build, size, factor=10, max_ratio=20, fail_ratio=50, attempts=3):
     """Fail if func(build(size)) takes max_ratio times longer than func(build(size // factor)).
 
     A linear scan takes about factor times longer on the larger input, and a
     quadratic one about factor ** 2 times longer. A ratio, not a fixed time
-    limit, stays the same on a slow machine (#238). A ratio above the limit
-    is measured again, up to attempts times, so that one pause of the
-    machine does not fail the test.
+    limit, stays the same on a slow machine (#238). The time is the CPU time
+    of this thread, so other processes on the machine do not count. A ratio
+    of fail_ratio or more fails at once. A ratio from max_ratio up to
+    fail_ratio is measured again, up to attempts times, so that one pause
+    does not fail the test.
     """
     import time
 
     def timed(text):
-        start = time.perf_counter()
+        start = time.thread_time()
         func(text)
-        return time.perf_counter() - start
+        return time.thread_time() - start
 
     small, large = build(size // factor), build(size)
     ratios = []
@@ -255,37 +257,43 @@ def _assert_linear_time(func, build, size, factor=10, max_ratio=20, attempts=3):
         if ratio < max_ratio:
             return
         ratios.append(f"{ratio:.1f} ({small_time:.3f} s, {large_time:.3f} s)")
+        if ratio >= fail_ratio:
+            break
     pytest.fail(f"{factor}x the input took more than {max_ratio}x the time: {', '.join(ratios)}")
 
 
 class TestRedactUrlsSpeed:
+    """The time check runs first, on inputs small enough that a quadratic
+    scan fails it within a minute. The full-size call after it checks the
+    output."""
+
     def test_long_run_of_trailing_punctuation(self):
         """Trailing punctuation is stripped in linear time: a quadratic loop took 24 s here."""
+        _assert_linear_time(redact_urls, lambda n: f"failed {PATH_KEY_URL}" + ")" * n, 100_000)
         text = f"failed {PATH_KEY_URL}" + ")" * 1_000_000
         out = redact_urls(text)
         assert KEY not in out
         assert out.endswith(")" * 1_000_000)
-        _assert_linear_time(redact_urls, lambda n: f"failed {PATH_KEY_URL}" + ")" * n, 1_000_000)
 
     @pytest.mark.parametrize(
-        "build, size",
+        "build, size, timed_size",
         [
-            (lambda n: "a." * n, 100_000),
-            (lambda n: "Could not decode '<html><body>" + "a-" * n + "</body></html>'", 50_000),
-            (lambda n: "a" * n, 1_000_000),
+            (lambda n: "a." * n, 100_000, 10_000),
+            (lambda n: "Could not decode '<html><body>" + "a-" * n + "</body></html>'", 50_000, 10_000),
+            (lambda n: "a" * n, 1_000_000, 100_000),
         ],
         ids=["dotted-run", "hyphenated-html-body", "letter-run"],
     )
-    def test_long_run_of_scheme_characters(self, build, size):
+    def test_long_run_of_scheme_characters(self, build, size, timed_size):
         """A long run of letters joined by dots or hyphens is scanned in linear time.
 
         An unbounded scheme pattern took about 58 s on "a." * 100000.
         """
+        _assert_linear_time(redact_urls, lambda n: build(n) + f" {PATH_KEY_URL}", timed_size)
         text = build(size)
         out = redact_urls(text + f" {PATH_KEY_URL}")
         assert out.startswith(text)
         assert KEY not in out
-        _assert_linear_time(redact_urls, lambda n: build(n) + f" {PATH_KEY_URL}", size)
 
 
 class TestRedactUrlNonString:
