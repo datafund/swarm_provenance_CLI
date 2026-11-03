@@ -125,6 +125,7 @@ class _JsonErrorsGroup(TyperGroup):
           first letter whose option takes a value, the value is the rest of
           the token if letters follow, otherwise the next token(s);
         - a "--" that is not a value ends the options;
+        - a bare "-" is a positional, as for click;
         - for a group, the first token that is neither an option nor a value
           is its subcommand.
 
@@ -177,8 +178,8 @@ class _JsonErrorsGroup(TyperGroup):
                 if end is not None:
                     rest = tokens[end + 1:]  # after "--", the next token is the command name
                 else:
-                    while rest and rest[0].startswith("-"):
-                        rest.pop(0)  # an unknown option before the subcommand
+                    while rest and rest[0].startswith("-") and rest[0] != "-":
+                        rest.pop(0)  # an unknown option before the subcommand ("-" is a name)
                 if not rest:
                     return False
                 name, command, rest = command.resolve_command(ctx, rest)
