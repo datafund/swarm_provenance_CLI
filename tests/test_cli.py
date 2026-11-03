@@ -7841,6 +7841,8 @@ class TestSendOutcomeUnknown:
         assert self.STEP_TX in result.output
         assert self.STEP_EXPLORER in result.output
         assert "connection reset" in result.output
+        # Exit 3: the resume command is printed (#240 review 3)
+        assert f"Wait for it: swarm-prov-upload chain wait {self.STEP_TX} --event DataAccessed" in result.output
 
     def test_single_command_text_without_explorer(self, mocker):
         """Without an explorer (a local chain), the check is done with chain get."""
@@ -7876,6 +7878,24 @@ class TestSendOutcomeUnknown:
         assert output["explorer_url"] == self.STEP_EXPLORER
         assert output["reason"] == "connection reset"
         assert "emitted_count" not in output
+        assert output["wait_command"] == f"swarm-prov-upload chain wait {self.STEP_TX} --event DataAccessed"
+
+    def test_wait_command_with_count_and_without_hash(self, mocker):
+        error = self._error("DataRegistered")
+        error.expected_count = 2
+        mock_client = mocker.MagicMock()
+        mock_client.access.side_effect = error
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+        assert f"chain wait {self.STEP_TX} --event DataRegistered --count 2" in result.output
+
+        error.tx_hash = None
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF])
+        assert result.exit_code == 3, result.output
+        assert "Wait for it" not in result.output
+        result = runner.invoke(app, ["chain", "access", DUMMY_SWARM_REF, "--json"])
+        assert json.loads(result.stdout)["wait_command"] is None
 
     def test_reason_redacted(self, mocker):
         mock_client = mocker.MagicMock()
@@ -7907,6 +7927,7 @@ class TestSendOutcomeUnknown:
         assert "Failed to restrict original. Outcome unknown" in result.output
         assert self.STEP_TX in result.output
         assert transform_tx in result.output
+        assert f"Wait for it: swarm-prov-upload chain wait {self.STEP_TX} --event DataStatusChanged" in result.output
 
         result = runner.invoke(app, args + ["--json"])
         assert result.exit_code == 3, result.output  # may still be mined (#167)
@@ -7915,6 +7936,9 @@ class TestSendOutcomeUnknown:
         assert output["partial_failure"] is True
         assert output["unconfirmed"]["error"] == "outcome_unknown"
         assert output["unconfirmed"]["tx_hash"] == self.STEP_TX
+        assert output["unconfirmed"]["wait_command"] == (
+            f"swarm-prov-upload chain wait {self.STEP_TX} --event DataStatusChanged"
+        )
         assert "error" not in output
 
     def _protect_client(self, mocker):
