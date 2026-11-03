@@ -9028,3 +9028,59 @@ class TestPaidRefusalBeforeSettlementCli:
         assert "has not reported a current stamp price" in result.output
         assert "may have been taken" not in result.output
         assert "Payment was taken" not in result.output
+
+    @staticmethod
+    def _refusal(status, code, message):
+        return {"status_code": status,
+                "json": {"detail": {"code": code, "message": message}, "code": code, "message": message}}
+
+    @pytest.mark.parametrize("status,code", [
+        (403, "STAMP_OWNERSHIP_DENIED"), (400, "EXTENSION_TOO_SMALL"), (400, "STAMP_COST_EXCEEDS_LIMIT"),
+        (503, "GATEWAY_DAILY_SPEND_CEILING"),
+    ])
+    def test_extend_refusal_does_not_count_a_payment(self, requests_mock, status, code):
+        """#215: reproduced in the #214 review as 'Payments sent: $0.050000 USDC (1 payment(s))'."""
+        result = self._extend(requests_mock, self._refusal(status, code, "Refused before payment."))
+        assert result.exit_code == 1
+        assert f"HTTP {status} {code}: Refused before payment." in result.output
+        assert "Payments sent" not in result.output
+
+    def test_extend_validation_error_does_not_count_a_payment(self, requests_mock):
+        result = self._extend(requests_mock, {"status_code": 422, "json": {
+            "detail": [{"loc": ["body", "duration_hours"], "msg": "too large"}],
+            "code": "VALIDATION_ERROR", "message": "The request is invalid; see detail for the fields."}})
+        assert result.exit_code == 1
+        assert "HTTP 422" in result.output
+        assert "Payments sent" not in result.output
+
+    @pytest.mark.parametrize("status,code", [
+        (400, "STAMP_COST_EXCEEDS_LIMIT"), (503, "GATEWAY_DAILY_SPEND_CEILING"), (503, "PURCHASE_CAPACITY"),
+    ])
+    def test_purchase_refusal_does_not_count_a_payment(self, requests_mock, status, code):
+        result = self._upload(requests_mock, self._refusal(status, code, "Refused before payment."))
+        assert result.exit_code == 1
+        assert code in result.output
+        assert "Payments sent" not in result.output
+
+    def test_extend_settled_not_delivered_still_counts_the_payment(self, requests_mock):
+        result = self._extend(requests_mock, {
+            "status_code": 400, "headers": {"X-Payment-Status": "settled_not_delivered",
+                                            "X-Payment-Transaction": "0x" + "cd" * 32},
+            "json": {"detail": "Bee refused the top-up."}})
+        assert result.exit_code == 1
+        assert "Payment was taken, but the stamp extension failed" in result.output
+        assert "Payments sent: $0.050000 USDC (1 payment(s))" in result.output
+
+    def test_purchase_success_still_counts_the_payment(self, requests_mock):
+        requests_mock.post(f"{self.GW}/api/v1/stamps/", [self.PAYMENT_REQUIRED, {
+            "status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        requests_mock.post(f"{self.GW}/api/v1/data/", status_code=500, json={"detail": "boom"})
+        requests_mock.get(f"{self.GW}/api/v1/stamps/{DUMMY_STAMP}", json={
+            "batchID": DUMMY_STAMP, "usable": True, "exists": True, "depth": 17, "amount": "1",
+            "bucketDepth": 16, "immutableFlag": False, "batchTTL": 3600})
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--x402", "--gateway-url", self.GW, "upload", "--file", "d.txt"])
+        assert "Postage stamp purchased" in result.output, result.output
+        assert "Payments sent: $0.050000 USDC (1 payment(s))" in result.output

@@ -1981,6 +1981,66 @@ class TestPaymentSentHook:
             patcher.stop()
         assert sent == []
 
+    @pytest.mark.parametrize("status,body", [
+        (403, {"detail": {"code": "STAMP_OWNERSHIP_DENIED", "message": "Cannot extend this stamp."},
+               "code": "STAMP_OWNERSHIP_DENIED", "message": "Cannot extend this stamp."}),
+        (400, {"detail": {"code": "EXTENSION_TOO_SMALL", "message": "An extension must add at least 24 hours."},
+               "code": "EXTENSION_TOO_SMALL", "message": "An extension must add at least 24 hours."}),
+        (400, {"detail": {"code": "STAMP_COST_EXCEEDS_LIMIT", "message": "Above the per-request limit."},
+               "code": "STAMP_COST_EXCEEDS_LIMIT", "message": "Above the per-request limit."}),
+        (422, {"detail": [{"loc": ["body", "depth"], "msg": "too large"}], "code": "VALIDATION_ERROR",
+               "message": "The request is invalid; see detail for the fields."}),
+        (400, {"detail": "Insufficient funds to extend stamp."}),
+        (503, {"detail": {"code": "PURCHASE_CAPACITY", "message": "You were not charged; retry shortly."}}),
+        (503, {"detail": {"code": "GATEWAY_DAILY_SPEND_CEILING", "message": "Daily limit."}}),
+        (500, {"detail": "Internal server error. You were not charged."}),
+    ], ids=["403-ownership", "400-too-small", "400-cost-limit", "422", "400-funds",
+            "503-capacity", "503-spend-ceiling", "500-not-charged"])
+    def test_hook_not_called_when_refused_before_settlement(self, mock_x402, requests_mock, status, body):
+        """#215: an answer the gateway sends before settling was not paid for."""
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        sent = []
+        requests_mock.patch(f"{GW}/api/v1/stamps/{DUMMY_STAMP}/extend",
+                            [PAYMENT_REQUIRED, {"status_code": status, "json": body}])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_on_payment_sent=sent.append)
+        try:
+            with pytest.raises(Exception) as exc_info:
+                client.extend_stamp(DUMMY_STAMP, duration_hours=48)
+        finally:
+            patcher.stop()
+        assert not isinstance(exc_info.value, PaymentOutcomeUnknownError)
+        assert sent == []
+
+    @pytest.mark.parametrize("answer,error", [
+        ({"status_code": 409, "headers": {"X-Payment-Status": "settled_not_delivered",
+                                          "X-Payment-Transaction": TX_HASH},
+          "json": {"detail": {"message": "Stamp was acquired by another request."}}},
+         "PaymentSettledNotDeliveredError"),
+        ({"status_code": 400, "headers": {"X-Payment-Status": "settled_not_delivered",
+                                          "X-Payment-Transaction": TX_HASH},
+          "json": {"detail": "Bee refused the top-up."}},
+         "PaymentSettledNotDeliveredError"),
+        ({"status_code": 500, "json": {"code": "DELIVERY_FAILED_AFTER_PAYMENT", "message": "Collected.",
+                                       "transaction": TX_HASH}},
+         "PaymentSettledNotDeliveredError"),
+        ({"status_code": 502, "text": "Bad Gateway"}, "PaymentOutcomeUnknownError"),
+        ({"status_code": 503, "json": {"detail": {"code": "SOMETHING_ELSE", "message": "x"}}},
+         "PaymentOutcomeUnknownError"),
+    ], ids=["409-settled", "400-settled", "500-delivery-failed", "502", "503-other"])
+    def test_hook_still_called_when_possibly_charged(self, mock_x402, requests_mock, answer, error):
+        from swarm_provenance_uploader import exceptions as exc
+
+        sent = []
+        requests_mock.patch(f"{GW}/api/v1/stamps/{DUMMY_STAMP}/extend", [PAYMENT_REQUIRED, answer])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_on_payment_sent=sent.append)
+        try:
+            with pytest.raises(getattr(exc, error)):
+                client.extend_stamp(DUMMY_STAMP, duration_hours=48)
+        finally:
+            patcher.stop()
+        assert len(sent) == 1
+
     def test_failing_hook_does_not_break_request(self, mock_x402, requests_mock):
         def boom(payment):
             raise RuntimeError("hook bug")
