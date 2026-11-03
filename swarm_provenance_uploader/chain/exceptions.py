@@ -127,7 +127,8 @@ class InsufficientFundsError(ChainTransactionError):
 
 
 class TransactionUnconfirmedError(ChainTransactionError):
-    """Transaction was sent, but the write is not confirmed as recorded.
+    """Transaction was sent (or, for TransactionOutcomeUnknownError, may have
+    been sent), but the write is not confirmed as recorded.
 
     Base class for TransactionNotRecordedError and TransactionNotVerifiedError
     (the transaction was mined with status 1),
@@ -218,11 +219,16 @@ class TransactionNotVerifiedError(TransactionUnconfirmedError):
 
 
 class TransactionOutcomeUnknownError(TransactionUnconfirmedError):
-    """The connection to the RPC failed after the transaction was sent.
+    """The transaction may have been sent, and it is not known whether it was mined.
 
-    The transaction may have been broadcast, and may be mined later, so it is
-    not known whether the write happened. ``tx_hash`` is the hash of the
-    signed transaction. ``reason`` is the transport error.
+    Raised when the connection to the RPC fails after the transaction was
+    sent (#181), when the RPC answers the send with "already known" or
+    "nonce too low" (#229), and when, after the send, the receipt wait fails
+    with an error that is not a timeout, such as a JSON-RPC error answer
+    (#228). The transaction may have been broadcast, and may be mined later,
+    so it is not known whether the write happened. ``tx_hash`` is the hash of
+    the signed transaction. ``reason`` is the transport error or the RPC's
+    answer.
 
     Retry: NOT safe without checking first. Look up ``tx_hash`` in the block
     explorer, or read the record back, before you send it again.

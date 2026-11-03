@@ -153,8 +153,17 @@ def _get_chain_client(verbose: bool = False, require_wallet: bool = False):
     except exceptions.ChainConfigurationError as e:
         typer.secho(f"ERROR: Chain configuration invalid: {e}", fg=typer.colors.RED, err=True)
         if not isinstance(e, exceptions.ChainIdMismatchError):
-            # The mismatch message carries its own advice (CHAIN_NAME=localhost)
-            typer.echo("Check PROVENANCE_WALLET_KEY environment variable and chain settings.", err=True)
+            # The mismatch message carries its own advice (CHAIN_NAME=localhost).
+            # Only commands that sign need the key, so only they name it (#219)
+            settings = "CHAIN_NAME, CHAIN_CONTRACT, CHAIN_RPC_URL"
+            if require_wallet:
+                typer.echo(
+                    f"Check {_chain_config['wallet_key_env']} environment variable and "
+                    f"chain settings ({settings}).",
+                    err=True,
+                )
+            else:
+                typer.echo(f"Check chain settings ({settings}).", err=True)
         raise typer.Exit(code=1)
 
 
@@ -2691,11 +2700,14 @@ def _handle_not_recorded(
         else:
             within = "in time"
         if waiting:
+            # chain wait was only given the hash
+            sent = "may have been sent"
             advice = "It may still be mined. Running chain wait again is safe: it sends nothing."
         else:
+            sent = "was sent"
             advice = "It may still be mined: do not run the write again."
         typer.secho(
-            prefix + f"Not confirmed yet. The transaction was sent, but no receipt "
+            prefix + f"Not confirmed yet. The transaction {sent}, but no receipt "
             f"arrived {within}. " + advice,
             fg=typer.colors.RED, err=True,
         )
@@ -2722,8 +2734,8 @@ def _handle_not_recorded(
                 "<data hash> before you try again."
             )
         typer.secho(
-            prefix + "Outcome unknown. The connection to the RPC failed after the "
-            "transaction was sent, so it is not known whether it was mined. " + check,
+            prefix + "Outcome unknown. The transaction may have been sent, and it is "
+            "not known whether it was mined. " + check,
             fg=typer.colors.RED, err=True,
         )
         command = _wait_command(e)
@@ -3290,7 +3302,8 @@ def chain_wait(
     the write prints. It sends nothing and needs no wallet key.
 
     Exit codes: 0 confirmed; 1 reverted, not recorded, replaced or not
-    found; 3 still pending, or no RPC could be reached.
+    found; 3 still pending, outcome unknown (the RPC answered the receipt
+    lookup with an error), or no RPC could be reached.
     """
     if count is not None and event is None:
         raise typer.BadParameter("--count needs --event", param_hint="--count")

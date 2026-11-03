@@ -307,7 +307,7 @@ swarm-prov-upload chain set-storage-ref <data_hash> <storage_ref>
 # Look up data hash by storage reference
 swarm-prov-upload chain lookup <storage_ref>
 
-# Wait for a sent transaction, after a write reported "Not confirmed yet" (exit 3)
+# Wait for a sent transaction, after a write reported "Not confirmed yet" or "Outcome unknown" (exit 3)
 swarm-prov-upload chain wait <tx_hash> --event DataRegistered
 swarm-prov-upload chain wait <tx_hash> --timeout 300 --json
 
@@ -317,7 +317,7 @@ swarm-prov-upload chain get <hash> --follow --depth 2     # limit depth
 swarm-prov-upload chain get <hash> --follow --json        # JSON output
 ```
 
-> **Exit code 3: may still be mined**: when a write sent its transaction but no receipt arrived within 120 seconds, or the connection failed after the send, the command exits 3 and prints the transaction hash. Do not run the write again: wait with the printed `chain wait` command, or check the transaction in the explorer. A transaction that another one with the same nonce replaced is reported as "Replaced" (exit 1). See [docs/chain-workflows.md](docs/chain-workflows.md#exit-codes) for all exit codes.
+> **Exit code 3: may still be mined**: when a write sent its transaction but no receipt arrived within 120 seconds, the command exits 3 and prints the transaction hash. It also exits 3 with "Outcome unknown" when the connection to the RPC fails while or after the transaction is sent; when the RPC answers the send with "already known", "Known transaction" or "nonce too low", which a node gives when it already has the transaction or a transaction with its nonce is mined; or when, after the send, the RPC answers the receipt lookup with a JSON-RPC error, such as a rate limit (-32005). Do not run the write again: wait with the printed `chain wait` command, or check the transaction in the explorer. A transaction that another one with the same nonce replaced is reported as "Replaced" (exit 1). See [docs/chain-workflows.md](docs/chain-workflows.md#exit-codes) for all exit codes.
 
 > **`chain get --follow` fails closed**: if any read fails during the walk, the command prints an error and exits with code 1 instead of printing a partial chain. In `--json` output, each record has a `parents` list (`null` for records at the depth limit).
 
