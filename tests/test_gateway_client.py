@@ -3440,7 +3440,11 @@ class TestValidationFieldMessages:
 
 
 class TestExtendStampDetails:
-    """extend_stamp_details() returns the gateway's answer with the new expiry (#217)."""
+    """extend_stamp_details() returns the gateway's answer, with the expiry it reported (#217).
+
+    The gateway reads that expiry right after the top-up: an estimate that may
+    not include the extension yet.
+    """
 
     ANSWER = {"batchID": DUMMY_STAMP, "message": "Postage stamp extended successfully",
               "expires_at": "2026-12-01T10:00:00Z"}
