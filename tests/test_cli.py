@@ -941,6 +941,14 @@ class TestX402StatusDetails:
         assert "Enabled" in result.stdout
         assert "10.00" in result.stdout or "$10.00" in result.stdout
 
+    def test_x402_status_tiny_max_pay_in_scientific_notation(self):
+        """#236: a tiny limit is shown as 1E-100000000, not as 100 MB of zeros."""
+        result = runner.invoke(app, ["--x402", "--max-pay", "1e-100000000", "x402", "status"])
+
+        assert result.exit_code == 0, result.output[:500]
+        assert "Max auto-pay: $1E-100000000" in result.stdout
+        assert len(result.stdout) < 5000
+
 
 # =============================================================================
 # POOL TESTS
@@ -8973,3 +8981,338 @@ class TestReplacedAdviceOneSource:
         assert "delegate state" in cli._replaced_cli_advice("DataRegistered")
         mocker.patch("swarm_provenance_uploader.chain.exceptions.replaced_check_kind", return_value="record")
         assert "chain get" in cli._replaced_cli_advice("DelegateAuthorized")
+
+
+# --- Paid requests refused before settlement, end to end with mocked HTTP (#213, #215) ---
+
+class TestPaidRefusalBeforeSettlementCli:
+    """A real GatewayClient against mocked HTTP; the payment is approved without signing anything."""
+
+    GW = "https://test.gateway.io"
+    PAYMENT_REQUIRED = {"status_code": 402, "json": {"accepts": []}}
+
+    @pytest.fixture(autouse=True)
+    def _approve_without_signing(self, mocker):
+        from swarm_provenance_uploader.core.gateway_client import GatewayClient
+        from tests.test_gateway_client import _signed_header
+
+        mocker.patch.object(GatewayClient, "_approve_payment",
+                            return_value=(_signed_header(), "$0.050000", None))
+
+    def _upload(self, requests_mock, answer):
+        requests_mock.post(f"{self.GW}/api/v1/stamps/", [self.PAYMENT_REQUIRED, answer])
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            return runner.invoke(app, ["--x402", "--gateway-url", self.GW, "upload", "--file", "d.txt"])
+
+    def _extend(self, requests_mock, answer):
+        requests_mock.patch(f"{self.GW}/api/v1/stamps/{DUMMY_STAMP}/extend", [self.PAYMENT_REQUIRED, answer])
+        return runner.invoke(app, ["--x402", "--gateway-url", self.GW, "stamps", "extend", DUMMY_STAMP,
+                                   "--duration-hours", "48"])
+
+    def test_purchase_spend_ceiling_is_not_reported_as_possibly_charged(self, requests_mock):
+        from tests.test_gateway_client import SPEND_CEILING_503
+
+        result = self._upload(requests_mock, SPEND_CEILING_503)
+        assert result.exit_code == 1
+        assert "GATEWAY_DAILY_SPEND_CEILING" in result.output
+        assert "may have been taken" not in result.output
+        assert "Payment was taken" not in result.output
+
+    def test_extend_bee_price_zero_is_not_reported_as_possibly_charged(self, requests_mock):
+        from tests.test_gateway_client import BEE_PRICE_ZERO_503
+
+        result = self._extend(requests_mock, BEE_PRICE_ZERO_503)
+        assert result.exit_code == 1
+        assert "has not reported a current stamp price" in result.output
+        assert "may have been taken" not in result.output
+        assert "Payment was taken" not in result.output
+
+    @staticmethod
+    def _refusal(status, code, message):
+        return {"status_code": status,
+                "json": {"detail": {"code": code, "message": message}, "code": code, "message": message}}
+
+    @pytest.mark.parametrize("status,code", [
+        (403, "STAMP_OWNERSHIP_DENIED"), (400, "EXTENSION_TOO_SMALL"), (400, "STAMP_COST_EXCEEDS_LIMIT"),
+        (503, "GATEWAY_DAILY_SPEND_CEILING"),
+    ])
+    def test_extend_refusal_does_not_count_a_payment(self, requests_mock, status, code):
+        """#215: reproduced in the #214 review as 'Payments sent: $0.050000 USDC (1 payment(s))'."""
+        result = self._extend(requests_mock, self._refusal(status, code, "Refused before payment."))
+        assert result.exit_code == 1
+        assert f"HTTP {status} {code}: Refused before payment." in result.output
+        assert "Payments sent" not in result.output
+
+    def test_extend_validation_error_does_not_count_a_payment(self, requests_mock):
+        result = self._extend(requests_mock, {"status_code": 422, "json": {
+            "detail": [{"loc": ["body", "duration_hours"], "msg": "too large"}],
+            "code": "VALIDATION_ERROR", "message": "The request is invalid; see detail for the fields."}})
+        assert result.exit_code == 1
+        assert "HTTP 422" in result.output
+        assert "Payments sent" not in result.output
+
+    @pytest.mark.parametrize("status,code", [
+        (400, "STAMP_COST_EXCEEDS_LIMIT"), (503, "GATEWAY_DAILY_SPEND_CEILING"), (503, "PURCHASE_CAPACITY"),
+    ])
+    def test_purchase_refusal_does_not_count_a_payment(self, requests_mock, status, code):
+        result = self._upload(requests_mock, self._refusal(status, code, "Refused before payment."))
+        assert result.exit_code == 1
+        assert code in result.output
+        assert "Payments sent" not in result.output
+
+    def test_extend_settled_not_delivered_still_counts_the_payment(self, requests_mock):
+        result = self._extend(requests_mock, {
+            "status_code": 400, "headers": {"X-Payment-Status": "settled_not_delivered",
+                                            "X-Payment-Transaction": "0x" + "cd" * 32},
+            "json": {"detail": "Bee refused the top-up."}})
+        assert result.exit_code == 1
+        assert "Payment was taken, but the stamp extension failed" in result.output
+        assert "Payments sent: $0.050000 USDC (1 payment(s))" in result.output
+
+    def test_purchase_success_still_counts_the_payment(self, requests_mock):
+        requests_mock.post(f"{self.GW}/api/v1/stamps/", [self.PAYMENT_REQUIRED, {
+            "status_code": 201, "json": {"batchID": DUMMY_STAMP}}])
+        requests_mock.post(f"{self.GW}/api/v1/data/", status_code=500, json={"detail": "boom"})
+        requests_mock.get(f"{self.GW}/api/v1/stamps/{DUMMY_STAMP}", json={
+            "batchID": DUMMY_STAMP, "usable": True, "exists": True, "depth": 17, "amount": "1",
+            "bucketDepth": 16, "immutableFlag": False, "batchTTL": 3600})
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--x402", "--gateway-url", self.GW, "upload", "--file", "d.txt"])
+        assert "Postage stamp purchased" in result.output, result.output
+        assert "Payments sent: $0.050000 USDC (1 payment(s))" in result.output
+
+
+# --- A paid 2xx whose body could not be read (#216) ---
+
+class TestPaidResultUnreadableCli:
+    PAYER = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
+    PAYMENT = dict(payer=PAYER, nonce="0x" + "ab" * 32, amount_usd="$0.050000", network="base-sepolia",
+                   transaction="0x" + "cd" * 32, idempotency_key="key-216", status_code=201)
+
+    def _error(self):
+        return exceptions.PaymentResultUnreadableError(
+            "The payment was collected and the gateway answered HTTP 201, but its response "
+            "could not be read (ValueError: not JSON).", **self.PAYMENT)
+
+    def _client(self, mocker, **behaviour):
+        mock_client = mocker.MagicMock()
+        mock_client.purchase_stamp.return_value = DUMMY_STAMP
+        mock_client.get_pool_available_count.return_value = 1
+        mock_client.get_stamp.return_value = StampDetails(
+            batchID=DUMMY_STAMP, usable=True, exists=True, depth=17, amount="1",
+            bucketDepth=16, immutableFlag=False, batchTTL=3600,
+        )
+        mock_client.upload_data.return_value = DUMMY_SWARM_REF
+        for name, effect in behaviour.items():
+            getattr(mock_client, name).side_effect = effect
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
+        return mock_client
+
+    def _upload(self, *args):
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            return runner.invoke(app, ["--x402", "upload", "--file", "d.txt", *args])
+
+    def _assert_common(self, result):
+        # A warning, not an error: the request most likely worked. Exit 1 all the same.
+        assert result.exit_code == 1
+        assert "ERROR" not in result.output
+        assert "its result could not be read" in result.output
+        assert "Payment was taken, but" not in result.output
+        # With the key (PAYMENT has one) only a re-run without it pays again
+        assert "A re-run without the key pays again." in result.output
+        assert "cannot be looked up" not in result.output
+        assert self.PAYMENT["transaction"] in result.output
+
+    def test_extend(self, mocker):
+        self._client(mocker, extend_stamp=self._error())
+        result = runner.invoke(app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
+        self._assert_common(result)
+        assert "WARNING: The stamp extension most likely succeeded, but its result could not be read." \
+            in result.output
+        assert f"swarm-prov-upload stamps info {DUMMY_STAMP}" in result.output
+        assert ("The extension worked if the Amount it shows is higher and the TTL is longer "
+                "than before the extension.") in result.output
+        # A hedge: how soon Bee shows the new values is not verified
+        assert "may take a few minutes to show" in result.output
+        assert "per chunk" not in result.output
+        assert "SUCCESS" not in result.output
+
+    def test_stamp_purchase(self, mocker):
+        self._client(mocker, purchase_stamp=self._error())
+        result = self._upload()
+        self._assert_common(result)
+        assert "WARNING: The stamp purchase most likely succeeded, but its result could not be read." \
+            in result.output
+        assert f"swarm-prov-upload stamps list --wallet {self.PAYER} --full" in result.output
+        assert "TTL" not in result.output
+
+    def test_pool_acquisition(self, mocker):
+        self._client(mocker, acquire_stamp_from_pool=self._error())
+        result = self._upload("--usePool")
+        self._assert_common(result)
+        assert "WARNING: The pool stamp acquisition most likely succeeded, but its result could not be read." \
+            in result.output
+        assert f"swarm-prov-upload stamps list --wallet {self.PAYER} --full" in result.output
+
+    def test_upload(self, mocker):
+        self._client(mocker, upload_data=self._error())
+        result = self._upload()
+        self._assert_common(result)
+        assert "WARNING: The upload most likely succeeded, but its result could not be read." in result.output
+        assert "stamps info" not in result.output
+        assert "Swarm reference" in result.output
+
+    def test_stamp_purchase_without_payer(self, mocker):
+        """With no payer there is no check command, and the missing result is the batch ID."""
+        payment = dict(self.PAYMENT, payer=None)
+        self._client(mocker, purchase_stamp=exceptions.PaymentResultUnreadableError(
+            "The payment was collected and the gateway answered HTTP 201, but its response "
+            "could not be read (ValueError: not JSON).", **payment))
+        result = self._upload()
+        self._assert_common(result)
+        assert "WARNING: The stamp purchase most likely succeeded, but its result could not be read." \
+            in result.output
+        assert "stamps list" not in result.output
+        assert "Swarm reference" not in result.output
+        assert "batch ID" in result.output
+
+    def test_pool_acquisition_without_payer(self, mocker):
+        payment = dict(self.PAYMENT, payer=None)
+        self._client(mocker, acquire_stamp_from_pool=exceptions.PaymentResultUnreadableError(
+            "Unreadable.", **payment))
+        result = self._upload("--usePool")
+        self._assert_common(result)
+        assert "Swarm reference" not in result.output
+        assert "batch ID" in result.output
+
+    def test_extend_with_amount_names_it(self, mocker):
+        self._client(mocker, extend_stamp=self._error())
+        result = runner.invoke(app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--amount", "5000000000"])
+        self._assert_common(result)
+        assert "higher by 5000000000" in result.output
+
+    @pytest.mark.parametrize("what", ["upload", "purchase"])
+    def test_with_key_offers_the_same_key_rerun(self, mocker, what):
+        """#216: the gateway answers a same-key re-run from the stored 2xx result, without settling again."""
+        if what == "upload":
+            self._client(mocker, upload_data=self._error())
+        else:
+            self._client(mocker, purchase_stamp=self._error())
+        result = self._upload()
+        self._assert_common(result)
+        assert ("A gateway that supports Idempotency-Key answers a re-run with the same key from the "
+                "first request, without charging again. It returns the first answer, which includes the "
+                "result if a proxy or the connection lost it; if the gateway's own answer lacked it, the "
+                "replay lacks it too:") in result.output
+        assert "--idempotency-key key-216" in result.output
+
+    @pytest.mark.parametrize("what", ["upload", "purchase"])
+    def test_without_key_no_rerun_offer(self, mocker, what):
+        err = exceptions.PaymentResultUnreadableError(
+            "Unreadable.", **dict(self.PAYMENT, idempotency_key=None))
+        if what == "upload":
+            self._client(mocker, upload_data=err)
+        else:
+            self._client(mocker, purchase_stamp=err)
+        result = self._upload()
+        assert result.exit_code == 1
+        assert "Idempotency-Key" not in result.output
+        assert "--idempotency-key" not in result.output
+        assert "Re-running pays again." in result.output
+        assert "cannot be looked up" not in result.output
+
+    def test_stamp_purchase_shows_the_label_and_no_depth_or_ttl(self, mocker):
+        """#216: only claims that hold for every CLI purchase (the gateway may use a size preset over
+        --depth, and --amount sets the TTL), so neither depth nor TTL is stated."""
+        err = self._error()
+        err.label_prefix = "paid-"
+        err.depth = 20  # even if a caller sets it, the CLI does not state it
+        self._client(mocker, purchase_stamp=err)
+        result = self._upload("--size", "small", "--depth", "20")
+        self._assert_common(result)
+        assert "Stamp label:     paid-<suffix>" in result.output
+        assert ("Stamps the CLI buys have a label that starts with paid- (most stamps from the pool "
+                "start with pool-). The new one has utilization 0%.") in result.output
+        assert ("It may show Usable: No, or not be listed yet, for a few minutes after the purchase."
+                in result.output)
+        report = result.output.split("most likely succeeded")[1]
+        assert "Depth" not in report and "depth" not in report
+        assert "TTL" not in report and "duration" not in report
+        assert "newest" not in report
+        assert "look for the stamp whose label starts with" not in report
+
+    def test_stamp_purchase_with_amount_states_no_ttl(self, mocker):
+        err = self._error()
+        err.label_prefix = "paid-"
+        self._client(mocker, purchase_stamp=err)
+        result = self._upload("--amount", "100000000")
+        report = result.output.split("most likely succeeded")[1]
+        assert "The new one has utilization 0%." in report
+        assert "TTL" not in report and "duration" not in report
+
+    def test_library_label_prefix_is_looked_for(self, mocker):
+        """Only a library call of purchase_stamp(label=...) gives a prefix of its own."""
+        err = self._error()
+        err.label_prefix = "mine-"
+        self._client(mocker, purchase_stamp=err)
+        result = self._upload()
+        assert "In that list, look for the stamp whose label starts with mine-." in result.output
+
+    def test_pool_acquisition_shows_no_label(self, mocker):
+        self._client(mocker, acquire_stamp_from_pool=self._error())
+        result = self._upload("--usePool")
+        self._assert_common(result)
+        assert "Stamp label" not in result.output
+        assert "label starts with" not in result.output
+        assert ("It may show Usable: No, or not be listed yet, for a few minutes after the purchase."
+                in result.output)
+
+    def test_upload_has_no_purchase_timing_note(self, mocker):
+        self._client(mocker, upload_data=self._error())
+        result = self._upload()
+        assert "Usable: No" not in result.output
+
+    def test_other_settled_report_unchanged(self, mocker):
+        err = exceptions.PaymentSettledNotDeliveredError("Collected, failed.", **self.PAYMENT)
+        self._client(mocker, extend_stamp=err)
+        result = runner.invoke(app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
+        assert result.exit_code == 1
+        assert "ERROR: Payment was taken, but the stamp extension failed" in result.output
+        assert "most likely succeeded" not in result.output
+        assert "Contact the gateway operator with the transaction above" in result.output
+
+
+# --- A paid pool acquire answered 2xx with success:false (#209) ---
+
+class TestPaidPoolAcquireNotAcquiredCli:
+    GW = "https://test.gateway.io"
+
+    def test_reported_as_paid_and_not_delivered(self, mocker, requests_mock):
+        from swarm_provenance_uploader.core.gateway_client import GatewayClient
+        from tests.test_gateway_client import _signed_header
+
+        mocker.patch.object(GatewayClient, "_approve_payment",
+                            return_value=(_signed_header(), "$0.050000", None))
+        mocker.patch.object(GatewayClient, "get_pool_available_count", return_value=1)
+        requests_mock.post(f"{self.GW}/api/v1/pool/acquire", [
+            {"status_code": 402, "json": {"accepts": []}},
+            {"status_code": 200, "json": {"success": False, "message": "Not\x1b[2J acquired",
+                                          "fallback_used": False}}])
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--x402", "--gateway-url", self.GW, "upload", "--file", "d.txt",
+                                         "--usePool"])
+        assert result.exit_code == 1
+        assert "Payment was taken, but the pool stamp acquisition failed" in result.output
+        assert "Re-running pays again" in result.output
+        assert "Retry may succeed" not in result.output
+        assert "Try again immediately" not in result.output
+        assert "\x1b" not in result.output
+        assert "Payments sent: $0.050000 USDC (1 payment(s))" in result.output
