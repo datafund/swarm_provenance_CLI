@@ -12,7 +12,7 @@ import ast
 import functools
 import json
 import logging
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from ..chain.contract import DataStatus
 from ..chain.redact import redact_url, redact_urls
@@ -406,6 +406,7 @@ class ChainClient:
         gas_limit: Optional[int] = None,
         rpc_fallbacks: Optional[List[str]] = None,
         require_wallet: bool = True,
+        deploy_block: Optional[Union[int, str]] = None,
     ):
         """
         Initialize the chain client.
@@ -424,6 +425,10 @@ class ChainClient:
                 False, load it on first use, so read-only operations work
                 without a key. Writes, balance() and address then raise
                 ChainConfigurationError when no key is configured.
+            deploy_block: Block the contract was deployed in, where event
+                scans start (CHAIN_DEPLOY_BLOCK). If None, the preset's
+                deploy block is used for the preset's own contract, and a
+                custom contract has none (see ChainProvider).
 
         Raises:
             ChainConfigurationError: If dependencies missing or config invalid,
@@ -438,6 +443,7 @@ class ChainClient:
             contract_address=contract_address,
             explorer_url=explorer_url,
             rpc_fallbacks=rpc_fallbacks,
+            deploy_block=deploy_block,
         )
         self._private_key = private_key
         self._private_key_env = private_key_env
@@ -1451,7 +1457,8 @@ class ChainClient:
             if deploy_block is None:
                 logger.warning(
                     "Duplicate transformation check skipped: the contract has no "
-                    "transformation links and its deploy block is unknown."
+                    "transformation links and its deploy block is unknown. "
+                    "Set CHAIN_DEPLOY_BLOCK to the block the contract was deployed in."
                 )
             else:
                 try:

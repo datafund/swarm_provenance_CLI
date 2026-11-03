@@ -8,7 +8,8 @@ Requires optional dependencies (the `blockchain` extra): web3 and eth-account.
 """
 
 import logging
-from typing import List, Optional
+import re
+from typing import List, Optional, Union
 
 from .exceptions import ChainConfigurationError, ChainConnectionError, ChainIdMismatchError
 from .redact import redact_url, register_url_secrets
@@ -93,6 +94,31 @@ def _preset_strings() -> List[str]:
     return strings
 
 
+def _parse_deploy_block(value) -> Optional[int]:
+    """The deploy block from CHAIN_DEPLOY_BLOCK or the deploy_block argument (#231).
+
+    None or a blank string means not set. An int of 0 or more, or a string
+    of ASCII digits (surrounding spaces are ignored), is the block number.
+
+    Raises:
+        ChainConfigurationError: For any other value.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if re.fullmatch(r"[0-9]+", text):
+            return int(text)
+    elif isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    raise ChainConfigurationError(
+        "CHAIN_DEPLOY_BLOCK (deploy_block) must be a non-negative integer, "
+        f"the block the contract was deployed in; got {value!r}"
+    )
+
+
 class ChainProvider:
     """Provider for Web3 connections to supported EVM chains.
 
@@ -115,6 +141,7 @@ class ChainProvider:
         explorer_url: Optional[str] = None,
         rpc_fallbacks: Optional[List[str]] = None,
         request_timeout: int = 30,
+        deploy_block: Optional[Union[int, str]] = None,
     ):
         """
         Initialize the chain provider.
@@ -127,6 +154,11 @@ class ChainProvider:
             rpc_fallbacks: Fallback RPC URLs tried in order on failure.
                 If None and no custom rpc_url, uses preset fallbacks.
             request_timeout: HTTP request timeout in seconds (default 30).
+            deploy_block: Block the contract was deployed in, where event
+                scans start (CHAIN_DEPLOY_BLOCK): an int of 0 or more, or a
+                string of digits. If None, the preset's deploy block is
+                used for the preset's own contract; a custom contract
+                address then has no known deploy block (#231).
 
         Raises:
             ChainConfigurationError: If chain is unsupported or web3 not installed.
@@ -143,7 +175,21 @@ class ChainProvider:
         self.rpc_url = rpc_url or preset["rpc_url"]
         self.explorer_url = explorer_url or preset["explorer_url"]
         self.contract_address = contract_address or preset["contract_address"]
-        self.deploy_block = preset.get("deploy_block")
+        # The preset's deploy block belongs to the preset's contract. For a
+        # custom contract it is unknown unless given: a contract deployed
+        # before the preset block would lose its older events (#231)
+        deploy_block = _parse_deploy_block(deploy_block)
+        preset_contract = preset["contract_address"]
+        if deploy_block is not None:
+            self.deploy_block = deploy_block
+        elif (
+            preset_contract
+            and self.contract_address
+            and self.contract_address.lower() == preset_contract.lower()
+        ):
+            self.deploy_block = preset.get("deploy_block")
+        else:
+            self.deploy_block = None
         self._custom_rpc = rpc_url is not None
         self._request_timeout = request_timeout
         # True while ChainClient's fallback loop (_with_fallback) runs: the

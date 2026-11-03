@@ -90,6 +90,7 @@ _chain_config = {
     "wallet_key_env": config.CHAIN_WALLET_KEY_ENV,
     "explorer_url": config.CHAIN_EXPLORER_URL,
     "gas_limit": config.CHAIN_GAS_LIMIT,
+    "deploy_block": config.CHAIN_DEPLOY_BLOCK,
 }
 
 
@@ -129,6 +130,7 @@ def _get_chain_client(verbose: bool = False, require_wallet: bool = False):
             private_key_env=_chain_config["wallet_key_env"],
             explorer_url=_chain_config["explorer_url"],
             gas_limit=_chain_config.get("gas_limit"),
+            deploy_block=_chain_config.get("deploy_block"),
             require_wallet=require_wallet,
         )
     except exceptions.ChainConfigurationError as e:

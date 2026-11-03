@@ -515,7 +515,8 @@ def test_max_auto_pay_kept_as_written(tmp_path, raw, kept):
 def test_chain_deploy_block_read_from_env(tmp_path):
     tmp_path = tmp_path / "work"
     tmp_path.mkdir()
-    env = _clean_env(CHAIN_DEPLOY_BLOCK="12345")
+    # PYTHONPATH: import this checkout, whatever copy is installed
+    env = _clean_env(CHAIN_DEPLOY_BLOCK="12345", PYTHONPATH=str(ROOT))
     out = _run("import swarm_provenance_uploader.config as c; print(repr(c.CHAIN_DEPLOY_BLOCK))", tmp_path, env)
     assert out == ["'12345'"]
 

@@ -6352,6 +6352,7 @@ class TestLinksProbeUsesFallbacks:
             client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
 
         assert "Duplicate transformation check skipped" in caplog.text
+        assert "CHAIN_DEPLOY_BLOCK" in caplog.text
         mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_called_once()
 
 
