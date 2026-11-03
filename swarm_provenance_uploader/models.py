@@ -72,8 +72,10 @@ class StampExtensionResponse(BaseModel):
     message: Optional[str] = Field(default=None, description="Status message")
     expires_at: Optional[str] = Field(
         default=None,
-        description="Estimated new expiry (UTC, ISO 8601) from the stamp's TTL on the node, "
-                    "at today's price; None if the node has not reported it yet",
+        description="The expiry the gateway reported after the extension (UTC, ISO 8601): an "
+                    "estimate from the stamp's TTL on the node at today's price, read right after "
+                    "the top-up, so it may not include the extension yet; None if the gateway did "
+                    "not report one",
     )
 
     @field_validator("expires_at", mode="before")

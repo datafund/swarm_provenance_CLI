@@ -80,11 +80,24 @@ def _json_error(error: str, message: str, **extra) -> None:
 
 
 def _json_command(func):
-    """Run a command in _json_mode when its --json option (output_json) is set."""
+    """Run a command in _json_mode when its --json option (output_json) is set.
+
+    For upload-collection: an error the command does not handle exits 1 with
+    an upload_failed document (with --json) and a redacted text error.
+    """
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         with _json_mode(bool(kwargs.get("output_json"))):
-            return func(*args, **kwargs)
+            try:
+                return func(*args, **kwargs)
+            except (click.exceptions.Exit, click.exceptions.Abort, click.ClickException):
+                raise
+            except Exception as e:
+                # An error the command does not handle: one redacted line, no traceback
+                message = f"Upload failed: {type(e).__name__}: {redact_urls(str(e))}"
+                _json_error("upload_failed", message)
+                typer.secho(f"ERROR: {message}", fg=typer.colors.RED, err=True)
+                raise typer.Exit(code=1)
     return wrapper
 
 
@@ -102,16 +115,21 @@ class _JsonErrorsGroup(TyperGroup):
         """--flag=value becomes --flag for a boolean flag of command.
 
         A value for a flag is a usage error, and click's resilient parsing
-        stops at it, before the tokens that follow (such as --json).
+        stops at it, before the tokens that follow (such as --json). Tokens
+        after "--" are rewritten too, because "--" can be an option's value;
+        the parser still reads a real "--" as the end of the options. For a
+        group, only the tokens before its subcommand are its own.
         """
         flags = {name for p in command.params if isinstance(p, click.Option) and p.is_flag
                  for name in (*p.opts, *p.secondary_opts) if name.startswith("--")}
-        out = []
-        for i, token in enumerate(args):
-            if token == "--":
-                return out + list(args[i:])
+        subcommands = getattr(command, "commands", {})
+        out = list(args)
+        for i, token in enumerate(out):
+            if token in subcommands:
+                break
             name = token.split("=", 1)[0]
-            out.append(name if "=" in token and name in flags else token)
+            if "=" in token and name in flags:
+                out[i] = name
         return out
 
     def _json_requested(self, args) -> bool:
@@ -1530,6 +1548,10 @@ def upload_collection(
         _json_error("invalid_input", str(e))
         typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+    except OSError as e:  # for example a file that cannot be read
+        _json_error("upload_failed", f"Failed reading the directory: {redact_urls(str(e))}", step="scan")
+        typer.secho(f"ERROR: Failed reading the directory: {redact_urls(str(e))}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
 
     total_size = sum(f["size"] for f in file_infos)
 
@@ -1700,13 +1722,20 @@ def _format_usable(usable: Optional[bool], width: int = 0) -> str:
     return typer.style(f"{'No':<{width}}", fg=typer.colors.RED)
 
 
+# The gateway's UTC timestamp (2026-09-25T10:00:00Z), also with +00:00 and up to
+# microseconds. An explicit pattern, because datetime.fromisoformat accepts
+# more forms on Python 3.11+ than on 3.9 (#217).
+_GATEWAY_TIMESTAMP = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|\+00:00)")
+
+
 def _is_iso_timestamp(value: Optional[str]) -> bool:
-    """True for an ISO 8601 date and time from the gateway, such as 2026-12-01T10:00:00Z (#217)."""
-    if not isinstance(value, str) or not 10 <= len(value) <= 40 or "T" not in value:
-        return False  # a date alone has no time part
+    """True for a UTC date and time in the gateway's form, such as 2026-12-01T10:00:00Z (#217)."""
+    if not isinstance(value, str) or not _GATEWAY_TIMESTAMP.fullmatch(value):
+        return False
     from datetime import datetime
     try:
-        datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+        datetime.strptime(value[:19], "%Y-%m-%dT%H:%M:%S")  # a real date and time
     except ValueError:
         return False
     return True
@@ -1897,14 +1926,14 @@ def stamps_extend(
                                                 verbose=verbose)
         typer.secho(f"SUCCESS: Stamp extended.", fg=typer.colors.GREEN)
         typer.echo(f"Batch ID: {result.batchID}")
-        # Not the new expiry for certain: the gateway reads it right after the
-        # top-up, and Bee may apply the top-up later
+        # The gateway reads the expiry right after the top-up, so it may not
+        # include this extension yet
         if _is_iso_timestamp(result.expires_at):
-            typer.echo(f"Expiry reported by the gateway: {result.expires_at} (estimate at today's price; "
-                       "it can take a few minutes to include this extension, check with: "
-                       f"swarm-prov-upload stamps info {result.batchID})")
+            typer.echo(f"Expiry reported by the gateway: {result.expires_at} (an estimate at today's "
+                       "price, read right after the top-up; it may not include this extension yet. "
+                       f"Check with: swarm-prov-upload stamps info {result.batchID})")
         else:
-            typer.echo("Expiry: not reported by the gateway yet. Check it later with: "
+            typer.echo("Expiry: not available. Check with: "
                        f"swarm-prov-upload stamps info {result.batchID}")
     except exceptions.PaymentRequiredError as e:
         _report_payment_required(e)
@@ -2561,6 +2590,7 @@ def _insufficient_funds_json(e: "exceptions.InsufficientFundsError") -> dict:
 
     data = {
         "error": "insufficient_funds",
+        "message": str(e),
         "wallet_address": e.wallet_address,
         "balance_eth": f"{(e.balance_wei or 0) / 1e18:.6f}",
         "estimated_cost_eth": f"{(e.estimated_cost_wei or 0) / 1e18:.6f}",
@@ -2745,6 +2775,7 @@ def _not_recorded_json(e: "exceptions.TransactionUnconfirmedError") -> dict:
         error = "not_verified"
     data = {
         "error": error,
+        "message": redact_urls(str(e)),
         "tx_hash": e.tx_hash,
         "explorer_url": e.explorer_url,
         "contract_address": e.contract_address,
@@ -3269,6 +3300,7 @@ def chain_anchor(
             from datetime import datetime, timezone
             _echo_json(json.dumps({
                 "error": "already_registered",
+                "message": str(e),
                 "data_hash": e.data_hash,
                 "owner": e.owner,
                 "timestamp": e.timestamp,

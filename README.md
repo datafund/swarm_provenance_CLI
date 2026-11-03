@@ -574,8 +574,8 @@ swarm-prov-upload stamps list --full --wallet 0xYourPayerAddress
 swarm-prov-upload stamps info <stamp_id>
 
 # Extend stamp TTL by 48 hours (paid; a stamp you bought needs --x402 from the same wallet)
-# Prints the batch ID and the expiry the gateway reports, an estimate that can take a few minutes
-# to include the extension (check it with stamps info)
+# Prints the batch ID and the expiry the gateway reports: an estimate read right after the top-up,
+# which may not include the extension yet (check it with stamps info)
 swarm-prov-upload --x402 stamps extend <stamp_id> --duration-hours 48
 
 # Check stamp health (can it be used for uploads?)

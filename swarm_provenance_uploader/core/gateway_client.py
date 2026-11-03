@@ -1292,7 +1292,8 @@ class GatewayClient:
         Extend an existing stamp and return its batch ID.
 
         Takes the same arguments, and raises the same errors, as
-        extend_stamp_details(), which also returns the new expiry.
+        extend_stamp_details(), which also returns the expiry the gateway
+        reported after the extension.
 
         Returns:
             The batch ID of the extended stamp.
@@ -1326,8 +1327,12 @@ class GatewayClient:
                             is given, the gateway adds its default (25 hours).
 
         Returns:
-            The StampExtensionResponse: batchID, message and expires_at (the
-            estimated new expiry, or None if the node has not reported it yet).
+            The StampExtensionResponse: batchID, message and expires_at. The
+            gateway reads expires_at from the stamp's TTL right after the
+            top-up, so it is an estimate that may not include the extension
+            yet. It is None when the gateway sent none, for example because
+            its Bee lookup failed or was too slow, or sent a value that is not
+            a string.
 
         Raises:
             ValueError: Bad stamp ID, both amount and duration_hours given,
