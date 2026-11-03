@@ -12,9 +12,9 @@ import ast
 import functools
 import json
 import logging
-from typing import List, Optional, Union
+from typing import List, NoReturn, Optional, Union
 
-from ..chain.contract import EVENT_LOOKBACK_BLOCKS, DataStatus
+from ..chain.contract import EVENT_LOOKBACK_BLOCKS, DataStatus, _normalize_hash
 from ..chain.redact import redact_url, redact_urls
 from ..chain.exceptions import (
     ChainError,
@@ -221,6 +221,19 @@ def _duplicate_check_error(error: Exception, rpc_url: Optional[str]) -> ChainErr
     return ChainError(
         f"An error stopped the duplicate transformation check: {reason}. Nothing was sent."
     )
+
+
+def _raise_duplicate_check_error(error: Exception, rpc_url: Optional[str]) -> NoReturn:
+    """Raise the error for transform()'s duplicate check that could not run.
+
+    A ChainError other than ChainConnectionError (for example
+    ChainValidationError or ChainConfigurationError) is raised unchanged,
+    as in _traversal_error; everything else is mapped by
+    _duplicate_check_error and chained to the original error.
+    """
+    if isinstance(error, ChainError) and not isinstance(error, ChainConnectionError):
+        raise error
+    raise _duplicate_check_error(error, rpc_url) from error
 
 
 def _signed_tx_hash(raw_tx) -> Optional[str]:
@@ -1428,6 +1441,13 @@ class ChainClient:
             description,
         )
 
+        # Both hashes as lower-case hex without 0x, the form the links and
+        # the event cache use, so a 0x prefix or upper case still finds a
+        # duplicate. This also validates them (ChainValidationError) before
+        # any read. The transaction and the result use the input as before.
+        original_key = _normalize_hash(original_hash).hex()
+        new_key = _normalize_hash(new_hash).hex()
+
         # Pre-check: avoid wasting gas on duplicate transformations.
         # Prefer state read on v2 contracts, fall back to event cache.
         # Transport failures go through the fallbacks (#168). If the check
@@ -1442,7 +1462,7 @@ class ChainClient:
                 self._provider, lambda: self._contract.supports_transformation_links()
             )
         except Exception as e:
-            raise _duplicate_check_error(e, self._provider.rpc_url) from e
+            _raise_duplicate_check_error(e, self._provider.rpc_url)
         if is_v2:
             try:
                 links = _with_fallback(
@@ -1455,7 +1475,7 @@ class ChainClient:
                         if isinstance(existing_new, bytes)
                         else str(existing_new)
                     )
-                    if existing_hex == new_hash:
+                    if existing_hex.lower().removeprefix("0x") == new_key:
                         raise TransformationAlreadyExistsError(
                             f"Transformation {original_hash[:16]}... -> {new_hash[:16]}... already exists",
                             original_hash=original_hash,
@@ -1465,7 +1485,7 @@ class ChainClient:
             except TransformationAlreadyExistsError:
                 raise
             except Exception as e:
-                raise _duplicate_check_error(e, self._provider.rpc_url) from e
+                _raise_duplicate_check_error(e, self._provider.rpc_url)
         else:
             deploy_block = self._provider.deploy_block
             if deploy_block is None:
@@ -1488,8 +1508,8 @@ class ChainClient:
                         return cache.get_maps(self._contract, deploy_block, current_block)
 
                     forward, _ = _with_fallback(self._provider, scan)
-                    for existing_new, existing_desc in forward.get(original_hash, []):
-                        if existing_new == new_hash:
+                    for existing_new, existing_desc in forward.get(original_key, []):
+                        if existing_new == new_key:
                             raise TransformationAlreadyExistsError(
                                 f"Transformation {original_hash[:16]}... -> {new_hash[:16]}... already exists",
                                 original_hash=original_hash,
@@ -1499,7 +1519,7 @@ class ChainClient:
                 except TransformationAlreadyExistsError:
                     raise
                 except Exception as e:
-                    raise _duplicate_check_error(e, self._provider.rpc_url) from e
+                    _raise_duplicate_check_error(e, self._provider.rpc_url)
 
         tx = self._build_tx(
             self._contract.build_record_transformation_tx,

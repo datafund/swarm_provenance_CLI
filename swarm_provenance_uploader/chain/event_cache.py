@@ -17,6 +17,8 @@ from __future__ import annotations
 import logging
 import threading
 
+from .exceptions import ChainConfigurationError
+
 logger = logging.getLogger(__name__)
 
 # Module-level singleton registry keyed by
@@ -63,12 +65,23 @@ class TransformationEventCache:
               reverse: new_hex -> [(original_hex, description), ...]
 
         Raises:
+            ChainConfigurationError: On the first scan, if deploy_block is
+                later than current_block (#231).
             Exception: Propagated from contract.get_all_transformations()
                 or contract.get_all_merge_events() on scan failure. The
                 maps and the scan marker are then unchanged.
         """
         with self._lock:
             if self._last_scanned_block is None:
+                if deploy_block > current_block:
+                    # Nothing to scan would read as "no transformations".
+                    # Usually a CHAIN_DEPLOY_BLOCK set for another chain.
+                    raise ChainConfigurationError(
+                        f"The deploy block ({deploy_block:,}) is later than the "
+                        f"chain head (block {current_block:,}), so the contract's "
+                        "events cannot be read. Check that CHAIN_DEPLOY_BLOCK "
+                        "belongs to the selected chain and contract."
+                    )
                 from_block = deploy_block
             else:
                 from_block = self._last_scanned_block + 1
