@@ -523,6 +523,7 @@ def _gas_env(value):
     env.pop("CHAIN_GAS_LIMIT", None)
     if value is not None:
         env["CHAIN_GAS_LIMIT"] = value
+    env["PYTHONIOENCODING"] = "utf-8"  # the full-width digits case
     return env
 
 
@@ -535,7 +536,7 @@ def test_gas_limit_setting_accepted(tmp_path, raw, limit):
     assert out == [repr(limit), "None"]
 
 
-@pytest.mark.parametrize("raw", ["0", "-1", "20999", "abc", "1.5"])
+@pytest.mark.parametrize("raw", ["0", "-1", "20999", "abc", "1.5", "50_000", "+50000", "\uff15\uff10\uff10\uff10\uff10"])
 def test_gas_limit_setting_rejected(tmp_path, raw):
     """A value that is not a whole number of at least 21000 is not used, and the error names CHAIN_GAS_LIMIT."""
     tmp_path = tmp_path / "work"

@@ -5126,17 +5126,23 @@ class TestChainGasLimitFlag:
         assert option.type.min == 21000
         assert option.type.max is None
 
-    @pytest.mark.parametrize("value", ["0", "-1", "20999"])
+    @pytest.mark.parametrize("value", ["0", "-1", "20999", "1.5", "abc"])
     def test_gas_below_minimum_is_usage_error(self, mocker, value):
-        """--gas below 21000 is a usage error (exit 2) before a chain client is built (#226)."""
+        """--gas below 21000 or not a whole number is a usage error (exit 2) before a chain client is built (#226)."""
         get_client = mocker.patch("swarm_provenance_uploader.cli._get_chain_client")
+        try:
+            separate = CliRunner(mix_stderr=False)
+        except TypeError:  # Click 8.2+ always keeps stdout and stderr apart
+            separate = CliRunner()
 
-        result = runner.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--gas", value])
+        result = separate.invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--gas", value])
 
         assert result.exit_code == 2
-        output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        assert result.stdout == ""
+        output = re.sub(r"\x1b\[[0-9;]*m", "", result.stderr)
         assert "--gas" in output
-        assert "21000" in output
+        if value not in ("1.5", "abc"):
+            assert "21000" in output
         get_client.assert_not_called()
 
     def test_gas_minimum_accepted(self, mocker):
