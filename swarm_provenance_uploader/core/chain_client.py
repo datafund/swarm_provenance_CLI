@@ -2142,11 +2142,12 @@ class ChainClient:
             # Per-node queries: complete only if their window reaches block 0
             # (#231). They read only DataTransformed. That loses no edges:
             # this path runs only for a contract without getTransformationLinks
-            # (the probe answered with a revert or an empty result), and
-            # DataMerged, its scan (get_all_merge_events) and
-            # getTransformationLinks arrived together in the
-            # ConsentsBasedDataProvenance contract, commit 10192a5 (#90). A
-            # contract from before that commit emits no DataMerged events.
+            # (the probe answered with a revert or an empty result). The
+            # DataMerged event, recordMergeTransformation and
+            # getTransformationLinks arrived together in the contract
+            # (ConsentsBasedDataProvenance commit 0a33499), so a contract
+            # without getTransformationLinks emits no DataMerged events. The
+            # CLI's DataMerged scan (get_all_merge_events) followed in #90.
             latest = self._provider.web3.eth.block_number
             per_node_latest = latest
             if latest > EVENT_LOOKBACK_BLOCKS:
