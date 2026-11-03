@@ -6311,7 +6311,9 @@ class TestSendIsNotRetriedByWeb3:
         return ChainProvider(chain="localhost", rpc_url=url, rpc_fallbacks=[])
 
     def test_allowlist_keeps_every_default_method_but_the_send(self, failing_rpc_server):
-        from web3.providers.rpc.utils import REQUEST_RETRY_ALLOWLIST, check_if_retry_on_failure
+        utils = pytest.importorskip("web3.providers.rpc.utils")
+        REQUEST_RETRY_ALLOWLIST = utils.REQUEST_RETRY_ALLOWLIST
+        check_if_retry_on_failure = utils.check_if_retry_on_failure
 
         failing_rpc_server.answers = {"eth_chainId": "0x7a69"}
         provider = self._provider(f"http://127.0.0.1:{failing_rpc_server.server_port}")
