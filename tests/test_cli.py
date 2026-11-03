@@ -9110,6 +9110,26 @@ class TestOutcomeUnknownAfterTheSend:
         assert "limit exceeded" in result.stderr
         web3.eth.send_raw_transaction.assert_called_once()
 
+    def test_receipt_wait_rpc_error_json(self, real_web3_errors, mock_chain_deps, not_registered):
+        """#228: the same with --json: outcome_unknown on stdout, exit 3."""
+        from typer.testing import CliRunner as _Runner
+
+        _use_real_web3_errors(real_web3_errors)
+        web3 = mock_chain_deps["web3_instance"]
+        web3.eth.wait_for_transaction_receipt.side_effect = _rpc_error_answer(
+            real_web3_errors, "limit exceeded"
+        )
+
+        result = _Runner(mix_stderr=False).invoke(app, ["chain", "anchor", self.HASH, "--json"])
+
+        assert result.exit_code == 3, result.stdout + result.stderr
+        data = json.loads(result.stdout)
+        assert data["error"] == "outcome_unknown"
+        assert data["tx_hash"] in (self.SENT, self.SENT[2:])
+        assert data["reason"] == "limit exceeded"
+        assert data["wait_command"] == f"swarm-prov-upload chain wait {self.SENT} --event DataRegistered"
+        web3.eth.send_raw_transaction.assert_called_once()
+
     def test_chain_wait_rpc_error_json(self, real_web3_errors, mock_chain_deps):
         """#228: chain wait reports a JSON-RPC error answer as outcome unknown, exit 3."""
         from typer.testing import CliRunner as _Runner

@@ -6282,6 +6282,75 @@ class TestReceiptWaitErrorIsOutcomeUnknown:
         assert exc_info.value.tx_hash == _format_hash(DUMMY_TX_HASH_BYTES)
         web3.eth.send_raw_transaction.assert_called_once()
 
+    def test_wording_transport_failure_in_the_send(self, mock_chain_deps):
+        """The send raised before it returned the hash: the transaction may have been sent."""
+        import requests
+        from swarm_provenance_uploader.exceptions import TransactionOutcomeUnknownError
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
+        web3.eth.send_raw_transaction.side_effect = requests.exceptions.ConnectionError("reset")
+
+        with pytest.raises(TransactionOutcomeUnknownError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        text = str(exc_info.value)
+        assert "may have been sent, but the connection to the RPC failed while it was being sent" in text
+        assert "was sent" not in text
+
+    def test_wording_transport_failure_after_the_send(self, mock_chain_deps):
+        """The send returned the hash: the transaction was sent."""
+        import requests
+        from swarm_provenance_uploader.exceptions import TransactionOutcomeUnknownError
+
+        web3 = mock_chain_deps["web3_instance"]
+        client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
+        client._provider._try_fallback = MagicMock(return_value=False)
+        web3.eth.wait_for_transaction_receipt.side_effect = requests.exceptions.ConnectionError("reset")
+
+        with pytest.raises(TransactionOutcomeUnknownError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        text = str(exc_info.value)
+        assert "was sent, but the connection to the RPC failed" in text
+        assert "may have been sent" not in text
+
+    def test_wording_wait_for_transaction(self, real_web3_exceptions, mock_chain_deps):
+        """chain wait does not know whether the hash it was given was sent."""
+        from swarm_provenance_uploader.exceptions import (
+            ReceiptTimeoutError,
+            TransactionOutcomeUnknownError,
+        )
+
+        _inject_real_exceptions(real_web3_exceptions)
+        web3 = mock_chain_deps["web3_instance"]
+        client = _write_client(mock_chain_deps, [_log("DataRegistered")])
+        web3.eth.wait_for_transaction_receipt.side_effect = _rpc_error(
+            real_web3_exceptions, "limit exceeded"
+        )
+
+        with pytest.raises(TransactionOutcomeUnknownError) as exc_info:
+            client.wait_for_transaction("0x" + "bb" * 32, "DataRegistered")
+
+        assert not isinstance(exc_info.value, ReceiptTimeoutError)
+        assert "may have been sent" in str(exc_info.value)
+        assert "was sent" not in str(exc_info.value)
+
+    def test_wording_written_transaction_says_sent(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import TransactionOutcomeUnknownError
+
+        _inject_real_exceptions(real_web3_exceptions)
+        web3 = mock_chain_deps["web3_instance"]
+        client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
+        web3.eth.wait_for_transaction_receipt.side_effect = _rpc_error(
+            real_web3_exceptions, "limit exceeded"
+        )
+
+        with pytest.raises(TransactionOutcomeUnknownError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert "was sent, but the RPC failed while waiting for its receipt" in str(exc_info.value)
+
     def test_rejection_on_the_fallback(self, real_web3_exceptions, mock_chain_deps):
         """A transport failure moves the wait to a fallback, which answers with an error."""
         import requests
@@ -6587,3 +6656,26 @@ class TestRawErrorsFromWritesAreRedacted:
         _assert_raw_error_has_no_key(error)
         assert RPC_KEY not in repr(error.rpc_response)
         assert error.rpc_response["error"]["code"] == -32005
+
+
+class TestNestedExceptionArgsAreRedacted:
+    """An exception in the args of a passed-through exception is redacted too (#234)."""
+
+    @pytest.mark.parametrize("rpc_url", RPC_URLS_WITH_KEY, ids=RPC_URL_IDS)
+    def test_read_method(self, real_web3_exceptions, mock_chain_deps, rpc_url):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        _inject_real_exceptions(real_web3_exceptions)
+        raw = RuntimeError(ValueError(f"url {rpc_url} failed"))
+        mock_chain_deps["contract"].functions.getDataRecord.return_value.call.side_effect = raw
+        client = ChainClient(chain="base-sepolia", rpc_url=rpc_url, rpc_fallbacks=[])
+
+        with pytest.raises(RuntimeError) as exc_info:
+            client.get(DUMMY_HASH)
+
+        error = exc_info.value
+        assert error is raw
+        _assert_raw_error_has_no_key(error)
+        assert RPC_KEY not in repr(error.args)
+        assert "ValueError" in repr(error.args)
+        assert "failed" in str(error)
