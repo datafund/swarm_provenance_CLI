@@ -338,7 +338,7 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 | `PROVENANCE_WALLET_KEY` | Wallet private key (keep secret!) | - |
 | `CHAIN_RPC_URL` | Custom RPC URL (optional). With `base` or `base-sepolia`, it must report the preset chain ID | Uses preset |
 | `CHAIN_CONTRACT` | Custom contract address (optional) | Uses preset |
-| `CHAIN_DEPLOY_BLOCK` | Block the contract was deployed in, where event scans start (optional, a non-negative integer). Needed for `chain get --follow` on a v1 contract with a custom `CHAIN_CONTRACT`: a custom contract does not use the preset's deploy block | Preset's, for the preset contract only |
+| `CHAIN_DEPLOY_BLOCK` | Block the contract was deployed in, where event scans start (optional, a non-negative integer). Needed for `chain get --follow` on a v1 contract with a custom `CHAIN_CONTRACT`: a custom contract does not use the preset's deploy block. It also turns on the duplicate check of `chain transform` and `chain protect` on a v1 contract | Preset's, for the preset contract only |
 | `CHAIN_EXPLORER_URL` | Custom block explorer URL (optional) | Uses preset |
 | `CHAIN_GAS_LIMIT` | Explicit gas limit (optional, skips RPC estimation, so a transaction that would revert is still sent and costs gas) | Auto-estimated |
 | `CHAIN_RPC_URLS` | Comma-separated fallback RPC URLs, tried in order after the main RPC (optional, replaces the preset fallbacks). Like `CHAIN_RPC_URL`, applies whatever chain is selected | Uses preset fallbacks |
