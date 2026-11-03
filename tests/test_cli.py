@@ -9119,7 +9119,9 @@ class TestPaidResultUnreadableCli:
             return runner.invoke(app, ["--x402", "upload", "--file", "d.txt", *args])
 
     def _assert_common(self, result):
+        # A warning, not an error: the request most likely worked. Exit 1 all the same.
         assert result.exit_code == 1
+        assert "ERROR" not in result.output
         assert "its result could not be read" in result.output
         assert "Payment was taken, but" not in result.output
         assert "Re-running pays again" in result.output
@@ -9129,24 +9131,26 @@ class TestPaidResultUnreadableCli:
         self._client(mocker, extend_stamp=self._error())
         result = runner.invoke(app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
         self._assert_common(result)
-        assert "ERROR: The stamp extension most likely succeeded, but its result could not be read." \
+        assert "WARNING: The stamp extension most likely succeeded, but its result could not be read." \
             in result.output
         assert f"swarm-prov-upload stamps info {DUMMY_STAMP}" in result.output
+        assert "Compare the TTL it shows with the TTL before the extension" in result.output
         assert "SUCCESS" not in result.output
 
     def test_stamp_purchase(self, mocker):
         self._client(mocker, purchase_stamp=self._error())
         result = self._upload()
         self._assert_common(result)
-        assert "ERROR: The stamp purchase most likely succeeded, but its result could not be read." \
+        assert "WARNING: The stamp purchase most likely succeeded, but its result could not be read." \
             in result.output
         assert f"swarm-prov-upload stamps list --wallet {self.PAYER} --full" in result.output
+        assert "TTL" not in result.output
 
     def test_pool_acquisition(self, mocker):
         self._client(mocker, acquire_stamp_from_pool=self._error())
         result = self._upload("--usePool")
         self._assert_common(result)
-        assert "ERROR: The pool stamp acquisition most likely succeeded, but its result could not be read." \
+        assert "WARNING: The pool stamp acquisition most likely succeeded, but its result could not be read." \
             in result.output
         assert f"swarm-prov-upload stamps list --wallet {self.PAYER} --full" in result.output
 
@@ -9154,7 +9158,7 @@ class TestPaidResultUnreadableCli:
         self._client(mocker, upload_data=self._error())
         result = self._upload()
         self._assert_common(result)
-        assert "ERROR: The upload most likely succeeded, but its result could not be read." in result.output
+        assert "WARNING: The upload most likely succeeded, but its result could not be read." in result.output
         assert "stamps info" not in result.output
         assert "Swarm reference" in result.output
 
@@ -9166,7 +9170,7 @@ class TestPaidResultUnreadableCli:
             "could not be read (ValueError: not JSON).", **payment))
         result = self._upload()
         self._assert_common(result)
-        assert "ERROR: The stamp purchase most likely succeeded, but its result could not be read." \
+        assert "WARNING: The stamp purchase most likely succeeded, but its result could not be read." \
             in result.output
         assert "stamps list" not in result.output
         assert "Swarm reference" not in result.output
@@ -9186,7 +9190,7 @@ class TestPaidResultUnreadableCli:
         self._client(mocker, extend_stamp=err)
         result = runner.invoke(app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
         assert result.exit_code == 1
-        assert "Payment was taken, but the stamp extension failed" in result.output
+        assert "ERROR: Payment was taken, but the stamp extension failed" in result.output
         assert "most likely succeeded" not in result.output
         assert "Contact the gateway operator with the transaction above" in result.output
 
