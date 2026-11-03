@@ -35,7 +35,9 @@ def _json_mode(enabled: bool, redirect: bool = True):
     that is printed to stdout (progress, prompts, library debug lines) goes
     to stderr while the command runs, and _echo_json writes the document to
     the real stdout. sys.stdout is restored on exit, also when the command
-    raises. With JSON output off, _json_error does nothing.
+    raises. The redirect is process-wide: it replaces sys.stdout for every
+    thread while the command runs. With JSON output off, _json_error does
+    nothing.
     """
     previous = dict(_json_output)
     _json_output.update(stream=sys.stdout if enabled else None, written=False)
@@ -87,18 +89,51 @@ class _JsonErrorsGroup(TyperGroup):
     """The top-level command group: with --json, errors before the command runs are JSON too.
 
     The global option checks in main() and usage errors (exit 2) happen
-    before the command reads its own --json option, so here --json is
-    looked up in the command line.
+    before the command reads its own --json option. Group JSON mode is on
+    only when the command line names a command that has a --json option,
+    and that option is set (not an option value, not after "--").
     """
 
+    def _json_requested(self, args) -> bool:
+        """True if the command that args name has a --json option, and args set it."""
+        try:
+            ctx = self.make_context(self.name or "swarm-prov-upload", list(args),
+                                    resilient_parsing=True, ignore_unknown_options=True)
+            command, rest = self, [*ctx.protected_args, *ctx.args]
+            while isinstance(command, click.Group):
+                while rest and rest[0].startswith("-") and rest[0] != "--":
+                    rest.pop(0)  # an unknown option before the subcommand
+                name, command, rest = command.resolve_command(ctx, rest)
+                if command is None:
+                    return False
+                ctx = command.make_context(name, rest, parent=ctx, resilient_parsing=True,
+                                           ignore_unknown_options=True)
+                rest = [*ctx.protected_args, *ctx.args]
+            return any(p.name == "output_json" for p in command.params) and bool(ctx.params.get("output_json"))
+        except Exception:
+            return False
+
+    def main(self, args=None, *main_args, **kwargs):
+        requested = self._json_requested(sys.argv[1:] if args is None else args)
+        with _json_mode(requested, redirect=False):
+            return super().main(args, *main_args, **kwargs)
+
+    def parse_args(self, ctx, args):
+        try:
+            return super().parse_args(ctx, args)
+        except click.UsageError as e:
+            _json_error("invalid_input", e.format_message())
+            raise
+
     def invoke(self, ctx):
-        args = [*ctx.protected_args, *ctx.args]
-        with _json_mode("--json" in args, redirect=False):
-            try:
-                return super().invoke(ctx)
-            except click.UsageError as e:
-                _json_error("invalid_input", e.format_message())
-                raise
+        try:
+            return super().invoke(ctx)
+        except click.UsageError as e:
+            _json_error("invalid_input", e.format_message())
+            raise
+        except KeyboardInterrupt:
+            _json_error("interrupted", "Interrupted.")
+            raise
 
 
 app = typer.Typer(help="Swarm Provenance CLI - Wraps and uploads data to Swarm.", cls=_JsonErrorsGroup)
@@ -112,9 +147,9 @@ chain_app = typer.Typer(help="On-chain provenance anchoring (optional).")
 app.add_typer(chain_app, name="chain")
 
 
-def _version_callback(value: bool):
+def _version_callback(ctx: typer.Context, value: bool):
     """Print version and exit."""
-    if value:
+    if value and not ctx.resilient_parsing:
         typer.echo(f"swarm-prov-upload {__version__}")
         raise typer.Exit()
 
@@ -583,6 +618,9 @@ def _report_delivered_not_stored(e: exceptions.PaymentDeliveredNotStoredError, a
 
     Not a failure (#124): exits 0 when it was the command's last step.
     """
+    _json_error("delivered_not_stored", f"{action[0].upper() + action[1:]} succeeded and was paid once, "
+                "but the gateway could not return its result.", transaction=e.transaction,
+                payer=e.payer, idempotency_key=e.idempotency_key)
     typer.secho(f"\n{action[0].upper() + action[1:]} succeeded and was paid once, but the gateway "
                 "could not return its result (it was too large to keep for a retry).",
                 fg=typer.colors.YELLOW, err=True)
@@ -1486,8 +1524,8 @@ def upload_collection(
             if verbose:
                 typer.echo(f"    TAR archive created: {tar_size} bytes")
         except (ValueError, OSError) as e:
-            _json_error("upload_failed", f"Failed creating TAR archive: {e}", step="archive")
-            typer.secho(f"ERROR: Failed creating TAR archive: {e}", fg=typer.colors.RED, err=True)
+            _json_error("upload_failed", f"Failed creating TAR archive: {redact_urls(str(e))}", step="archive")
+            typer.secho(f"ERROR: Failed creating TAR archive: {redact_urls(str(e))}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
 
         # Acquire stamp
@@ -1532,8 +1570,8 @@ def upload_collection(
         except typer.Exit:
             raise  # already reported, e.g. an invalid auto-pay limit (#152)
         except Exception as e:
-            _json_error("upload_failed", f"Failed acquiring stamp: {e}", step="stamp")
-            typer.secho(f"ERROR: Failed acquiring stamp: {e}", fg=typer.colors.RED, err=True)
+            _json_error("upload_failed", f"Failed acquiring stamp: {redact_urls(str(e))}", step="stamp")
+            typer.secho(f"ERROR: Failed acquiring stamp: {redact_urls(str(e))}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
 
         # Wait until the stamp is usable: the gateway cannot upload to it before that
@@ -1560,8 +1598,8 @@ def upload_collection(
             else:
                 _report_payment_outcome(e, "the collection upload", final_step=True)
         except Exception as e:
-            _json_error("upload_failed", f"Failed uploading collection: {e}", step="upload")
-            typer.secho(f"ERROR: Failed uploading collection: {e}", fg=typer.colors.RED, err=True)
+            _json_error("upload_failed", f"Failed uploading collection: {redact_urls(str(e))}", step="upload")
+            typer.secho(f"ERROR: Failed uploading collection: {redact_urls(str(e))}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
     finally:
         # Remove the temp folder with the TAR on every exit
@@ -1634,6 +1672,18 @@ def _format_usable(usable: Optional[bool], width: int = 0) -> str:
     if usable:
         return typer.style(f"{'Yes':<{width}}", fg=typer.colors.GREEN)
     return typer.style(f"{'No':<{width}}", fg=typer.colors.RED)
+
+
+def _is_iso_timestamp(value: Optional[str]) -> bool:
+    """True for an ISO 8601 date and time from the gateway, such as 2026-12-01T10:00:00Z (#217)."""
+    if not isinstance(value, str) or not 10 <= len(value) <= 40:
+        return False
+    from datetime import datetime
+    try:
+        datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError:
+        return False
+    return True
 
 
 def _sanitize_label(label: Optional[str]) -> str:
@@ -1821,8 +1871,8 @@ def stamps_extend(
                                                 verbose=verbose)
         typer.secho(f"SUCCESS: Stamp extended.", fg=typer.colors.GREEN)
         typer.echo(f"Batch ID: {result.batchID}")
-        if result.expires_at:
-            typer.echo(f"New expiry: {_sanitize_label(result.expires_at)} (estimate at today's price)")
+        if _is_iso_timestamp(result.expires_at):
+            typer.echo(f"New expiry: {result.expires_at} (estimate at today's price)")
         else:
             typer.echo("New expiry: not reported by the node yet. Check it later with: "
                        f"swarm-prov-upload stamps info {result.batchID}")

@@ -271,7 +271,7 @@ swarm-prov-upload chain balance --json
 swarm-prov-upload chain anchor <hash> --json
 ```
 
-With `--json`, stdout carries exactly one JSON document, for a success or an error, so you can pipe it to `jq`. Everything else (progress, warnings, hints, `-v` debug lines and the text of an error) goes to stderr. The exit codes are the same as without `--json`.
+With `--json`, stdout carries exactly one JSON document, for a success or an error, so you can pipe it to `jq`. Everything else (progress, warnings, hints, `-v` debug lines and the text of an error) goes to stderr. The exit codes are the same as without `--json`. Errors in the global options and usage errors (exit 2) are JSON too, when the command you run has `--json` and it is set. `--help` prints help text, not JSON.
 
 An error document has an `error` code and a `message`, and some codes add fields:
 
@@ -289,6 +289,7 @@ An error document has an `error` code and a `message`, and some codes add fields
 | `replaced`, `not_recorded`, `not_verified` | The transaction is not confirmed as recorded | `tx_hash`, `explorer_url` |
 | `not_found` | `chain wait`: the RPC does not know the transaction | `tx_hash` |
 | `chain_error` | Any other chain error | |
+| `interrupted` | The command was stopped with Ctrl+C (exit 130) | |
 
 `chain protect` and `chain transform --restrict-original` report a failed step in their step format, with `failed_step` and an `error` or `unconfirmed` object (see [chain-workflows.md](chain-workflows.md)).
 
