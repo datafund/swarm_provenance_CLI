@@ -6730,3 +6730,172 @@ class TestRecordReadProbeTransportFailure:
         client._provider._try_fallback.assert_called_once()
         assert client._contract._supports_v2 is None
         functions.dataRecords.return_value.call.assert_not_called()
+
+
+class TestDeployBlockAboveChainHead:
+    """A deploy block above the chain head is a configuration error, not an empty lineage (#231 review 2).
+
+    The usual cause is a CHAIN_DEPLOY_BLOCK left over after a change of
+    CHAIN_NAME. The first scan returned empty maps, so the lineage was the
+    start node only and transform()'s v1 duplicate check passed.
+    """
+
+    def test_get_maps_raises_on_first_scan(self):
+        from swarm_provenance_uploader.chain.event_cache import TransformationEventCache
+
+        cache = TransformationEventCache()
+        contract = MagicMock()
+        with pytest.raises(ChainConfigurationError) as exc_info:
+            cache.get_maps(contract, deploy_block=100_000, current_block=60_000)
+        message = str(exc_info.value)
+        assert "CHAIN_DEPLOY_BLOCK" in message
+        assert "100,000" in message
+        assert "60,000" in message
+        contract.get_all_transformations.assert_not_called()
+        assert cache._last_scanned_block is None
+
+    def test_no_new_blocks_after_a_scan_is_not_an_error(self):
+        from swarm_provenance_uploader.chain.event_cache import TransformationEventCache
+
+        cache = TransformationEventCache()
+        contract = MagicMock()
+        contract.get_all_transformations.return_value = []
+        contract.get_all_merge_events.return_value = []
+        cache.get_maps(contract, deploy_block=0, current_block=1_000)
+        assert cache.get_maps(contract, deploy_block=0, current_block=1_000) == ({}, {})
+
+    def _v1_client(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.event_cache import clear_registry
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        clear_registry()
+        client = ChainClient(chain="base-sepolia", deploy_block=100_000)
+        client._contract._supports_v2 = False
+        client._contract.get_all_transformations = MagicMock(return_value=[])
+        client._contract.get_all_merge_events = MagicMock(return_value=[])
+        mock_chain_deps["web3_instance"].eth.block_number = 60_000
+        return client
+
+    def test_provenance_chain_raises(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.event_cache import clear_registry
+
+        client = self._v1_client(mock_chain_deps)
+        try:
+            with pytest.raises(ChainConfigurationError, match="CHAIN_DEPLOY_BLOCK"):
+                client.get_provenance_chain(DUMMY_HASH)
+        finally:
+            clear_registry()
+
+    def test_transform_raises_and_sends_nothing(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.event_cache import clear_registry
+
+        client = self._v1_client(mock_chain_deps)
+        try:
+            with pytest.raises(ChainConfigurationError, match="CHAIN_DEPLOY_BLOCK"):
+                client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
+        finally:
+            clear_registry()
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+
+# 0x prefix and upper case, for the original and the new hash
+_HASH_SPELLINGS = [
+    pytest.param(lambda h: "0x" + h, lambda h: h, id="original-0x"),
+    pytest.param(lambda h: h.upper(), lambda h: h, id="original-upper"),
+    pytest.param(lambda h: h, lambda h: "0x" + h, id="new-0x"),
+    pytest.param(lambda h: h, lambda h: h.upper(), id="new-upper"),
+    pytest.param(lambda h: "0x" + h.upper(), lambda h: "0x" + h.upper(), id="both"),
+]
+
+
+class TestTransformDuplicateCheckNormalizesHashes:
+    """The duplicate check finds a duplicate however the hashes are written (#230 review 2).
+
+    It compared the input as given with lower-case hex without 0x, so a
+    0x prefix or upper case skipped the check and the duplicate was sent.
+    """
+
+    ORIGINAL = "ab" * 32
+    NEW = "cd" * 32
+
+    def _assert_nothing_sent(self, mock_chain_deps):
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    @pytest.mark.parametrize("spell_original, spell_new", _HASH_SPELLINGS)
+    def test_v2_duplicate_found(self, mock_chain_deps, spell_original, spell_new):
+        client = _fallback_client(mock_chain_deps, [_log("DataTransformed")])
+        client._contract.supports_transformation_links = MagicMock(return_value=True)
+        client._contract.get_transformation_links = MagicMock(
+            return_value=[(bytes.fromhex(self.NEW), "existing")]
+        )
+
+        with pytest.raises(TransformationAlreadyExistsError):
+            client.transform(
+                original_hash=spell_original(self.ORIGINAL), new_hash=spell_new(self.NEW), description="d"
+            )
+        self._assert_nothing_sent(mock_chain_deps)
+
+    @pytest.mark.parametrize("spell_original, spell_new", _HASH_SPELLINGS)
+    def test_v1_duplicate_found(self, mock_chain_deps, monkeypatch, spell_original, spell_new):
+        from swarm_provenance_uploader.chain import event_cache
+
+        client = _fallback_client(mock_chain_deps, [_log("DataTransformed")])
+        client._contract.supports_transformation_links = MagicMock(return_value=False)
+        client._provider.deploy_block = 0
+        cache = MagicMock()
+        cache.get_maps.return_value = ({self.ORIGINAL: [(self.NEW, "existing")]}, {})
+        monkeypatch.setattr(event_cache, "get_cache", lambda *a, **k: cache)
+
+        with pytest.raises(TransformationAlreadyExistsError):
+            client.transform(
+                original_hash=spell_original(self.ORIGINAL), new_hash=spell_new(self.NEW), description="d"
+            )
+        self._assert_nothing_sent(mock_chain_deps)
+
+    def test_sent_hashes_and_result_unchanged(self, mock_chain_deps):
+        """A transformation that is not a duplicate is encoded and reported as before."""
+        client = _fallback_client(mock_chain_deps, [_log("DataTransformed")])
+        client._contract.supports_transformation_links = MagicMock(return_value=True)
+        client._contract.get_transformation_links = MagicMock(return_value=[])
+        original, new = "0x" + self.ORIGINAL.upper(), "0x" + self.NEW
+
+        result = client.transform(original_hash=original, new_hash=new, description="d")
+
+        record = mock_chain_deps["contract"].functions.recordTransformation
+        assert record.call_args.args == (bytes.fromhex(self.ORIGINAL), bytes.fromhex(self.NEW), "d")
+        assert (result.original_hash, result.new_hash) == (original, new)
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_called_once()
+
+
+class TestTransformInvalidHashIsAValidationError:
+    """An invalid hash raises ChainValidationError before the duplicate check (#230 review 2)."""
+
+    @pytest.mark.parametrize("v2", [True, False], ids=["v2", "v1"])
+    @pytest.mark.parametrize("field", ["original_hash", "new_hash"])
+    def test_invalid_hash(self, mock_chain_deps, v2, field):
+        client = _fallback_client(mock_chain_deps, [_log("DataTransformed")])
+        client._contract.supports_transformation_links = MagicMock(return_value=v2)
+        client._contract.get_transformation_links = MagicMock(return_value=[])
+        client._provider.deploy_block = None
+        hashes = {"original_hash": DUMMY_HASH, "new_hash": "b" * 64, field: "zz"}
+
+        with pytest.raises(ChainValidationError):
+            client.transform(description="d", **hashes)
+
+        client._contract.supports_transformation_links.assert_not_called()
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    def test_validation_error_from_the_check_passes_through(self, mock_chain_deps):
+        """A ChainError other than a connection error from the check keeps its class and message."""
+        client = _fallback_client(mock_chain_deps, [_log("DataTransformed")])
+        client._contract.supports_transformation_links = MagicMock(return_value=True)
+        client._contract.get_transformation_links = MagicMock(side_effect=ChainValidationError("bad hash"))
+
+        with pytest.raises(ChainValidationError) as exc_info:
+            client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
+
+        assert str(exc_info.value) == "bad hash"
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
