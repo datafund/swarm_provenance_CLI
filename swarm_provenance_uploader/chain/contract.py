@@ -144,6 +144,14 @@ def _load_abi() -> list:
         ) from e
 
 
+def abi_event_names() -> List[str]:
+    """The names of the events in the bundled DataProvenance ABI, sorted (#167)."""
+    return sorted(
+        entry["name"] for entry in _load_abi()
+        if entry.get("type") == "event" and entry.get("name")
+    )
+
+
 class DataProvenanceContract:
     """Wrapper around the DataProvenance smart contract.
 

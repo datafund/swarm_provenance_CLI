@@ -2487,13 +2487,42 @@ def _handle_insufficient_funds(
         typer.echo(f"\n  Bridge ETH to Base: {bridge}", err=True)
 
 
+# Exit code for a sent transaction that may still be mined (#167):
+# ReceiptTimeoutError and the other TransactionOutcomeUnknownError cases
+EXIT_PENDING = 3
+
+
+def _unconfirmed_exit_code(e: Exception) -> int:
+    """3 if the transaction may still be mined (outcome unknown, receipt timeout), else 1."""
+    if isinstance(e, exceptions.TransactionOutcomeUnknownError):
+        return EXIT_PENDING
+    return 1
+
+
+def _wait_command(e: "exceptions.TransactionUnconfirmedError") -> Optional[str]:
+    """The `chain wait` command that resumes the wait for e's transaction, or None without a hash."""
+    if not e.tx_hash:
+        return None
+    tx_hash = e.tx_hash if e.tx_hash.startswith("0x") else "0x" + e.tx_hash
+    command = f"swarm-prov-upload chain wait {tx_hash}"
+    if e.event_name:
+        command += f" --event {e.event_name}"
+        if e.expected_count is not None and e.expected_count != 1:
+            command += f" --count {e.expected_count}"
+    return command
+
+
 def _not_recorded_json(e: "exceptions.TransactionUnconfirmedError") -> dict:
-    """JSON fields for a TransactionNotRecordedError, TransactionNotVerifiedError
-    or TransactionOutcomeUnknownError."""
+    """JSON fields for a TransactionNotRecordedError, TransactionNotVerifiedError,
+    TransactionOutcomeUnknownError, ReceiptTimeoutError or TransactionReplacedError."""
     if isinstance(e, exceptions.TransactionNotRecordedError):
         error = "not_recorded"
+    elif isinstance(e, exceptions.ReceiptTimeoutError):
+        error = "receipt_timeout"
     elif isinstance(e, exceptions.TransactionOutcomeUnknownError):
         error = "outcome_unknown"
+    elif isinstance(e, exceptions.TransactionReplacedError):
+        error = "replaced"
     else:
         error = "not_verified"
     data = {
@@ -2506,8 +2535,12 @@ def _not_recorded_json(e: "exceptions.TransactionUnconfirmedError") -> dict:
     }
     if isinstance(e, exceptions.TransactionNotRecordedError):
         data["emitted_count"] = e.emitted_count
+    elif isinstance(e, exceptions.TransactionReplacedError):
+        data["nonce"] = e.nonce
     else:
         data["reason"] = redact_urls(getattr(e, "reason", None))
+    if isinstance(e, exceptions.ReceiptTimeoutError):
+        data["timeout"] = e.timeout
     return data
 
 
@@ -2532,6 +2565,29 @@ def _handle_not_recorded(
             "emit the expected events.",
             fg=typer.colors.RED, err=True,
         )
+    elif isinstance(e, exceptions.ReceiptTimeoutError):
+        if isinstance(e.timeout, (int, float)) and not isinstance(e.timeout, bool):
+            within = f"within {e.timeout:g} seconds"
+        else:
+            within = "in time"
+        typer.secho(
+            prefix + f"Not confirmed yet. The transaction was sent, but no receipt "
+            f"arrived {within}. It may still be mined: do not run the command again.",
+            fg=typer.colors.RED, err=True,
+        )
+        command = _wait_command(e)
+        if command:
+            typer.echo(f"  Wait for it: {command}", err=True)
+    elif isinstance(e, exceptions.TransactionReplacedError):
+        typer.secho(
+            prefix + "Replaced. Another transaction with the same nonce from the same "
+            "address was mined instead, so this transaction will not be mined. The "
+            "other transaction may have made the same write: check the record with "
+            "swarm-prov-upload chain get <data hash> before you run the command again.",
+            fg=typer.colors.RED, err=True,
+        )
+        if e.nonce is not None:
+            typer.echo(f"  Nonce:       {e.nonce}", err=True)
     elif isinstance(e, exceptions.TransactionOutcomeUnknownError):
         if e.explorer_url:
             check = "Check it in the explorer before you try again."
@@ -2626,7 +2682,10 @@ def _composite_step_failed(
     hint: Optional[str] = None,
     error_json: Optional[dict] = None,
 ) -> NoReturn:
-    """Report a failed step of a composite command and exit 1.
+    """Report a failed step of a composite command and exit.
+
+    The exit code is 3 when the step's transaction may still be mined
+    (outcome unknown, receipt timeout), and 1 otherwise (#167).
 
     `steps` holds the results of the steps that were recorded before the
     failure. Their transaction hashes are always reported, so a mined
@@ -2651,7 +2710,7 @@ def _composite_step_failed(
         else:
             output["error"] = error_json or _step_error_json(e)
         typer.echo(json.dumps(output, indent=2))
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
 
     _print_completed_steps(steps)
     label = _COMPOSITE_STEP_LABELS[step]
@@ -2672,7 +2731,7 @@ def _composite_step_failed(
             hint = hint.strip()
             hint = f"  After you have checked the transaction, {hint[:1].lower()}{hint[1:]}"
         typer.echo(hint, err=True)
-    raise typer.Exit(code=1)
+    raise typer.Exit(code=_unconfirmed_exit_code(e))
 
 
 @_chain_command("balance")
@@ -2979,7 +3038,7 @@ def chain_anchor(
         raise typer.Exit(code=1)
     except exceptions.TransactionUnconfirmedError as e:
         _handle_not_recorded(e, output_json=output_json)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -3039,7 +3098,7 @@ def chain_set_storage_ref(
         raise typer.Exit(code=1)
     except exceptions.TransactionUnconfirmedError as e:
         _handle_not_recorded(e, output_json=output_json)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -3064,6 +3123,114 @@ def chain_set_storage_ref(
     typer.echo(f"  Tx:      {result.tx_hash}")
     typer.echo(f"  Block:   {result.block_number}")
     typer.echo(f"  Gas:     {result.gas_used}")
+    if result.explorer_url:
+        typer.echo(f"  Explorer: {result.explorer_url}")
+
+
+def _validate_tx_hash(value: str) -> str:
+    """Typer callback for a transaction hash: 64 hex digits, with or without 0x."""
+    value = value.strip()
+    if not re.fullmatch(r"(0x)?[0-9a-fA-F]{64}", value):
+        raise typer.BadParameter("must be 64 hex digits, with or without 0x")
+    return value if value.startswith("0x") else "0x" + value
+
+
+def _validate_event_name(value: Optional[str]) -> Optional[str]:
+    """Typer callback for --event: an event name from the DataProvenance ABI."""
+    if value is None:
+        return None
+    from .chain.contract import abi_event_names
+
+    names = abi_event_names()
+    if value not in names:
+        raise typer.BadParameter(f"unknown event {value!r}. Events: {', '.join(names)}")
+    return value
+
+
+@_chain_command("wait")
+def chain_wait(
+    tx_hash: Annotated[str, typer.Argument(help="Hash of a sent transaction.", callback=_validate_tx_hash)],
+    event: Annotated[Optional[str], typer.Option("--event", help="Event the contract must emit, for example DataRegistered. Without it, only the receipt status is checked.", callback=_validate_event_name)] = None,
+    count: Annotated[Optional[int], typer.Option("--count", min=1, help="Number of --event events the contract must emit (default 1).")] = None,
+    timeout: Annotated[int, typer.Option("--timeout", min=1, help="Seconds to wait for the receipt.")] = 120,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
+    output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
+):
+    """
+    Wait for a sent transaction and check its receipt.
+
+    Use it after a write reports "Not confirmed yet", with the command that
+    the write prints. It sends nothing and needs no wallet key.
+
+    Exit codes: 0 confirmed; 1 reverted, not recorded, replaced or not
+    found; 3 still pending.
+    """
+    if count is not None and event is None:
+        raise typer.BadParameter("--count needs --event", param_hint="--count")
+    try:
+        client = _get_chain_client(verbose=verbose, require_wallet=False)
+        result = client.wait_for_transaction(
+            tx_hash,
+            expected_event=event,
+            expected_count=count if count is not None else 1,
+            timeout=timeout,
+            verbose=verbose,
+        )
+    except typer.Exit:
+        raise
+    except exceptions.TransactionUnconfirmedError as e:
+        _handle_not_recorded(e, output_json=output_json)
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
+    except exceptions.TransactionNotFoundError as e:
+        if output_json:
+            typer.echo(json.dumps({
+                "error": "not_found",
+                "message": str(e),
+                "tx_hash": e.tx_hash,
+                "explorer_url": e.explorer_url,
+            }, indent=2))
+        else:
+            typer.secho(
+                f"ERROR: Not found. The RPC does not know transaction {e.tx_hash}, and "
+                f"no receipt arrived within {timeout} seconds.",
+                fg=typer.colors.RED, err=True,
+            )
+            if e.explorer_url:
+                typer.echo(f"  Explorer:    {e.explorer_url}", err=True)
+            typer.echo(
+                "  Check the hash in the explorer, or check whether the write was "
+                "recorded with swarm-prov-upload chain get <data hash>.",
+                err=True,
+            )
+        raise typer.Exit(code=1)
+    except exceptions.ChainTransactionError as e:
+        if output_json:
+            typer.echo(json.dumps(_step_error_json(e), indent=2))
+        else:
+            typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
+            if e.tx_hash:
+                typer.echo(f"  Transaction: {e.tx_hash}", err=True)
+        raise typer.Exit(code=1)
+    except exceptions.ChainConnectionError as e:
+        _print_chain_traceback(e, verbose)
+        typer.secho(f"ERROR: Cannot connect to chain: {e}", fg=typer.colors.RED, err=True)
+        if e.rpc_url:
+            typer.echo(f"  RPC URL: {redact_url(e.rpc_url)}", err=True)
+        raise typer.Exit(code=1)
+    except exceptions.ChainError as e:
+        _print_chain_traceback(e, verbose)
+        typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if output_json:
+        typer.echo(json.dumps(result.model_dump(), indent=2))
+        return
+
+    typer.secho(f"\nConfirmed in block {result.block_number}", fg=typer.colors.GREEN, bold=True)
+    typer.echo(f"  Tx:      {result.tx_hash}")
+    typer.echo(f"  Gas:     {result.gas_used}")
+    if result.event:
+        typer.echo(f"  Events:  {result.emitted_count} {result.event}")
     if result.explorer_url:
         typer.echo(f"  Explorer: {result.explorer_url}")
 
@@ -3142,7 +3309,7 @@ def chain_access(
         raise typer.Exit(code=1)
     except exceptions.TransactionUnconfirmedError as e:
         _handle_not_recorded(e, output_json=output_json)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -3211,7 +3378,7 @@ def chain_status(
             raise typer.Exit(code=1)
         except exceptions.TransactionUnconfirmedError as e:
             _handle_not_recorded(e, output_json=output_json)
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=_unconfirmed_exit_code(e))
         except exceptions.ChainTransactionError as e:
             typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
             if e.tx_hash:
@@ -3291,7 +3458,7 @@ def chain_transfer(
         raise typer.Exit(code=1)
     except exceptions.TransactionUnconfirmedError as e:
         _handle_not_recorded(e, output_json=output_json)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -3355,7 +3522,7 @@ def chain_delegate(
         raise typer.Exit(code=1)
     except exceptions.TransactionUnconfirmedError as e:
         _handle_not_recorded(e, output_json=output_json)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -3426,7 +3593,7 @@ def chain_transform(
         raise typer.Exit(code=1)
     except exceptions.TransactionUnconfirmedError as e:
         _handle_not_recorded(e, output_json=output_json)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:
@@ -3640,7 +3807,7 @@ def chain_merge(
         raise typer.Exit(code=1)
     except exceptions.TransactionUnconfirmedError as e:
         _handle_not_recorded(e, output_json=output_json)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.ChainTransactionError as e:
         typer.secho(f"ERROR: Transaction failed: {e}", fg=typer.colors.RED, err=True)
         if e.tx_hash:

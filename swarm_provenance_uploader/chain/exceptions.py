@@ -130,8 +130,10 @@ class TransactionUnconfirmedError(ChainTransactionError):
     """Transaction was sent, but the write is not confirmed as recorded.
 
     Base class for TransactionNotRecordedError and TransactionNotVerifiedError
-    (the transaction was mined with status 1) and
-    TransactionOutcomeUnknownError (it is not known whether it was mined).
+    (the transaction was mined with status 1),
+    TransactionOutcomeUnknownError and its ReceiptTimeoutError subclass (it is
+    not known whether it was mined), and TransactionReplacedError (another
+    transaction with the same nonce was mined instead).
     Catch the subclass to decide whether a retry is safe.
     """
 
@@ -245,6 +247,87 @@ class TransactionOutcomeUnknownError(TransactionUnconfirmedError):
             explorer_url=explorer_url,
         )
         self.reason = redact_urls(reason)
+
+
+class ReceiptTimeoutError(TransactionOutcomeUnknownError):
+    """No receipt arrived for a sent transaction within ``timeout`` seconds (#167).
+
+    The transaction may still be mined, so the write may still happen.
+    ``timeout`` is the wait in seconds. ``reason`` is web3's timeout message.
+
+    Retry: NOT safe. Wait for the transaction with
+    ``ChainClient.wait_for_transaction(tx_hash, event_name, expected_count)``
+    (CLI: ``chain wait <tx_hash> --event <event_name>``) instead of sending
+    the write again.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        tx_hash: str = None,
+        event_name: str = None,
+        expected_count: int = None,
+        contract_address: str = None,
+        explorer_url: str = None,
+        reason: str = None,
+        timeout: float = None,
+    ):
+        super().__init__(
+            message,
+            tx_hash=tx_hash,
+            event_name=event_name,
+            expected_count=expected_count,
+            contract_address=contract_address,
+            explorer_url=explorer_url,
+            reason=reason,
+        )
+        self.timeout = timeout
+
+
+class TransactionReplacedError(TransactionUnconfirmedError):
+    """Another transaction with the same nonce was mined instead (#167).
+
+    The receipt wait timed out, the account's mined nonce is above the
+    transaction's ``nonce``, and the transaction has no receipt, so it will
+    never be mined. The replacement can be the same write, sent from
+    elsewhere with the same key.
+
+    Retry: NOT safe without checking first. Read the record back
+    (CLI: ``chain get``) before you send the write again.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        tx_hash: str = None,
+        event_name: str = None,
+        expected_count: int = None,
+        contract_address: str = None,
+        explorer_url: str = None,
+        nonce: int = None,
+    ):
+        super().__init__(
+            message,
+            tx_hash=tx_hash,
+            event_name=event_name,
+            expected_count=expected_count,
+            contract_address=contract_address,
+            explorer_url=explorer_url,
+        )
+        self.nonce = nonce
+
+
+class TransactionNotFoundError(ChainTransactionError):
+    """The RPC does not know the transaction, and no receipt arrived (#167).
+
+    Raised by ChainClient.wait_for_transaction() for a hash that the RPC
+    does not return after the wait. ``explorer_url`` is the explorer link
+    for the hash, if the chain has an explorer.
+    """
+
+    def __init__(self, message: str, tx_hash: str = None, explorer_url: str = None):
+        super().__init__(message, tx_hash=tx_hash)
+        self.explorer_url = explorer_url
 
 
 class TransformationAlreadyExistsError(ChainError):
