@@ -73,6 +73,9 @@ def _json_error(error: str, message: str, **extra) -> None:
     """
     if _json_output["stream"] is None or _json_output["written"]:
         return
+    if _unused_stamp["id"] and "unused_stamp_id" not in extra:
+        # A stamp this command bought or took from the pool: reuse it with --stamp-id
+        extra["unused_stamp_id"] = _unused_stamp["id"]
     _echo_json(json.dumps({"error": error, "message": message, **extra}, indent=2))
 
 
@@ -94,10 +97,30 @@ class _JsonErrorsGroup(TyperGroup):
     and that option is set (not an option value, not after "--").
     """
 
+    @staticmethod
+    def _drop_flag_values(command, args):
+        """--flag=value becomes --flag for a boolean flag of command.
+
+        A value for a flag is a usage error, and click's resilient parsing
+        stops at it, before the tokens that follow (such as --json).
+        """
+        flags = {name for p in command.params if isinstance(p, click.Option) and p.is_flag
+                 for name in (*p.opts, *p.secondary_opts) if name.startswith("--")}
+        out = []
+        for i, token in enumerate(args):
+            if token == "--":
+                return out + list(args[i:])
+            name = token.split("=", 1)[0]
+            out.append(name if "=" in token and name in flags else token)
+        return out
+
     def _json_requested(self, args) -> bool:
-        """True if the command that args name has a --json option, and args set it."""
+        """True if the command that args name has a --json option, and args set it.
+
+        --json=<value> counts as set: the usage error is then a JSON document.
+        """
         try:
-            ctx = self.make_context(self.name or "swarm-prov-upload", list(args),
+            ctx = self.make_context(self.name or "swarm-prov-upload", self._drop_flag_values(self, args),
                                     resilient_parsing=True, ignore_unknown_options=True)
             command, rest = self, [*ctx.protected_args, *ctx.args]
             while isinstance(command, click.Group):
@@ -106,8 +129,8 @@ class _JsonErrorsGroup(TyperGroup):
                 name, command, rest = command.resolve_command(ctx, rest)
                 if command is None:
                     return False
-                ctx = command.make_context(name, rest, parent=ctx, resilient_parsing=True,
-                                           ignore_unknown_options=True)
+                ctx = command.make_context(name, self._drop_flag_values(command, rest), parent=ctx,
+                                           resilient_parsing=True, ignore_unknown_options=True)
                 rest = [*ctx.protected_args, *ctx.args]
             return any(p.name == "output_json" for p in command.params) and bool(ctx.params.get("output_json"))
         except Exception:
@@ -133,6 +156,9 @@ class _JsonErrorsGroup(TyperGroup):
             raise
         except KeyboardInterrupt:
             _json_error("interrupted", "Interrupted.")
+            raise
+        except click.exceptions.Abort:
+            _json_error("aborted", "Aborted.")
             raise
 
 
@@ -1676,8 +1702,8 @@ def _format_usable(usable: Optional[bool], width: int = 0) -> str:
 
 def _is_iso_timestamp(value: Optional[str]) -> bool:
     """True for an ISO 8601 date and time from the gateway, such as 2026-12-01T10:00:00Z (#217)."""
-    if not isinstance(value, str) or not 10 <= len(value) <= 40:
-        return False
+    if not isinstance(value, str) or not 10 <= len(value) <= 40 or "T" not in value:
+        return False  # a date alone has no time part
     from datetime import datetime
     try:
         datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
@@ -1871,10 +1897,14 @@ def stamps_extend(
                                                 verbose=verbose)
         typer.secho(f"SUCCESS: Stamp extended.", fg=typer.colors.GREEN)
         typer.echo(f"Batch ID: {result.batchID}")
+        # Not the new expiry for certain: the gateway reads it right after the
+        # top-up, and Bee may apply the top-up later
         if _is_iso_timestamp(result.expires_at):
-            typer.echo(f"New expiry: {result.expires_at} (estimate at today's price)")
+            typer.echo(f"Expiry reported by the gateway: {result.expires_at} (estimate at today's price; "
+                       "it can take a few minutes to include this extension, check with: "
+                       f"swarm-prov-upload stamps info {result.batchID})")
         else:
-            typer.echo("New expiry: not reported by the node yet. Check it later with: "
+            typer.echo("Expiry: not reported by the gateway yet. Check it later with: "
                        f"swarm-prov-upload stamps info {result.batchID}")
     except exceptions.PaymentRequiredError as e:
         _report_payment_required(e)

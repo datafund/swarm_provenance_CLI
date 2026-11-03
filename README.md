@@ -487,7 +487,7 @@ swarm-prov-upload upload-collection /path/to/directory --stamp-id <id> --deferre
 | `--redundancy` | Erasure coding level from 0 to 4: `0` none, `1` medium, `2` strong, `3` insane, `4` paranoid. A higher level keeps the data retrievable when more chunks are lost, and uses more of the stamp. Without this option, the gateway uses level 2. |
 | `--stamp-retries` | Number of times to check that the stamp is usable before the upload (default: 12) |
 | `--stamp-interval` | Seconds between stamp usability checks (default: 20) |
-| `--json` | Output result as JSON (see example below). stdout then carries only the JSON document; progress and the payment prompt go to stderr. An error is a JSON object too, for example `{"error": "stamp_not_usable", "message": ...}` (other codes: `invalid_input`, `configuration_error`, `payment_required`, `payment_outcome_unknown`, `delivered_not_stored`, `upload_failed`, `interrupted`) |
+| `--json` | Output result as JSON (see example below). stdout then carries only the JSON document; progress and the payment prompt go to stderr. An error is a JSON object too, for example `{"error": "stamp_not_usable", "message": ...}` (other codes: `invalid_input`, `configuration_error`, `payment_required`, `payment_outcome_unknown`, `delivered_not_stored`, `upload_failed`, `interrupted`, `aborted`). After the command bought a stamp or took one from the pool, an error document has `unused_stamp_id` |
 
 **Example Output (text):**
 ```
@@ -574,7 +574,8 @@ swarm-prov-upload stamps list --full --wallet 0xYourPayerAddress
 swarm-prov-upload stamps info <stamp_id>
 
 # Extend stamp TTL by 48 hours (paid; a stamp you bought needs --x402 from the same wallet)
-# Prints the batch ID and the new expiry, an estimate at today's price
+# Prints the batch ID and the expiry the gateway reports, an estimate that can take a few minutes
+# to include the extension (check it with stamps info)
 swarm-prov-upload --x402 stamps extend <stamp_id> --duration-hours 48
 
 # Check stamp health (can it be used for uploads?)
