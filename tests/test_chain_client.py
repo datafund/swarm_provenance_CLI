@@ -7187,5 +7187,6 @@ class TestProvenanceChainProbeOtherError:
         assert str(exc_info.value) == (
             "Provenance chain read failed: the contract version check failed: unexpected answer"
         )
-        assert isinstance(exc_info.value.__cause__, real_web3_exceptions.Web3ValueError)
+        # The cause is kept, in redacted form (redact_exception_chain)
+        assert "Web3ValueError: unexpected answer" in str(exc_info.value.__cause__)
         client._provider._try_fallback.assert_not_called()
