@@ -647,13 +647,21 @@ class ChainClient:
         ``gas``, so web3 does not run eth_estimateGas. A transaction that
         would revert is then not caught here: it is sent and costs gas.
 
+        The chain ID and contract code check (_check_contract_code, cached
+        per client) runs first, so a switch away from an RPC without the
+        contract code happens before the build, and the whole write runs on
+        one endpoint (#230).
+
         Raises:
             InsufficientFundsError: If the RPC reports insufficient funds.
             ChainTransactionError: If the contract reverts, the RPC answers
                 with a JSON-RPC error, or building fails for another reason.
             ChainConnectionError: If the RPC cannot be reached or its answer
                 is not JSON-RPC.
+            ChainConfigurationError: From the contract code check, for
+                example ContractCodeNotFoundError or ChainIdMismatchError.
         """
+        self._check_contract_code()
         if self._gas_limit is not None:
             kwargs["gas"] = self._gas_limit
         try:
@@ -1505,6 +1513,11 @@ class ChainClient:
         # any read. The transaction and the result use the input as before.
         original_key = _normalize_hash(original_hash).hex()
         new_key = _normalize_hash(new_hash).hex()
+
+        # The chain ID and contract code first, as in anchor(): an RPC
+        # without the code moves to a fallback before the version probe, and
+        # no code on any RPC gets the same error as every other write (#230)
+        self._check_contract_code()
 
         # Pre-check: avoid wasting gas on duplicate transformations.
         # Prefer state read on v2 contracts, fall back to event cache.

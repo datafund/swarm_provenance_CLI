@@ -7203,9 +7203,16 @@ class TestUnsyncedPrimaryFallsBackForWrites:
     """An RPC with no code at the contract address leads to a fallback before a write (#230 review 5)."""
 
     def test_transform_probe_moves_to_a_synced_fallback(self, real_web3_exceptions, mock_chain_deps):
-        """The case the probe's code check exists for: v2 is found on the fallback, the write is sent once."""
+        """The case the probe's code check exists for: v2 is found on the fallback, the write is sent once.
+
+        The client's contract code check already passed (an earlier write),
+        so the probe is the first read that meets the RPC without the code.
+        On a new client, _check_contract_code switches first (see
+        TestWriteRunsOnOneEndpoint).
+        """
         _inject_real_exceptions(real_web3_exceptions)
         client = _fallback_client(mock_chain_deps, [_log("DataTransformed")])
+        client._contract_code_checked = True
         client._provider._try_fallback = MagicMock(side_effect=[True, False, False])
         web3 = mock_chain_deps["web3_instance"]
         web3.eth.get_code.side_effect = [b"", DUMMY_CODE, DUMMY_CODE, DUMMY_CODE]
