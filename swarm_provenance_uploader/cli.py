@@ -90,7 +90,24 @@ _chain_config = {
     "wallet_key_env": config.CHAIN_WALLET_KEY_ENV,
     "explorer_url": config.CHAIN_EXPLORER_URL,
     "gas_limit": config.CHAIN_GAS_LIMIT,
+    "gas_limit_error": config.CHAIN_GAS_LIMIT_ERROR,
 }
+
+
+def _check_gas_limit_setting() -> None:
+    """Exit 1 if this chain write would use a bad CHAIN_GAS_LIMIT (#226).
+
+    Only a command with --gas uses the setting, and --gas replaces it.
+    """
+    error = _chain_config.get("gas_limit_error")
+    ctx = click.get_current_context(silent=True)
+    if not error or ctx is None or "gas" not in ctx.params or ctx.params["gas"] is not None:
+        return
+    if ctx.params.get("output_json"):
+        typer.echo(json.dumps({"error": "invalid_gas_limit", "message": error}, indent=2))
+    else:
+        typer.secho(f"ERROR: {error}", fg=typer.colors.RED, err=True)
+    raise typer.Exit(code=1)
 
 
 def _get_chain_client(verbose: bool = False, require_wallet: bool = False):
@@ -110,6 +127,8 @@ def _get_chain_client(verbose: bool = False, require_wallet: bool = False):
     Raises:
         typer.Exit: If dependencies are missing or config is invalid.
     """
+    if require_wallet:
+        _check_gas_limit_setting()
     try:
         from .core.chain_client import ChainClient
     except ImportError:
@@ -314,9 +333,22 @@ _X402_EXPLORERS = {
 }
 
 
+# A hedge, not a measured fact: swarm_connect models about 120 s of stamp
+# propagation after a purchase (STAMP_PROPAGATION_SECONDS).
+_PURCHASE_TIMING_NOTE = ("It may show Usable: No, or not be listed yet, for a few minutes "
+                         "after the purchase.")
+
+
+def _wallet_stamps_command(e: exceptions.PaymentOutcomeUnknownError) -> Optional[str]:
+    """The command that lists the payer's stamps, or None when the payer is not known."""
+    return f"swarm-prov-upload stamps list --wallet {e.payer} --full" if e.payer else None
+
+
 def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: str,
                             final_step: bool = False, final_note: Optional[str] = None,
-                            final_stdout: Optional[List[str]] = None):
+                            final_stdout: Optional[List[str]] = None,
+                            check: Optional[str] = None, missing: str = "result",
+                            check_note: Optional[str] = None):
     """
     Explain a paid request whose payment may have been taken, then exit.
 
@@ -333,6 +365,12 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
             when it succeeded but its result cannot be returned.
         final_stdout: With final_note: the command's normal success lines,
             printed to stdout in that case, so a script sees them with exit 0.
+        check: For a paid 2xx answer that could not be read
+            (PaymentResultUnreadableError): a command that shows whether the
+            request worked, for example `stamps info <id>` (#216).
+        missing: For that case without `check`: what the answer should have
+            given, for example "Swarm reference" or "batch ID".
+        check_note: For that case with `check`: how to read its output.
 
     Raises:
         typer.Exit: Always; code 0 when the final step is known to have
@@ -340,13 +378,21 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
     """
     if isinstance(e, exceptions.PaymentDeliveredNotStoredError):
         _report_delivered_not_stored(e, action, final_step, final_note, final_stdout)
+    unreadable = isinstance(e, exceptions.PaymentResultUnreadableError)
     if isinstance(e, exceptions.StampPurchasePendingError):
         headline = f"Payment received, but {action} is not confirmed yet."
+    elif unreadable:
+        # The gateway answers 2xx only after it has done the work (#216)
+        headline = f"{action[:1].upper()}{action[1:]} most likely succeeded, but its result could not be read."
     elif e.settled:
         headline = f"Payment was taken, but {action} failed."
     else:
         headline = f"The payment may have been taken: {action} did not complete."
-    typer.secho(f"\nERROR: {headline}", fg=typer.colors.RED, err=True)
+    if unreadable:
+        # Most likely worked, so a warning in the style of the others; still exit 1
+        typer.secho(f"\nWARNING: {headline}", fg=typer.colors.YELLOW, err=True)
+    else:
+        typer.secho(f"\nERROR: {headline}", fg=typer.colors.RED, err=True)
     typer.echo(f"  {e}", err=True)
 
     valid_until = None
@@ -366,6 +412,8 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
     ]
     if isinstance(e, exceptions.StampPurchasePendingError):
         fields += [("Stamp label", e.label), ("Depth", e.depth)]
+    elif unreadable and e.label_prefix:
+        fields += [("Stamp label", f"{e.label_prefix}<suffix>")]
     for name, value in fields:
         if value is not None:
             typer.echo(f"  {name + ':':<17}{value}", err=True)
@@ -388,6 +436,43 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
                        "supports Idempotency-Key answers with the stamp, without charging again:",
                        err=True)
             typer.echo(f"  {_rerun_with_key(e.idempotency_key)}", err=True)
+    elif unreadable:
+        typer.echo("The gateway answered success, so the request was most likely done.", err=True)
+        if check:
+            typer.echo("Check the result before you contact the gateway operator:", err=True)
+            typer.echo(f"  {check}", err=True)
+            if e.label_prefix == "paid-":
+                # The CLI sends no label: the gateway names a paid batch
+                # paid-<suffix> and a pool batch pool-<depth>-<time>. No depth
+                # or TTL: a size preset can win over --depth, and --amount
+                # sets the TTL, so neither holds for every invocation.
+                typer.echo("Stamps the CLI buys have a label that starts with paid- (most stamps from "
+                           "the pool start with pool-). The new one has utilization 0%.", err=True)
+            elif e.label_prefix:
+                typer.echo(f"In that list, look for the stamp whose label starts with {e.label_prefix}.",
+                           err=True)
+            if check_note:
+                typer.echo(check_note, err=True)
+        else:
+            typer.echo(f"The {missing} was not received.", err=True)
+        if e.idempotency_key:
+            # swarm_connect answers it from the stored 2xx result for 24 h and
+            # does not settle the new authorization.
+            typer.echo("A gateway that supports Idempotency-Key answers a re-run with the same key "
+                       "from the first request, without charging again. It returns the first answer, "
+                       "which includes the result if a proxy or the connection lost it; if the "
+                       "gateway's own answer lacked it, the replay lacks it too:", err=True)
+            typer.echo(f"  {_rerun_with_key(e.idempotency_key)}", err=True)
+        if check:
+            typer.echo("If it did not work, contact the gateway operator with the transaction above.",
+                       err=True)
+        else:
+            typer.echo(f"Otherwise, contact the gateway operator with the transaction above for the "
+                       f"{missing}." if e.idempotency_key else
+                       f"Contact the gateway operator with the transaction above for the {missing}.",
+                       err=True)
+        typer.echo("A re-run without the key pays again." if e.idempotency_key
+                   else "Re-running pays again.", err=True)
     elif e.settled:
         typer.echo("Contact the gateway operator with the transaction above for the "
                    "result or a refund. Re-running pays again.", err=True)
@@ -767,7 +852,8 @@ def upload(
         except exceptions.PaymentRequiredError as e:
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
-            _report_payment_outcome(e, "the pool stamp acquisition")
+            _report_payment_outcome(e, "the pool stamp acquisition", check=_wallet_stamps_command(e),
+                                    missing="batch ID", check_note=_PURCHASE_TIMING_NOTE)
         except typer.Exit:
             # The availability check above already printed its error and chose
             # the exit code; the catch-all would re-report it as an empty
@@ -810,7 +896,8 @@ def upload(
         except exceptions.PaymentRequiredError as e:
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
-            _report_payment_outcome(e, "the stamp purchase")
+            _report_payment_outcome(e, "the stamp purchase", check=_wallet_stamps_command(e),
+                                    missing="batch ID", check_note=_PURCHASE_TIMING_NOTE)
         except exceptions.StampPurchaseError as e:
             typer.secho(f"ERROR: Failed purchasing stamp: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -883,7 +970,7 @@ def upload(
     except exceptions.PaymentRequiredError as e:
         _report_payment_required(e)
     except exceptions.PaymentOutcomeUnknownError as e:
-        _report_payment_outcome(e, "the upload", final_step=True)
+        _report_payment_outcome(e, "the upload", final_step=True, missing="Swarm reference")
     except typer.Exit:
         raise  # already reported, e.g. an invalid auto-pay limit (#152)
     except Exception as e:
@@ -1432,7 +1519,8 @@ def upload_collection(
         except exceptions.PaymentRequiredError as e:
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
-            _report_payment_outcome(e, "getting the stamp")
+            _report_payment_outcome(e, "getting the stamp", check=_wallet_stamps_command(e),
+                                    missing="batch ID", check_note=_PURCHASE_TIMING_NOTE)
         except typer.Exit:
             raise  # already reported, e.g. an invalid auto-pay limit (#152)
         except Exception as e:
@@ -1461,7 +1549,8 @@ def upload_collection(
             if output_json and isinstance(e, exceptions.PaymentDeliveredNotStoredError):
                 not_returned = e
             else:
-                _report_payment_outcome(e, "the collection upload", final_step=True)
+                _report_payment_outcome(e, "the collection upload", final_step=True,
+                                        missing="Swarm reference")
         except Exception as e:
             typer.secho(f"ERROR: Failed uploading collection: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -1730,6 +1819,12 @@ def stamps_extend(
             e, "the stamp extension", final_step=True,
             final_note="The batch ID is the stamp ID you gave. Do not pay again.",
             final_stdout=["SUCCESS: Stamp extended.", f"Batch ID: {stamp_id}"],
+            check=f"swarm-prov-upload stamps info {stamp_id}",
+            # The CLI knows the amount added only when --amount was given
+            check_note=("The extension worked if the Amount it shows is higher"
+                        + (f" by {amount}" if amount is not None else "")
+                        + " and the TTL is longer than before the extension. The new values "
+                        "may take a few minutes to show."),
         )
     except typer.Exit:
         raise  # already reported, e.g. an invalid auto-pay limit (#152)
@@ -3039,7 +3134,7 @@ def chain_anchor(
     data_type: Annotated[str, typer.Option("--type", "-t", help="Data type/category.")] = "swarm-provenance",
     storage_ref: Annotated[Optional[str], typer.Option("--storage-ref", "-s", help="Storage reference (e.g. Swarm hash) to link bidirectionally.")] = None,
     owner: Annotated[Optional[str], typer.Option("--owner", help="Register on behalf of this owner address (requires delegate authorization).")] = None,
-    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3121,7 +3216,7 @@ def chain_anchor(
 def chain_set_storage_ref(
     data_hash: Annotated[str, typer.Argument(help="Registered data hash.")],
     storage_ref: Annotated[str, typer.Argument(help="Storage reference (e.g. Swarm hash) to link.")],
-    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3364,7 +3459,7 @@ def chain_lookup(
 @_chain_command("access")
 def chain_access(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to record access for.")],
-    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3418,7 +3513,7 @@ def chain_access(
 def chain_status(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to query or update status.")],
     set_status: Annotated[Optional[str], typer.Option("--set", help="Set status: active, restricted, deleted.")] = None,
-    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3516,7 +3611,7 @@ def chain_status(
 def chain_transfer(
     swarm_hash: Annotated[str, typer.Argument(help="Swarm reference hash to transfer.")],
     to: Annotated[str, typer.Option("--to", help="New owner address.")],
-    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3570,7 +3665,7 @@ def chain_delegate(
     address: Annotated[str, typer.Argument(help="Delegate address to authorize or revoke.")],
     authorize: Annotated[bool, typer.Option("--authorize", help="Authorize this delegate.")] = False,
     revoke: Annotated[bool, typer.Option("--revoke", help="Revoke this delegate.")] = False,
-    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3635,7 +3730,7 @@ def chain_transform(
     new_hash: Annotated[str, typer.Argument(help="Hash of the transformed data.")],
     description: Annotated[str, typer.Option("--description", "-d", help="Description of the transformation.")] = "",
     restrict_original: Annotated[bool, typer.Option("--restrict-original", help="Set original hash status to RESTRICTED after transform.")] = False,
-    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3729,7 +3824,7 @@ def chain_protect(
     description: Annotated[str, typer.Option("--description", "-d", help="Description of the transformation.")] = "",
     anchor_new: Annotated[bool, typer.Option("--anchor-new", help="Anchor the new hash if not already registered.")] = False,
     data_type: Annotated[str, typer.Option("--type", "-t", help="Data type for anchoring new hash.")] = "swarm-provenance",
-    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):
@@ -3834,7 +3929,7 @@ def chain_merge(
     hashes: Annotated[List[str], typer.Argument(help="Source hashes followed by the new (merged) hash. Minimum 3 values (2 sources + 1 new).")],
     description: Annotated[str, typer.Option("--description", "-d", help="Description of the merge.")] = "",
     data_type: Annotated[str, typer.Option("--type", "-t", help="Data type for the merged result.")] = "merged",
-    gas: Annotated[Optional[int], typer.Option("--gas", help=_GAS_HELP)] = None,
+    gas: Annotated[Optional[int], typer.Option("--gas", min=config.MIN_GAS_LIMIT, help=_GAS_HELP)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose output.")] = False,
     output_json: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
 ):

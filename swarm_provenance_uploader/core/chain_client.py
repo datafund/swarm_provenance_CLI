@@ -502,6 +502,7 @@ class ChainClient:
             gas_limit_multiplier: Safety multiplier for gas estimates (default 1.2).
             explorer_url: Custom block explorer URL. If None, uses preset.
             gas_limit: Explicit gas limit. If set, skips estimation and multiplier.
+                Must be an int of at least 21000 (config.MIN_GAS_LIMIT).
             rpc_fallbacks: Fallback RPC URLs tried in order on failure.
             require_wallet: If True (default), load the wallet key now. If
                 False, load it on first use, so read-only operations work
@@ -510,8 +511,19 @@ class ChainClient:
 
         Raises:
             ChainConfigurationError: If dependencies missing or config invalid,
-                or if require_wallet is True and no valid key is configured.
+                if gas_limit is not an int of at least 21000, or if
+                require_wallet is True and no valid key is configured.
         """
+        # constants, not config: importing config would load a .env file
+        from ..constants import MIN_GAS_LIMIT
+
+        if gas_limit is not None and (
+            isinstance(gas_limit, bool) or not isinstance(gas_limit, int) or gas_limit < MIN_GAS_LIMIT
+        ):
+            raise ChainConfigurationError(
+                f"gas_limit must be a whole number of at least {MIN_GAS_LIMIT}, got {gas_limit!r}"
+            )
+
         from ..chain.provider import ChainProvider
         from ..chain.contract import DataProvenanceContract
 

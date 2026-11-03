@@ -262,7 +262,7 @@ swarm-prov-upload chain anchor <swarm_hash>
 swarm-prov-upload chain anchor <swarm_hash> --type "dataset"
 swarm-prov-upload chain anchor <swarm_hash> --owner <address>  # anchor as delegate
 swarm-prov-upload chain anchor <swarm_hash> --storage-ref <ref>  # anchor with Swarm storage reference
-swarm-prov-upload chain anchor <swarm_hash> --gas 500000      # explicit gas limit
+swarm-prov-upload chain anchor <swarm_hash> --gas 500000      # explicit gas limit, at least 21000; a transaction that would revert is still sent (see CHAIN_GAS_LIMIT below)
 
 # Record data access
 swarm-prov-upload chain access <swarm_hash>
@@ -339,7 +339,7 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 | `CHAIN_RPC_URL` | Custom RPC URL (optional). With `base` or `base-sepolia`, it must report the preset chain ID | Uses preset |
 | `CHAIN_CONTRACT` | Custom contract address (optional) | Uses preset |
 | `CHAIN_EXPLORER_URL` | Custom block explorer URL (optional) | Uses preset |
-| `CHAIN_GAS_LIMIT` | Explicit gas limit (optional, skips RPC estimation, so a transaction that would revert is still sent and costs gas) | Auto-estimated |
+| `CHAIN_GAS_LIMIT` | Explicit gas limit (optional, skips RPC estimation, so a transaction that would revert is still sent and costs gas). A whole number of at least 21000, like `--gas`; a chain write exits 1 with an error for another value | Auto-estimated |
 | `CHAIN_RPC_URLS` | Comma-separated fallback RPC URLs, tried in order after the main RPC (optional, replaces the preset fallbacks). Like `CHAIN_RPC_URL`, applies whatever chain is selected | Uses preset fallbacks |
 
 When the RPC in use cannot be reached, times out, or does not answer with JSON-RPC, reads and the steps of a write before the transaction is sent (chain ID and contract code checks, gas estimate, nonce, gas price, balance check) move to the next fallback RPC that reports the same chain ID. Sending the transaction never moves to a fallback, so a write is never sent twice; waiting for the receipt may move to a fallback for the same transaction hash. See [docs/chain-setup.md](docs/chain-setup.md#which-operations-use-the-fallback-rpcs).
@@ -374,6 +374,8 @@ print(f"TX: {result.explorer_url}")
 - `transfer_ownership(swarm_hash, new_owner)` - Transfer data ownership
 - `set_delegate(delegate, authorized)` - Authorize/revoke a delegate
 - `set_storage_ref(swarm_hash, storage_ref)` - Set/update storage reference for anchored hash
+
+`ChainClient(gas_limit=N)` sets an explicit gas limit for every write and skips gas estimation, so a transaction that would revert is still sent and costs gas. `N` must be an `int` of at least 21000; another value (including `True`, `1.5` or `"50000"`) raises `ChainConfigurationError`.
 
 To read without a wallet key, create the client with `ChainClient(require_wallet=False)`. The key is then read on first use, so write operations, `balance()` and `address` raise `ChainConfigurationError` if no key is configured.
 
@@ -1109,6 +1111,7 @@ swarm_provenance_uploader/
 │   ├── __init__.py
 │   ├── cli.py
 │   ├── config.py
+│   ├── constants.py             # Constants without side effects (MIN_GAS_LIMIT)
 │   ├── exceptions.py            # Custom exception classes
 │   ├── models.py
 │   ├── chain/                   # Blockchain subpackage (optional)
