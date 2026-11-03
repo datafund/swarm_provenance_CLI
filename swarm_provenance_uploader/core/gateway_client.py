@@ -849,7 +849,9 @@ class GatewayClient:
         """
         Whether this paid operation is what paid, for the payments-sent total.
 
-        A second 402 was not accepted. The IDEMPOTENCY_* answers and a replayed
+        A second 402 is trusted as uncollected: the gateway answers 402 when it
+        did not accept the payment, including a settlement it refused, so
+        nothing is counted for it. The IDEMPOTENCY_* answers and a replayed
         result refer to the first request with the key: this operation paid
         only if one of its own attempts is the one that may have been collected
         (otherwise it was an earlier run, already counted there).
@@ -955,8 +957,11 @@ class GatewayClient:
     # swarm_connect, PURCHASE_CAPACITY is raised just before settle_payment();
     # GATEWAY_DAILY_SPEND_CEILING and SPEND_BUDGET_UNAVAILABLE come from the
     # spend-limit check, which runs before it in both stamp purchase and
-    # stamp extension (#213).
-    _NOT_CHARGED_CODES = {"PURCHASE_CAPACITY", "GATEWAY_DAILY_SPEND_CEILING", "SPEND_BUDGET_UNAVAILABLE"}
+    # stamp extension (#213). POOL_ALLOWANCE_UNAVAILABLE comes from the pool
+    # acquire's allowance check, which a paid acquire on a test network also
+    # passes through before the handler settles the payment.
+    _NOT_CHARGED_CODES = {"PURCHASE_CAPACITY", "GATEWAY_DAILY_SPEND_CEILING", "SPEND_BUDGET_UNAVAILABLE",
+                          "POOL_ALLOWANCE_UNAVAILABLE"}
 
     # 503 texts without a code that the gateway sends before it settles (#213):
     # the stamp extension's check that Bee reports a stamp price, and the x402
