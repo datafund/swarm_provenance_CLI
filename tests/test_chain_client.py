@@ -2901,6 +2901,8 @@ class TestProvenanceChainFailClosedEventPaths:
         client = ChainClient(chain="base-sepolia")
         client._contract._supports_v2 = False
         client._provider.deploy_block = deploy_block
+        # A short chain: the per-node window reaches block 0 (#231)
+        mock_chain_deps["web3_instance"].eth.block_number = 1_000
         return client
 
     def test_per_node_forward_query_error_fails_closed(self, mock_chain_deps):
@@ -5651,6 +5653,7 @@ class TestProvenanceChainRejectionDoesNotFallBack:
         client = self._client(mock_chain_deps)
         client._contract.supports_transformation_links = MagicMock(return_value=False)
         client._provider.deploy_block = None  # no event index: per-node queries
+        mock_chain_deps["web3_instance"].eth.block_number = 1_000  # window reaches block 0 (#231)
         client._contract.get_transformations_from = MagicMock(
             side_effect=real_web3_exceptions.Web3RPCError("invalid params")
         )
@@ -6426,3 +6429,91 @@ class TestDeployBlockSetting:
         assert client._contract.get_all_transformations.call_args.kwargs["from_block"] == 2_000
         client._contract.get_transformations_from.assert_not_called()
         clear_registry()
+
+
+class TestProvenanceChainIncompleteLineageFailsClosed:
+    """A lineage that may be incomplete is never returned (#231).
+
+    The per-node event lookup scans only the last 50,000 blocks. It is used
+    when the deploy block is unknown; it was also the fallback after a
+    failed full event scan. In both cases it could miss older
+    transformations without an error.
+    """
+
+    def _v1_client(self, mock_chain_deps, deploy_block, block_number):
+        from swarm_provenance_uploader.chain.event_cache import clear_registry
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        clear_registry()
+        client = ChainClient(chain="base-sepolia", require_wallet=False)
+        client._contract._supports_v2 = False
+        client._provider.deploy_block = deploy_block
+        mock_chain_deps["web3_instance"].eth.block_number = block_number
+        client._contract.get_transformations_from = MagicMock(return_value=[])
+        client._contract.get_transformations_to = MagicMock(return_value=[])
+        return client
+
+    def test_unknown_deploy_block_on_a_long_chain_fails_closed(self, mock_chain_deps):
+        client = self._v1_client(mock_chain_deps, None, 60_000)
+
+        with pytest.raises(ChainConfigurationError) as exc_info:
+            client.get_provenance_chain(DUMMY_HASH)
+
+        message = str(exc_info.value)
+        assert "incomplete" in message
+        assert "50,000" in message
+        assert "CHAIN_DEPLOY_BLOCK" in message
+        client._contract.get_transformations_from.assert_not_called()
+
+    def test_unknown_deploy_block_window_reaching_block_0_is_complete(self, mock_chain_deps):
+        client = self._v1_client(mock_chain_deps, None, 50_000)
+
+        chain = client.get_provenance_chain(DUMMY_HASH)
+
+        assert [r.data_hash for r in chain] == [DUMMY_HASH]
+        client._contract.get_transformations_from.assert_called_once()
+
+    def test_full_scan_transport_failure_falls_back_then_fails_closed(self, mock_chain_deps):
+        import requests
+
+        client = self._v1_client(mock_chain_deps, 0, 60_000)
+        client._contract.get_all_transformations = MagicMock(
+            side_effect=requests.exceptions.ConnectionError("down")
+        )
+        client._provider._try_fallback = MagicMock(side_effect=[True, False])
+
+        with pytest.raises(ChainConnectionError):
+            client.get_provenance_chain(DUMMY_HASH)
+
+        assert client._contract.get_all_transformations.call_count == 2
+        client._contract.get_transformations_from.assert_not_called()
+
+    def test_full_scan_other_error_fails_closed(self, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import ChainError
+
+        client = self._v1_client(mock_chain_deps, 0, 60_000)
+        client._contract.get_all_transformations = MagicMock(side_effect=ValueError("bad log"))
+
+        with pytest.raises(ChainError) as exc_info:
+            client.get_provenance_chain(DUMMY_HASH)
+
+        assert "event scan failed" in str(exc_info.value)
+        assert "bad log" in str(exc_info.value)
+        client._contract.get_transformations_from.assert_not_called()
+
+    def test_full_scan_after_fallback_succeeds(self, mock_chain_deps):
+        import requests
+
+        child = "b" * 64
+        client = self._v1_client(mock_chain_deps, 0, 60_000)
+        client._contract.get_all_transformations = MagicMock(side_effect=[
+            requests.exceptions.ConnectionError("down"),
+            [(DUMMY_HASH_BYTES, bytes.fromhex(child), "step")],
+        ])
+        client._contract.get_all_merge_events = MagicMock(return_value=[])
+        client._provider._try_fallback = MagicMock(side_effect=[True, False])
+
+        chain = client.get_provenance_chain(DUMMY_HASH, max_depth=0)
+
+        assert chain[0].transformations[0].new_data_hash == child
+        client._contract.get_transformations_from.assert_not_called()

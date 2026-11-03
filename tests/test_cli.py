@@ -4442,6 +4442,23 @@ class TestChainGetAdditional:
         assert "Cannot connect" in result.stdout
 
 
+    def test_follow_incomplete_lineage_error(self, mocker):
+        """--follow exits 1 and prints the error for a lineage that may be incomplete (#231)."""
+        from swarm_provenance_uploader.exceptions import ChainConfigurationError
+
+        mock_client = mocker.MagicMock()
+        mock_client.get_provenance_chain.side_effect = ChainConfigurationError(
+            "The provenance chain may be incomplete. Set CHAIN_DEPLOY_BLOCK."
+        )
+        mocker.patch("swarm_provenance_uploader.cli._get_chain_client", return_value=mock_client)
+
+        result = runner.invoke(app, ["chain", "get", DUMMY_SWARM_REF, "--follow"])
+
+        assert result.exit_code == 1
+        assert "may be incomplete" in result.output
+        assert "CHAIN_DEPLOY_BLOCK" in result.output
+
+
 # =============================================================================
 # CHAIN TRANSFORM ADDITIONAL TESTS
 # =============================================================================
