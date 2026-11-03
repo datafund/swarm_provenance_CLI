@@ -334,7 +334,7 @@ Or add it to your `.env` file.
 
 ### "Cannot connect to chain"
 
-Check your RPC endpoint. The default Base Sepolia RPC (`https://sepolia.base.org`) is public and rate-limited. The CLI automatically tries fallback RPCs (`base-sepolia-rpc.publicnode.com`, `base-sepolia.drpc.org`) if the primary fails. For production, use a dedicated RPC provider:
+Check your RPC endpoint. The default Base Sepolia RPC (`https://sepolia.base.org`) is public and rate-limited. The CLI automatically tries fallback RPCs (`base-sepolia-rpc.publicnode.com`, `base-sepolia.drpc.org`) if the primary cannot be reached, for reads and for the steps of a write before the transaction is sent (see [Which operations use the fallback RPCs](#which-operations-use-the-fallback-rpcs)). For production, use a dedicated RPC provider:
 - [Alchemy](https://www.alchemy.com/)
 - [Infura](https://www.infura.io/)
 - [QuickNode](https://www.quicknode.com/)
@@ -347,6 +347,19 @@ export CHAIN_RPC_URLS=https://fallback1.io,https://fallback2.io
 ```
 
 Like `CHAIN_RPC_URL`, `CHAIN_RPC_URLS` applies whatever chain is selected (`CHAIN_NAME` or `--chain`). If you switch chains, change the URLs too.
+
+#### Which operations use the fallback RPCs
+
+The CLI moves to the next fallback RPC when the RPC in use cannot be reached, times out, or answers with something that is not JSON-RPC (for example an HTML error page). Before a fallback is used, the CLI checks that it reports the chain ID in use. A fallback on another chain is skipped. Each RPC is tried at most once per chain client call: one read, or one write with all its steps. A command that makes several calls, such as `chain protect`, can try an RPC again in a later call. If no RPC is left, the command prints "Cannot connect to chain".
+
+- **Reads** use the fallbacks: `chain get` (also with `--follow`), `chain verify`, `chain lookup`, `chain status` without `--set`, `chain balance`, and the "already registered" check before an anchor.
+- **Writes** use the fallbacks only for the steps before the transaction is sent: the chain ID and contract code checks, the "already registered" and duplicate transformation checks, the gas estimate, the nonce, the gas price and the balance check. These steps send nothing, so running them again on another RPC is safe. The duplicate transformation check of `chain transform` reads the contract state on a v2 contract, or scans the transformation events (`eth_getLogs`) on a v1 contract; both reads use the fallbacks. If the check cannot reach any RPC, the command stops with "Cannot connect to chain" before anything is sent.
+- **Sending the transaction** never moves to a fallback. If the connection fails while the transaction is sent, the CLI prints "Outcome unknown" (see below) and does not send it again.
+- **Waiting for the receipt** can move to a fallback, for the same transaction hash. Nothing is sent again. If the wait moved to a fallback and that RPC does not return the receipt in time, the CLI prints "Outcome unknown", because the transaction may still be mined.
+
+The CLI does not move to a fallback when the RPC answers with a JSON-RPC error (for example "nonce too low" or a rate-limit error in JSON-RPC form), when the contract reverts, or when the RPC in use reports another chain ID. Another RPC would give the same answer, or must not be used. There is one exception: if the RPC answers the chain ID check (`eth_chainId`) before a write, or in `ChainProvider.health_check()`, with a JSON-RPC error, the CLI counts this as a connection failure and moves to a fallback. Nothing has been sent at that point, and the fallback's chain ID is checked before it is used. In `ChainProvider.health_check()`, the connection probe (`web3_clientVersion`, through web3's `is_connected()`) also cannot tell a JSON-RPC error answer from a connection failure, so such an answer there moves to a fallback too. A JSON-RPC error answer to the block number read (`eth_blockNumber`) does not. A wrong chain ID is reported as "Chain ID mismatch" (`ChainIdMismatchError`), also by `ChainProvider.health_check()`.
+
+The nonce of a write comes from the RPC in use. After a fallback, that RPC may not yet know about transactions from the same wallet that are still waiting at the RPC used before. If you send several writes quickly from one wallet while the primary RPC fails, check the earlier transactions in the explorer.
 
 ### "Outcome unknown"
 

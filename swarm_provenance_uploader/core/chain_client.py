@@ -103,6 +103,88 @@ def _is_receipt_timeout(error: Exception) -> bool:
     return any(cls.__name__ == "TimeExhausted" for cls in type(error).__mro__)
 
 
+def _is_transport_failure(error: Exception) -> bool:
+    """True if another RPC endpoint may succeed where this one failed (#168).
+
+    A ChainConnectionError, or an RPC failure (_is_rpc_failure) that is not
+    a JSON-RPC error answer and not a receipt-wait timeout. A node that
+    answered with a JSON-RPC error, a contract revert, or a node on the
+    wrong chain (ChainIdMismatchError) is not one: another endpoint would
+    give the same answer, or must not be used.
+    """
+    if isinstance(error, ChainConnectionError):
+        return True
+    return (
+        _is_rpc_failure(error)
+        and not _is_rpc_rejection(error)
+        and not _is_receipt_timeout(error)
+    )
+
+
+def _with_fallback(provider, operation):
+    """
+    Run operation, and run it again on a fallback RPC after a transport failure (#168).
+
+    On a transport failure (_is_transport_failure), the provider switches
+    to the next fallback endpoint that connects and reports the chain ID in
+    use (ChainProvider._try_fallback), and operation runs again. Each
+    endpoint is tried at most once per call. When no endpoint is left, the
+    last error is raised, for the caller to map.
+
+    Only operations that can safely run twice go through here: reads, and
+    the steps of a write before send_raw_transaction. A send is never run
+    again.
+
+    Only the outermost call runs the loop. A call made while a loop is
+    already active (a read such as verify() calling get()) runs operation
+    once and leaves the fallback to the outer loop. ChainProvider's
+    health_check() and get_block_number() do the same with their own loops.
+    The steps of one public call share one set of tried endpoints
+    (``provider._fallback_tried``, set by _redacted_errors), so a later step
+    does not go back to an endpoint that an earlier step left. Together, one
+    public call tries each endpoint at most once.
+    """
+    if getattr(provider, "_fallback_active", False) is True:
+        # The outer loop handles a transport failure and runs its whole
+        # operation again; running a loop here as well would also reset
+        # _fallback_active in its finally while the outer loop still runs
+        return operation()
+    provider._fallback_active = True
+    try:
+        tried = getattr(provider, "_fallback_tried", None)
+        if not isinstance(tried, set):
+            tried = set()
+        while True:
+            try:
+                return operation()
+            except Exception as e:
+                if not _is_transport_failure(e):
+                    raise
+                failed_url = provider.rpc_url
+                tried.add(failed_url)
+                if provider._try_fallback(tried) is not True:
+                    raise
+                logger.debug(
+                    "RPC request to %s failed (%s); trying again on %s",
+                    redact_url(failed_url),
+                    redact_urls(_error_reason(e)),
+                    redact_url(provider.rpc_url),
+                )
+    finally:
+        provider._fallback_active = False
+
+
+def _duplicate_check_connection_error(error: Exception, rpc_url: Optional[str]) -> ChainConnectionError:
+    """The error for transform()'s duplicate check when no RPC endpoint is left (#168)."""
+    if isinstance(error, ChainConnectionError):
+        rpc_url = error.rpc_url
+    return ChainConnectionError(
+        f"The RPC endpoint failed during the duplicate transformation check: "
+        f"{_error_reason(error)}. Nothing was sent.",
+        rpc_url=rpc_url,
+    )
+
+
 def _signed_tx_hash(raw_tx) -> Optional[str]:
     """The hash of a signed transaction (keccak-256 of its bytes), or None.
 
@@ -158,9 +240,12 @@ MAX_CHAIN_DEPTH = 50
 def _traversal_error(data_hash: str, depth: int, error: Exception) -> ChainError:
     """The error that stops a provenance chain walk at one node (#170).
 
-    The walk fails closed: a partial lineage is never returned. RPC failures
-    become ChainConnectionError and everything else ChainError; both name
-    the node and its depth. Chain errors other than connection and
+    The walk fails closed: a partial lineage is never returned. A JSON-RPC
+    error answer becomes ChainConfigurationError, as in _read_error: the
+    node answered, so it is not a connection failure and the walk does not
+    move to a fallback (#168). Other RPC failures become
+    ChainConnectionError and everything else ChainError; all name the node
+    and its depth. Chain errors other than connection and
     not-registered errors (for example ChainValidationError) keep their
     class. A linked hash that reads as not registered means an inconsistent
     read (the contract registers every derived hash), so it is a ChainError
@@ -178,6 +263,12 @@ def _traversal_error(data_hash: str, depth: int, error: Exception) -> ChainError
     message = f"Provenance chain read failed at {data_hash} (depth {depth}): {reason}"
     if isinstance(error, ChainConnectionError):
         return ChainConnectionError(message, rpc_url=error.rpc_url)
+    if _is_rpc_rejection(error):
+        # Checked before _is_rpc_failure, which also counts a JSON-RPC error answer
+        return ChainConfigurationError(
+            f"Provenance chain read failed at {data_hash} (depth {depth}): "
+            f"The RPC rejected the request: {reason}"
+        )
     if _is_rpc_failure(error):
         return ChainConnectionError(message)
     return ChainError(message)
@@ -235,16 +326,26 @@ def _redacted_errors(map_rpc_failures: bool):
     A ChainError the method raises gets a redacted exception chain
     (redact_exception_chain), because library callers can print
     ``__cause__`` and ``__context__``. With map_rpc_failures (read
-    methods), a raw RPC failure becomes a chain error (_read_error), raised
-    from it, so the redacted original stays in ``__cause__`` and a
-    traceback still shows where it failed. Other exceptions pass through
-    unchanged.
+    methods), the method is run again on a fallback RPC endpoint after a
+    transport failure (_with_fallback, #168), and a raw RPC
+    failure becomes a chain error (_read_error), raised from it, so the
+    redacted original stays in ``__cause__`` and a traceback still shows
+    where it failed. Other exceptions pass through unchanged.
     """
     def decorator(method):
         @functools.wraps(method)
         def wrapper(self, *args, **kwargs):
+            # One set of tried endpoints for the whole public call (#168):
+            # the outermost decorated method creates it, nested ones reuse it
+            provider = self._provider
+            owns_tried = not isinstance(getattr(provider, "_fallback_tried", None), set)
+            if owns_tried:
+                provider._fallback_tried = set()
             try:
                 try:
+                    if map_rpc_failures:
+                        # Reads change nothing, so running one again is safe
+                        return _with_fallback(self._provider, lambda: method(self, *args, **kwargs))
                     return method(self, *args, **kwargs)
                 except ChainError:
                     raise
@@ -258,6 +359,9 @@ def _redacted_errors(map_rpc_failures: bool):
             except ChainError as e:
                 redact_exception_chain(e)
                 raise
+            finally:
+                if owns_tried:
+                    provider._fallback_tried = None
         return wrapper
     return decorator
 
@@ -421,14 +525,14 @@ class ChainClient:
                 fails for a reason other than the RPC.
             ChainConnectionError: If the RPC cannot be reached.
         """
-        self._provider.confirm_chain_id()
+        _with_fallback(self._provider, self._provider.confirm_chain_id)
         if self._contract_code_checked:
             return
         # The checksummed address: web3 rejects a lowercase one, and the
         # event check compares against the same value.
         address = self._contract.address
         try:
-            code = self._provider.web3.eth.get_code(address)
+            code = _with_fallback(self._provider, lambda: self._provider.web3.eth.get_code(address))
         except Exception as e:
             rejection = _rpc_rejection_message(e)
             if rejection is not None:
@@ -474,7 +578,8 @@ class ChainClient:
         if self._gas_limit is not None:
             kwargs["gas"] = self._gas_limit
         try:
-            return build(*args, **kwargs)
+            # Nothing is sent here: building can run again on a fallback RPC
+            return _with_fallback(self._provider, lambda: build(*args, **kwargs))
         except ChainError:
             raise
         except Exception as e:
@@ -552,10 +657,12 @@ class ChainClient:
         # failure does not mean that nothing was sent
         send_called = False
         raw_tx = None
+        # Receipt waits started: more than one means the wait moved to a fallback
+        receipt_waits = [0]
 
         self._check_contract_code()
 
-        try:
+        def prepare():
             # Fill in nonce. "pending" counts this wallet's transactions that
             # are not mined yet, so a second write does not reuse a nonce.
             tx["nonce"] = web3.eth.get_transaction_count(self._wallet.address, "pending")
@@ -570,13 +677,19 @@ class ChainClient:
                 tx["gas"] = int(estimated_gas * self._gas_limit_multiplier)
                 logger.debug("Estimated gas: %d, limit: %d", estimated_gas, tx["gas"])
 
-            if verbose:
-                print(f"DEBUG: Gas limit: {tx['gas']}")
-
             # Pre-flight balance check
             gas_price = tx.get("gasPrice") or web3.eth.gas_price
             estimated_cost = tx["gas"] * gas_price
             self._check_balance(estimated_cost)
+
+        try:
+            # Nothing is sent yet, so these steps can run again on a fallback
+            # RPC (#168). web3 is the provider's Web3 object, which a switch
+            # keeps and points at the new endpoint.
+            _with_fallback(self._provider, prepare)
+
+            if verbose:
+                print(f"DEBUG: Gas limit: {tx['gas']}")
 
             # Sign and send
             raw_tx = self._wallet.sign_transaction(tx)
@@ -587,8 +700,13 @@ class ChainClient:
             if verbose:
                 print(f"DEBUG: Transaction sent: {tx_hash.hex()}")
 
-            # Wait for receipt
-            receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+            # Wait for receipt. Polling may move to a fallback RPC for the
+            # same hash; the transaction is never sent again.
+            def wait_for_receipt():
+                receipt_waits[0] += 1
+                return web3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+            receipt = _with_fallback(self._provider, wait_for_receipt)
 
             if receipt["status"] != 1:
                 raise ChainTransactionError(
@@ -663,6 +781,25 @@ class ChainClient:
                 # The send raised before it returned the hash: the hash of
                 # the signed bytes is the same value
                 tx_hash_str = _signed_tx_hash(raw_tx)
+            if _is_receipt_timeout(e) and receipt_waits[0] > 1:
+                # The RPC failed during the wait, and the fallback did not
+                # return a receipt in time. The transaction was sent and may
+                # be mined: do not report it as failed (#168 review; #167
+                # changes the timeout handling as a whole)
+                raise TransactionOutcomeUnknownError(
+                    f"Outcome unknown: transaction {tx_hash_str or '(hash unknown)'} was "
+                    f"sent, but the RPC failed while waiting for its receipt, and the "
+                    f"fallback RPC did not return the receipt in time, so its outcome "
+                    f"is unknown: {reason}",
+                    tx_hash=tx_hash_str,
+                    event_name=expected_event,
+                    expected_count=expected_count,
+                    contract_address=self._contract.address,
+                    explorer_url=(
+                        self._provider.get_explorer_tx_url(tx_hash_str) if tx_hash_str else None
+                    ),
+                    reason=reason,
+                ) from e
             # Transport only: connection, timeout, or an answer that is not
             # JSON-RPC. A JSON-RPC error answer means the node answered. A
             # receipt-wait timeout keeps its own handling.
@@ -984,9 +1121,15 @@ class ChainClient:
 
         # Pre-check: avoid wasting gas on duplicate transformations.
         # Prefer state read on v2 contracts, fall back to event cache.
+        # Transport failures go through the fallbacks; when no endpoint is
+        # left, the write stops before anything is sent (#168). Other errors
+        # are logged and the write goes on.
         if self._contract.supports_transformation_links():
             try:
-                links = self._contract.get_transformation_links(original_hash)
+                links = _with_fallback(
+                    self._provider,
+                    lambda: self._contract.get_transformation_links(original_hash),
+                )
                 for existing_new, existing_desc in links:
                     existing_hex = (
                         existing_new.hex()
@@ -1003,6 +1146,8 @@ class ChainClient:
             except TransformationAlreadyExistsError:
                 raise
             except Exception as e:
+                if _is_transport_failure(e):
+                    raise _duplicate_check_connection_error(e, self._provider.rpc_url) from e
                 logger.warning("State-based duplicate check failed: %s", redact_urls(str(e)))
         else:
             deploy_block = self._provider.deploy_block
@@ -1013,10 +1158,13 @@ class ChainClient:
                     cache = get_cache(
                         self._provider.chain, self._provider.contract_address
                     )
-                    current_block = self._provider.web3.eth.block_number
-                    forward, _ = cache.get_maps(
-                        self._contract, deploy_block, current_block
-                    )
+                    # The block number and the event scan (chunked
+                    # eth_getLogs) run again on a fallback together
+                    def scan():
+                        current_block = self._provider.web3.eth.block_number
+                        return cache.get_maps(self._contract, deploy_block, current_block)
+
+                    forward, _ = _with_fallback(self._provider, scan)
                     for existing_new, existing_desc in forward.get(original_hash, []):
                         if existing_new == new_hash:
                             raise TransformationAlreadyExistsError(
@@ -1028,6 +1176,8 @@ class ChainClient:
                 except TransformationAlreadyExistsError:
                     raise
                 except Exception as e:
+                    if _is_transport_failure(e):
+                        raise _duplicate_check_connection_error(e, self._provider.rpc_url) from e
                     logger.warning("Duplicate check failed, proceeding: %s", redact_urls(str(e)))
 
         tx = self._build_tx(
@@ -1494,6 +1644,8 @@ class ChainClient:
             True if healthy.
 
         Raises:
+            ChainIdMismatchError: If the RPC in use reports another chain ID.
+                No fallback is tried in this case.
             ChainConnectionError: If health check fails.
         """
         logger.debug(
