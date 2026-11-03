@@ -8981,3 +8981,50 @@ class TestReplacedAdviceOneSource:
         assert "delegate state" in cli._replaced_cli_advice("DataRegistered")
         mocker.patch("swarm_provenance_uploader.chain.exceptions.replaced_check_kind", return_value="record")
         assert "chain get" in cli._replaced_cli_advice("DelegateAuthorized")
+
+
+# --- Paid requests refused before settlement, end to end with mocked HTTP (#213, #215) ---
+
+class TestPaidRefusalBeforeSettlementCli:
+    """A real GatewayClient against mocked HTTP; the payment is approved without signing anything."""
+
+    GW = "https://test.gateway.io"
+    PAYMENT_REQUIRED = {"status_code": 402, "json": {"accepts": []}}
+
+    @pytest.fixture(autouse=True)
+    def _approve_without_signing(self, mocker):
+        from swarm_provenance_uploader.core.gateway_client import GatewayClient
+        from tests.test_gateway_client import _signed_header
+
+        mocker.patch.object(GatewayClient, "_approve_payment",
+                            return_value=(_signed_header(), "$0.050000", None))
+
+    def _upload(self, requests_mock, answer):
+        requests_mock.post(f"{self.GW}/api/v1/stamps/", [self.PAYMENT_REQUIRED, answer])
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            return runner.invoke(app, ["--x402", "--gateway-url", self.GW, "upload", "--file", "d.txt"])
+
+    def _extend(self, requests_mock, answer):
+        requests_mock.patch(f"{self.GW}/api/v1/stamps/{DUMMY_STAMP}/extend", [self.PAYMENT_REQUIRED, answer])
+        return runner.invoke(app, ["--x402", "--gateway-url", self.GW, "stamps", "extend", DUMMY_STAMP,
+                                   "--duration-hours", "48"])
+
+    def test_purchase_spend_ceiling_is_not_reported_as_possibly_charged(self, requests_mock):
+        from tests.test_gateway_client import SPEND_CEILING_503
+
+        result = self._upload(requests_mock, SPEND_CEILING_503)
+        assert result.exit_code == 1
+        assert "GATEWAY_DAILY_SPEND_CEILING" in result.output
+        assert "may have been taken" not in result.output
+        assert "Payment was taken" not in result.output
+
+    def test_extend_bee_price_zero_is_not_reported_as_possibly_charged(self, requests_mock):
+        from tests.test_gateway_client import BEE_PRICE_ZERO_503
+
+        result = self._extend(requests_mock, BEE_PRICE_ZERO_503)
+        assert result.exit_code == 1
+        assert "has not reported a current stamp price" in result.output
+        assert "may have been taken" not in result.output
+        assert "Payment was taken" not in result.output

@@ -2137,6 +2137,100 @@ class TestPaidRequestOutcomeReviewCases:
         assert not isinstance(exc_info.value, PaymentOutcomeUnknownError)
 
 
+def _gateway_503(detail):
+    """A 503 as swarm_connect sends it: FastAPI's detail plus the top-level code and message (#381)."""
+    if isinstance(detail, dict):
+        code = detail.get("code") or "HTTP_503"
+        message = detail.get("message") or detail.get("error") or detail.get("detail")
+    else:
+        code, message = "HTTP_503", detail
+    return {"status_code": 503, "json": {"detail": detail, "code": code, "message": message}}
+
+
+# The 503 answers swarm_connect sends before it settles a payment (#213).
+SPEND_CEILING_503 = _gateway_503({
+    "code": "GATEWAY_DAILY_SPEND_CEILING",
+    "message": "The gateway has reached its daily spending limit. It resets at 2026-11-04T00:00:00Z.",
+    "resets_at": "2026-11-04T00:00:00Z",
+})
+SPEND_BUDGET_UNAVAILABLE_503 = _gateway_503({
+    "code": "SPEND_BUDGET_UNAVAILABLE",
+    "message": "Stamp purchases are paused until the operator restores the gateway's spend records.",
+})
+BEE_PRICE_ZERO_503 = _gateway_503(
+    "The Bee node has not reported a current stamp price yet. Try again shortly.")
+PRICING_FAILED_503 = _gateway_503({
+    "error": "Service temporarily unavailable",
+    "detail": "Failed to calculate price for this operation.",
+})
+
+
+class TestNotChargedBeforeSettlement503:
+    """503 answers that swarm_connect raises before settle_payment are not reported as possibly charged (#213)."""
+
+    @pytest.mark.parametrize("answer", [
+        SPEND_CEILING_503, SPEND_BUDGET_UNAVAILABLE_503, PRICING_FAILED_503,
+    ], ids=["spend-ceiling", "spend-budget-unavailable", "pricing-failed"])
+    def test_purchase_503_is_plain_failure(self, paying_client, requests_mock, answer):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, answer])
+        with pytest.raises(ConnectionError) as exc_info:
+            paying_client.purchase_stamp()
+        assert not isinstance(exc_info.value, PaymentOutcomeUnknownError)
+
+    @pytest.mark.parametrize("answer", [
+        SPEND_CEILING_503, SPEND_BUDGET_UNAVAILABLE_503, BEE_PRICE_ZERO_503, PRICING_FAILED_503,
+    ], ids=["spend-ceiling", "spend-budget-unavailable", "bee-price-zero", "pricing-failed"])
+    def test_extend_503_is_plain_failure(self, paying_client, requests_mock, answer):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.patch(f"{GW}/api/v1/stamps/{DUMMY_STAMP}/extend", [PAYMENT_REQUIRED, answer])
+        with pytest.raises(ConnectionError) as exc_info:
+            paying_client.extend_stamp(DUMMY_STAMP, duration_hours=48)
+        assert not isinstance(exc_info.value, PaymentOutcomeUnknownError)
+
+    def test_spend_ceiling_message_reaches_the_user(self, paying_client, requests_mock):
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, SPEND_CEILING_503])
+        with pytest.raises(ConnectionError, match="daily spending limit"):
+            paying_client.purchase_stamp()
+
+    def test_spend_ceiling_without_envelope_is_plain_failure(self, paying_client, requests_mock):
+        """An older gateway sends the code only under detail."""
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, {
+            "status_code": 503, "json": {"detail": {"code": "GATEWAY_DAILY_SPEND_CEILING", "message": "x"}}}])
+        with pytest.raises(ConnectionError) as exc_info:
+            paying_client.purchase_stamp()
+        assert not isinstance(exc_info.value, PaymentOutcomeUnknownError)
+
+    @pytest.mark.parametrize("answer", [
+        _gateway_503({"code": "SOMETHING_ELSE", "message": "Unavailable."}),
+        _gateway_503("The Bee node is unhappy."),
+        _gateway_503({"error": "Service temporarily unavailable", "detail": "Something else failed."}),
+        {"status_code": 502, "text": "Bad Gateway"},
+        {"status_code": 504, "text": "Gateway Timeout"},
+    ], ids=["other-code", "other-text", "other-detail", "502", "504"])
+    def test_other_5xx_is_still_outcome_unknown(self, paying_client, requests_mock, answer):
+        from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
+
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, answer])
+        with pytest.raises(PaymentOutcomeUnknownError):
+            paying_client.purchase_stamp()
+
+    def test_not_charged_code_with_settled_header_is_settled(self, paying_client, requests_mock):
+        """The gateway's own settled_not_delivered header wins over the code."""
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        answer = dict(SPEND_CEILING_503, headers={
+            "X-Payment-Status": "settled_not_delivered", "X-Payment-Transaction": TX_HASH})
+        requests_mock.post(f"{GW}/api/v1/stamps/", [PAYMENT_REQUIRED, answer])
+        with pytest.raises(PaymentSettledNotDeliveredError) as exc_info:
+            paying_client.purchase_stamp()
+        assert exc_info.value.transaction == TX_HASH
+
+
 class TestHardCapReviewCases:
     """Cases from the #128 review."""
 
