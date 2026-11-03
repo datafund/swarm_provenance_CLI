@@ -58,6 +58,7 @@ All notable changes to this project will be documented in this file.
 - `chain get --depth` now accepts only 1 to 50, and the default is 10. A negative value returned an empty chain, which the CLI printed as "not registered on-chain", and values above 50 were not capped. **Behaviour change:** `--depth 0` (start record only) is now rejected with a usage error (exit code 2); use `chain get` without `--follow` for one record. Without `--depth`, the walk now stops at 10 levels instead of 50 (#170)
 - `ChainClient.get_provenance_chain(max_depth=...)` now raises `ChainValidationError` for a value below 0 or above 50; 0 still returns the start record only. **Behaviour change:** `max_depth=None` now means 10 levels instead of 50 (#170)
 
+- A positive auto-pay limit below 1e-15 is now shown in scientific notation, for example `$1E-16`, in the refusal message and in `x402 status`, in the same way as a limit of 1e15 or more. Before, every decimal digit was printed, so a limit such as `1e-100000000` produced a message of about 100 MB. Such a limit works as a limit of 0 (#236)
 ### Removed
 - Removed the `CHAIN_ENABLED` setting (`config.CHAIN_ENABLED`). It was documented but nothing read it: chain commands always run when you call them (#141)
 - Removed `config.X402_PRIVATE_KEY_ENV` and `config.X402_RPC_URL`. The environment variables still work: they are read when used, by `resolve_x402_private_key()` and `X402Client` (#141)

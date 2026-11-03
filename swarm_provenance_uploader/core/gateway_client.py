@@ -107,11 +107,12 @@ def format_auto_pay_limit(limit: Decimal, places: int = 6) -> str:
     The auto-pay limit as text, without the Decimal context's rounding.
 
     `places` decimals below 1e15, or every decimal digit when `places` would
-    round the limit (0.2999999 is not shown as 0.300000); from 1e15, every
-    digit in scientific notation (1E+30), so a huge limit neither fails nor
-    prints hundreds of digits.
+    round the limit (0.2999999 is not shown as 0.300000); from 1e15, and for
+    a positive limit below 1e-15, every digit in scientific notation (1E+30,
+    1E-16), so a huge or tiny limit neither fails nor prints hundreds of
+    digits (#236: 1e-100000000 would otherwise be about 100 MB of text).
     """
-    if limit and limit.adjusted() >= 15:
+    if limit and (limit.adjusted() >= 15 or limit.adjusted() < -15):
         return f"{limit:E}"
     text = f"{limit:.{places}f}"
     return text if Decimal(text) == limit else f"{limit:f}"
