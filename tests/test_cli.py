@@ -9166,3 +9166,33 @@ class TestPaidResultUnreadableCli:
         assert "Payment was taken, but the stamp extension failed" in result.output
         assert "most likely succeeded" not in result.output
         assert "Contact the gateway operator with the transaction above" in result.output
+
+
+# --- A paid pool acquire answered 2xx with success:false (#209) ---
+
+class TestPaidPoolAcquireNotAcquiredCli:
+    GW = "https://test.gateway.io"
+
+    def test_reported_as_paid_and_not_delivered(self, mocker, requests_mock):
+        from swarm_provenance_uploader.core.gateway_client import GatewayClient
+        from tests.test_gateway_client import _signed_header
+
+        mocker.patch.object(GatewayClient, "_approve_payment",
+                            return_value=(_signed_header(), "$0.050000", None))
+        mocker.patch.object(GatewayClient, "get_pool_available_count", return_value=1)
+        requests_mock.post(f"{self.GW}/api/v1/pool/acquire", [
+            {"status_code": 402, "json": {"accepts": []}},
+            {"status_code": 200, "json": {"success": False, "message": "Not\x1b[2J acquired",
+                                          "fallback_used": False}}])
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--x402", "--gateway-url", self.GW, "upload", "--file", "d.txt",
+                                         "--usePool"])
+        assert result.exit_code == 1
+        assert "Payment was taken, but the pool stamp acquisition failed" in result.output
+        assert "Re-running pays again" in result.output
+        assert "Retry may succeed" not in result.output
+        assert "Try again immediately" not in result.output
+        assert "\x1b" not in result.output
+        assert "Payments sent: $0.050000 USDC (1 payment(s))" in result.output

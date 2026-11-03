@@ -2213,6 +2213,52 @@ class TestPaidRequestOutcomeReviewCases:
         with pytest.raises(PaymentSettledNotDeliveredError):
             paying_client.upload_manifest(str(tar), DUMMY_STAMP)
 
+    POOL_NOT_ACQUIRED = {"status_code": 200, "json": {
+        "success": False, "batch_id": None, "message": "No\x1b[2K stamp‮ handed over",
+        "fallback_used": False}}
+
+    def test_paid_pool_acquire_success_false_is_settled(self, mock_x402, requests_mock):
+        """#209: the gateway settles a paid 2xx, so success:false means paid and not delivered."""
+        from swarm_provenance_uploader.exceptions import (
+            PaymentResultUnreadableError, PaymentSettledNotDeliveredError, PoolAcquisitionError)
+
+        sent = []
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", [PAYMENT_REQUIRED, self.POOL_NOT_ACQUIRED])
+        client, patcher = _client_with(mock_x402, x402_auto_pay=True, x402_on_payment_sent=sent.append)
+        try:
+            with pytest.raises(PaymentSettledNotDeliveredError) as exc_info:
+                client.acquire_stamp_from_pool()
+        finally:
+            patcher.stop()
+        err = exc_info.value
+        assert not isinstance(err, (PoolAcquisitionError, PaymentResultUnreadableError))
+        assert err.nonce == NONCE
+        assert err.status_code == 200
+        text = str(err)
+        assert "Retry may succeed" not in text
+        assert "\x1b" not in text and "‮" not in text
+        assert "No [2K stamp handed over" in text
+        assert len(sent) == 1
+
+    def test_paid_pool_acquire_success_false_long_message_is_cut(self, paying_client, requests_mock):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        answer = {"status_code": 200, "json": {"success": False, "message": "x" * 5000, "fallback_used": False}}
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", [PAYMENT_REQUIRED, answer])
+        with pytest.raises(PaymentSettledNotDeliveredError) as exc_info:
+            paying_client.acquire_stamp_from_pool()
+        assert len(str(exc_info.value)) < 600
+
+    def test_unpaid_pool_acquire_success_false_message_is_sanitized(self, requests_mock):
+        from swarm_provenance_uploader.exceptions import PoolAcquisitionError
+
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", **self.POOL_NOT_ACQUIRED)
+        with pytest.raises(PoolAcquisitionError) as exc_info:
+            GatewayClient(base_url=GW).acquire_stamp_from_pool()
+        text = str(exc_info.value)
+        assert "\x1b" not in text and "‮" not in text
+        assert "No [2K stamp handed over" in text
+
     def test_pool_acquire_timeout_after_payment_is_outcome_unknown(self, paying_client, requests_mock):
         from swarm_provenance_uploader.exceptions import PaymentOutcomeUnknownError
 
