@@ -6256,6 +6256,30 @@ class TestReceiptWaitErrorIsOutcomeUnknown:
         assert err.explorer_url.endswith(err.tx_hash)
         assert err.reason == "no endpoint left"
         assert "Transaction failed" not in str(err)
+        # Classified like a raw transport failure after the send
+        assert "the connection to the RPC failed" in str(err)
+        web3.eth.send_raw_transaction.assert_called_once()
+
+    def test_insufficient_funds_text_after_the_send_is_not_rewritten(
+        self, real_web3_exceptions, mock_chain_deps
+    ):
+        """After the send returned the hash, "insufficient funds" in an error does not
+        make InsufficientFundsError: the transaction was sent."""
+        from swarm_provenance_uploader.exceptions import TransactionOutcomeUnknownError
+
+        _inject_real_exceptions(real_web3_exceptions)
+        web3 = mock_chain_deps["web3_instance"]
+        client = _write_client(mock_chain_deps, [_log("DataStatusChanged")])
+        client._provider._try_fallback = MagicMock(return_value=False)
+        web3.eth.wait_for_transaction_receipt.side_effect = ChainConnectionError(
+            "insufficient funds for gas * price + value", rpc_url="https://rpc.example.org"
+        )
+
+        with pytest.raises(TransactionOutcomeUnknownError) as exc_info:
+            client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        assert not isinstance(exc_info.value, InsufficientFundsError)
+        assert exc_info.value.tx_hash == _format_hash(DUMMY_TX_HASH_BYTES)
         web3.eth.send_raw_transaction.assert_called_once()
 
     def test_rejection_on_the_fallback(self, real_web3_exceptions, mock_chain_deps):
@@ -6436,6 +6460,24 @@ class TestDuplicateSendIsOutcomeUnknown:
         web3.eth.send_raw_transaction.assert_called_once()
         web3.eth.wait_for_transaction_receipt.assert_not_called()
 
+    @pytest.mark.parametrize("text", ["unknown transaction type", "Unknown transaction type: 0x7e"])
+    def test_unknown_transaction_type_is_a_rejection(self, real_web3_exceptions, text):
+        """"known transaction" matches as words only: not inside "unknown transaction"."""
+        from swarm_provenance_uploader.core.chain_client import _signed_tx_hash
+
+        error = real_web3_exceptions.Web3RPCError(
+            str({"code": -32000, "message": text}),
+            rpc_response={"error": {"code": -32000, "message": text}},
+        )
+        client, web3 = _send_client("send_raw_transaction", error)
+
+        with pytest.raises(ChainTransactionError) as exc_info:
+            _send(client)
+
+        assert type(exc_info.value) is ChainTransactionError
+        assert str(exc_info.value) == text
+        assert exc_info.value.tx_hash == _signed_tx_hash(SEND_RAW)
+
     def test_message_only(self, real_web3_exceptions):
         """A Web3RPCError without rpc_response, whose message is the error object's repr."""
         from swarm_provenance_uploader.core.chain_client import _signed_tx_hash
@@ -6517,3 +6559,31 @@ class TestContractErrorsFromReadsAreRedacted:
 
         _assert_raw_error_has_no_key(exc_info.value)
         assert "Could not decode the answer of https://" in str(exc_info.value)
+
+
+class TestRawErrorsFromWritesAreRedacted:
+    """A raw exception that a write method passes through is redacted in place (#234)."""
+
+    @pytest.mark.parametrize("rpc_url", RPC_URLS_WITH_KEY, ids=RPC_URL_IDS)
+    def test_write_method(self, real_web3_exceptions, mock_chain_deps, rpc_url):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        _inject_real_exceptions(real_web3_exceptions)
+        client = ChainClient(chain="base-sepolia", rpc_url=rpc_url, rpc_fallbacks=[])
+        message = f"invalid api key for {rpc_url}"
+        raw = real_web3_exceptions.Web3RPCError(
+            message,
+            rpc_response={"jsonrpc": "2.0", "id": 1, "error": {"code": -32005, "message": message}},
+            user_message=f"Check {rpc_url}",
+        )
+
+        # _write_method maps no raw exceptions (map_rpc_failures=False)
+        with patch.object(ChainClient, "_send_transaction", side_effect=raw):
+            with pytest.raises(real_web3_exceptions.Web3RPCError) as exc_info:
+                client.set_status(swarm_hash=DUMMY_HASH, status=1)
+
+        error = exc_info.value
+        assert error is raw
+        _assert_raw_error_has_no_key(error)
+        assert RPC_KEY not in repr(error.rpc_response)
+        assert error.rpc_response["error"]["code"] == -32005

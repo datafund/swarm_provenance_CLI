@@ -9104,6 +9104,8 @@ class TestOutcomeUnknownAfterTheSend:
         assert result.exit_code == 3, result.stdout + result.stderr
         assert "Transaction failed" not in result.stderr
         assert "Outcome unknown" in result.stderr
+        # Not "was sent": after "nonce too low" it may not have been
+        assert "The transaction may have been sent, and it is not known whether it was mined." in result.stderr
         assert f"Wait for it: swarm-prov-upload chain wait {self.SENT} --event DataRegistered" in result.stderr
         assert "limit exceeded" in result.stderr
         web3.eth.send_raw_transaction.assert_called_once()
@@ -9151,3 +9153,14 @@ class TestOutcomeUnknownAfterTheSend:
         assert data["wait_command"] == f"swarm-prov-upload chain wait {signed} --event DataRegistered"
         web3.eth.send_raw_transaction.assert_called_once()
         web3.eth.wait_for_transaction_receipt.assert_not_called()
+
+
+def test_chain_wait_help_lists_outcome_unknown():
+    """chain wait --help names the exit 3 case of an error answer to the receipt lookup."""
+    result = CliRunner().invoke(app, ["chain", "wait", "--help"])
+
+    text = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    text = " ".join(text.replace("│", " ").split())
+    assert result.exit_code == 0
+    assert "outcome unknown" in text
+    assert "receipt lookup with an error" in text
