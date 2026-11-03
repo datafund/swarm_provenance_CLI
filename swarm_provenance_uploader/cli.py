@@ -409,8 +409,16 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
             typer.echo(f"  {check}", err=True)
             if check_note:
                 typer.echo(check_note, err=True)
-            if e.label_prefix:
-                typer.echo(f"In that list, look for the stamp whose label starts with {e.label_prefix}",
+            if e.label_prefix == "paid-":
+                # The CLI sends no label, so every paid stamp it bought starts so
+                if e.depth is not None:
+                    hints = f"Utilization 0%, a TTL close to the requested duration, and depth {e.depth}."
+                else:
+                    hints = "Utilization 0% and a TTL close to the requested duration."
+                typer.echo("Every paid stamp's label starts with paid-, so the new one is most likely "
+                           f"the newest: {hints}", err=True)
+            elif e.label_prefix:
+                typer.echo(f"In that list, look for the stamp whose label starts with {e.label_prefix}.",
                            err=True)
         else:
             typer.echo(f"The {missing} was not received.", err=True)
@@ -418,7 +426,8 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
             # swarm_connect answers it from the stored 2xx result for 24 h and
             # does not settle the new authorization.
             typer.echo("A gateway that supports Idempotency-Key answers a re-run with the same key "
-                       "from the first request, without charging again:", err=True)
+                       "from the first request, without charging again. It returns the first answer, "
+                       "which includes the result if a proxy or the connection lost it:", err=True)
             typer.echo(f"  {_rerun_with_key(e.idempotency_key)}", err=True)
         if check:
             typer.echo("If it did not work, contact the gateway operator with the transaction above.",
