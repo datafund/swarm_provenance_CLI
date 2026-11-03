@@ -9,6 +9,7 @@ from swarm_provenance_uploader.models import (
     StampDetails,
     StampListResponse,
     StampPurchaseResponse,
+    StampExtensionResponse,
     WalletResponse,
     ChequebookResponse,
 )
@@ -369,7 +370,7 @@ class TestStampsCommands:
     def test_stamps_extend_success(self, mocker):
         """Tests stamps extend command."""
         mock_client = mocker.MagicMock()
-        mock_client.extend_stamp.return_value = DUMMY_STAMP
+        mock_client.extend_stamp_details.return_value = StampExtensionResponse(batchID=DUMMY_STAMP)
 
         mocker.patch(
             "swarm_provenance_uploader.cli.GatewayClient",
@@ -420,13 +421,13 @@ class TestStampsCommands:
     def test_stamps_extend_accepts_0x_prefix(self, mocker):
         """stamps extend drops a 0x prefix before calling the gateway (#159)."""
         mock_client = mocker.MagicMock()
-        mock_client.extend_stamp.return_value = DUMMY_STAMP
+        mock_client.extend_stamp_details.return_value = StampExtensionResponse(batchID=DUMMY_STAMP)
         mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
 
         result = runner.invoke(app, ["stamps", "extend", "0x" + DUMMY_STAMP, "--amount", "1000000"])
 
         assert result.exit_code == 0, f"CLI Failed: {result.output}"
-        assert mock_client.extend_stamp.call_args.args[0] == DUMMY_STAMP
+        assert mock_client.extend_stamp_details.call_args.args[0] == DUMMY_STAMP
 
     def test_stamps_check_accepts_0x_prefix(self, mocker):
         """stamps check drops a 0x prefix before calling the gateway (#159)."""
@@ -7668,9 +7669,9 @@ class TestStampsExtendPaid:
 
     def _extend(self, mocker, *args, global_args=(), effect=None):
         mock_client = mocker.MagicMock()
-        mock_client.extend_stamp.return_value = DUMMY_STAMP
+        mock_client.extend_stamp_details.return_value = StampExtensionResponse(batchID=DUMMY_STAMP)
         if effect is not None:
-            mock_client.extend_stamp.side_effect = effect
+            mock_client.extend_stamp_details.side_effect = effect
         constructor = mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
         result = runner.invoke(app, [*global_args, "stamps", "extend", DUMMY_STAMP, *args])
         return result, mock_client, constructor
@@ -7679,15 +7680,15 @@ class TestStampsExtendPaid:
     def test_duration_hours_sent(self, mocker, flag):
         result, client, _ = self._extend(mocker, flag, "48")
         assert result.exit_code == 0, result.output
-        assert client.extend_stamp.call_args.kwargs["duration_hours"] == 48
-        assert client.extend_stamp.call_args.kwargs.get("amount") is None
+        assert client.extend_stamp_details.call_args.kwargs["duration_hours"] == 48
+        assert client.extend_stamp_details.call_args.kwargs.get("amount") is None
         assert "SUCCESS: Stamp extended" in result.output
         assert f"Batch ID: {DUMMY_STAMP}" in result.output
 
     def test_neither_option_leaves_the_gateway_default(self, mocker):
         result, client, _ = self._extend(mocker)
         assert result.exit_code == 0, result.output
-        kwargs = client.extend_stamp.call_args.kwargs
+        kwargs = client.extend_stamp_details.call_args.kwargs
         assert kwargs.get("duration_hours") is None and kwargs.get("amount") is None
 
     def test_x402_client_used(self, mocker):
@@ -7702,20 +7703,20 @@ class TestStampsExtendPaid:
         result, client, _ = self._extend(mocker, "--amount", "5000000000", "--duration-hours", "48")
         assert result.exit_code == 1
         assert "not both" in result.output
-        client.extend_stamp.assert_not_called()
+        client.extend_stamp_details.assert_not_called()
 
     def test_duration_below_24_refused(self, mocker):
         result, client, _ = self._extend(mocker, "--duration-hours", "10")
         assert result.exit_code == 1
         assert "at least 24" in result.output
-        client.extend_stamp.assert_not_called()
+        client.extend_stamp_details.assert_not_called()
 
     @pytest.mark.parametrize("amount", ["0", "-5"])
     def test_amount_not_positive_refused(self, mocker, amount):
         result, client, constructor = self._extend(mocker, "--amount", amount, global_args=["--x402"])
         assert result.exit_code == 1
         assert "greater than 0" in result.output
-        client.extend_stamp.assert_not_called()
+        client.extend_stamp_details.assert_not_called()
         constructor.assert_not_called()
 
     def test_help_describes_amount_as_plur(self):
@@ -7745,7 +7746,7 @@ class TestStampsExtendPaid:
         err = exceptions.PaymentDeliveredNotStoredError("Paid once.", transaction="0x" + "cd" * 32,
                                                         **self.PAYMENT)
         mock_client = mocker.MagicMock()
-        mock_client.extend_stamp.side_effect = err
+        mock_client.extend_stamp_details.side_effect = err
         mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=mock_client)
         result = CliRunner(mix_stderr=False).invoke(
             app, ["--x402", "stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
@@ -8973,3 +8974,31 @@ class TestReplacedAdviceOneSource:
         assert "delegate state" in cli._replaced_cli_advice("DataRegistered")
         mocker.patch("swarm_provenance_uploader.chain.exceptions.replaced_check_kind", return_value="record")
         assert "chain get" in cli._replaced_cli_advice("DelegateAuthorized")
+
+
+class TestStampsExtendExpiry:
+    """stamps extend prints the new expiry from the gateway's answer (#217)."""
+
+    def _extend(self, mocker, expires_at):
+        client = mocker.MagicMock()
+        client.extend_stamp_details.return_value = StampExtensionResponse(
+            batchID=DUMMY_STAMP, message="Postage stamp extended successfully", expires_at=expires_at)
+        mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=client)
+        return runner.invoke(app, ["stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
+
+    def test_prints_the_new_expiry(self, mocker):
+        result = self._extend(mocker, "2026-12-01T10:00:00Z")
+        assert result.exit_code == 0, result.output
+        assert f"Batch ID: {DUMMY_STAMP}" in result.stdout
+        assert "New expiry: 2026-12-01T10:00:00Z (estimate at today's price)" in result.stdout
+
+    def test_unknown_expiry_points_to_stamps_info(self, mocker):
+        result = self._extend(mocker, None)
+        assert result.exit_code == 0, result.output
+        assert "New expiry: not reported by the node yet." in result.stdout
+        assert f"swarm-prov-upload stamps info {DUMMY_STAMP}" in result.stdout
+
+    def test_expiry_control_characters_are_dropped(self, mocker):
+        result = self._extend(mocker, "2026-12-01T10:00:00Z\x1b[2J")
+        assert "\x1b" not in result.stdout
+        assert "New expiry: 2026-12-01T10:00:00Z[2J" in result.stdout
