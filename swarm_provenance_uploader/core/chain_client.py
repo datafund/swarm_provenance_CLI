@@ -1057,8 +1057,11 @@ class ChainClient:
         """
         web3 = self._provider.web3
         reason = _error_reason(error)
+        # A write knows that it sent the transaction; wait_for_transaction
+        # (no sender) only has a hash that the caller gave it
+        sent = "was sent" if sender is not None else "may have been sent"
         pending = ReceiptTimeoutError(
-            f"Not confirmed yet: transaction {tx_hash_str or '(hash unknown)'} was sent, "
+            f"Not confirmed yet: transaction {tx_hash_str or '(hash unknown)'} {sent}, "
             f"but no receipt arrived within {timeout} seconds. It may still be mined: "
             f"do not send it again. Wait for it with wait_for_transaction(), or check "
             f"it in the block explorer.",
