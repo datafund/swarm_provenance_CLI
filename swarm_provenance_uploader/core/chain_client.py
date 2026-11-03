@@ -431,7 +431,8 @@ class ChainClient:
                 if gas_limit is not an int of at least 21000, or if
                 require_wallet is True and no valid key is configured.
         """
-        from ..config import MIN_GAS_LIMIT
+        # constants, not config: importing config would load a .env file
+        from ..constants import MIN_GAS_LIMIT
 
         if gas_limit is not None and (
             isinstance(gas_limit, bool) or not isinstance(gas_limit, int) or gas_limit < MIN_GAS_LIMIT

@@ -1111,6 +1111,7 @@ swarm_provenance_uploader/
 │   ├── __init__.py
 │   ├── cli.py
 │   ├── config.py
+│   ├── constants.py             # Constants without side effects (MIN_GAS_LIMIT)
 │   ├── exceptions.py            # Custom exception classes
 │   ├── models.py
 │   ├── chain/                   # Blockchain subpackage (optional)

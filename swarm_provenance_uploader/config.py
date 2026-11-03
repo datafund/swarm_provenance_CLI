@@ -102,9 +102,9 @@ CHAIN_EXPLORER_URL = os.getenv("CHAIN_EXPLORER_URL")
 # Environment variable name that contains the wallet private key
 CHAIN_WALLET_KEY_ENV = os.getenv("CHAIN_WALLET_KEY_ENV", "PROVENANCE_WALLET_KEY")
 
-# Smallest gas limit accepted for --gas and CHAIN_GAS_LIMIT: the gas that
-# every transaction uses (#226)
-MIN_GAS_LIMIT = 21000
+# Smallest gas limit accepted for --gas and CHAIN_GAS_LIMIT (#226). Defined
+# in constants.py, so the library can use it without loading .env.
+from .constants import MIN_GAS_LIMIT  # noqa: E402
 
 # Explicit gas limit (optional, overrides estimation when set). A value that
 # is not a whole number of at least MIN_GAS_LIMIT is not used: the error is

@@ -231,7 +231,7 @@ The application follows a modular architecture with clear separation of concerns
    - `abi/DataProvenance.json`: Embedded v2 contract ABI
 4. **Data Models** (`models.py`): Pydantic v2 schemas for metadata and API responses
 5. **Exceptions** (`exceptions.py`): Custom exception hierarchy for unified error handling
-6. **Configuration** (`config.py`): Environment-based configuration management
+6. **Configuration** (`config.py`): Environment-based configuration management. Importing it loads `.env`, so library code (`core/`, `chain/`) must not import it; shared constants such as `MIN_GAS_LIMIT` live in `constants.py`, which has no side effects, and `config.py` re-exports them (#226)
 
 ### Backend clients
 
@@ -372,7 +372,7 @@ Uses python-dotenv for environment configuration. `config.py` loads `find_dotenv
 - `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs (optional, replaces the preset fallbacks)
 - `CHAIN_CONTRACT`: Custom contract address (optional, overrides preset)
 - `CHAIN_EXPLORER_URL`: Custom block explorer URL (optional, overrides preset)
-- `CHAIN_GAS_LIMIT`: Explicit gas limit (optional, skips RPC estimation, so a transaction that would revert is still sent and costs gas). At least `config.MIN_GAS_LIMIT` (21000), the same lower bound as `--gas` on every chain write command. A value that is not ASCII digits (after stripping whitespace) of at least 21000 leaves `config.CHAIN_GAS_LIMIT` at `None` and sets `config.CHAIN_GAS_LIMIT_ERROR`; `_check_gas_limit_setting()` in `_get_chain_client(require_wallet=True)` exits 1 with that error (JSON `invalid_gas_limit` with `--json`) only for a command that has `--gas` and was run without it, so reads, `chain balance` and `--gas` still work (#226). `ChainClient(gas_limit=...)` raises `ChainConfigurationError` for a value that is not an `int` (a `bool` included) of at least 21000
+- `CHAIN_GAS_LIMIT`: Explicit gas limit (optional, skips RPC estimation, so a transaction that would revert is still sent and costs gas). At least `MIN_GAS_LIMIT` (21000, in `constants.py`, re-exported by `config.py`), the same lower bound as `--gas` on every chain write command. A value that is not ASCII digits (after stripping whitespace) of at least 21000 leaves `config.CHAIN_GAS_LIMIT` at `None` and sets `config.CHAIN_GAS_LIMIT_ERROR`; `_check_gas_limit_setting()` in `_get_chain_client(require_wallet=True)` exits 1 with that error (JSON `invalid_gas_limit` with `--json`) only for a command that has `--gas` and was run without it, so reads, `chain balance` and `--gas` still work (#226). `ChainClient(gas_limit=...)` raises `ChainConfigurationError` for a value that is not an `int` (a `bool` included) of at least 21000
 - `PROVENANCE_WALLET_KEY`: Wallet private key for signing transactions. Only chain writes and `chain balance` need it; `_get_chain_client(require_wallet=True)` loads it up front for those commands, and read-only commands use a client that reads the key on first use (#140)
 
 ## Testing approach
