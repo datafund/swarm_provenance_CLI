@@ -849,9 +849,9 @@ class GatewayClient:
         """
         Whether this paid operation is what paid, for the payments-sent total.
 
-        A second 402 is trusted as uncollected: the gateway answers 402 when it
-        did not accept the payment, including a settlement it refused, so
-        nothing is counted for it. The IDEMPOTENCY_* answers and a replayed
+        A second 402 is trusted as uncollected, unless it says it was settled:
+        the gateway answers 402 when it did not accept the payment, including
+        a settlement it refused, so nothing is counted for it. The IDEMPOTENCY_* answers and a replayed
         result refer to the first request with the key: this operation paid
         only if one of its own attempts is the one that may have been collected
         (otherwise it was an earlier run, already counted there).
@@ -865,8 +865,8 @@ class GatewayClient:
         refused before the payment was collected.
         """
         status = response.status_code
-        if status == 402:
-            return False
+        # In the same order as _raise_for_paid_failure, so that the count
+        # agrees with the report: IDEMPOTENCY_*, then settled, then 402.
         if (code or "").startswith("IDEMPOTENCY") or response.headers.get("Idempotent-Replayed"):
             return outstanding is not None
         body = GatewayClient._error_body(response)
@@ -876,6 +876,8 @@ class GatewayClient:
         if (response.headers.get("X-Payment-Status") == "settled_not_delivered"
                 or body_code == "DELIVERY_FAILED_AFTER_PAYMENT"):
             return True
+        if status == 402:
+            return False
         if 400 <= status < 500:
             return False
         if status >= 500 and GatewayClient._says_not_charged(body):
