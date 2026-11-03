@@ -2050,8 +2050,12 @@ class TestPaymentSentHook:
                                                       "X-Payment-Transaction": TX_HASH}),
          "PaymentSettledNotDeliveredError"),
         (SETTLEMENT_UNAVAILABLE_502, "PaymentOutcomeUnknownError"),
+        ({"status_code": 402, "headers": {"X-Payment-Status": "settled_not_delivered",
+                                          "X-Payment-Transaction": TX_HASH},
+          "json": {"detail": {"message": "Settled, then refused."}}},
+         "PaymentSettledNotDeliveredError"),
     ], ids=["409-settled", "400-settled", "500-delivery-failed", "502", "503-other",
-            "502-verify-failed-settled", "502-settlement-unavailable"])
+            "502-verify-failed-settled", "502-settlement-unavailable", "402-settled"])
     def test_hook_still_called_when_possibly_charged(self, mock_x402, requests_mock, answer, error):
         from swarm_provenance_uploader import exceptions as exc
 
