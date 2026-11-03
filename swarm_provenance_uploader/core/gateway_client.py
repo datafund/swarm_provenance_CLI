@@ -1685,6 +1685,8 @@ class GatewayClient:
             PoolNotEnabledError: If pool is not enabled on this gateway
             PoolEmptyError: If no stamps available for requested size/depth
             PoolAcquisitionError: If acquisition fails despite availability
+            PaymentSettledNotDeliveredError: If a paid acquire is answered
+                2xx with success false: the payment was collected (#209)
         """
         size_desc = size or "default"
         if depth:
@@ -1719,8 +1721,21 @@ class GatewayClient:
                 result = AcquireStampResponse.model_validate(response.json())
 
             if not result.success:
+                # Gateway-authored text, cleaned before it is shown (#209, as #151)
+                message = _sanitize_gateway_text(result.message, limit=300) or "no reason given"
+                payment = getattr(response, "x402_payment", None)
+                if payment:
+                    # swarm_connect settles every paid request it answers with
+                    # 2xx (the handler before handing the batch over, or the
+                    # x402 middleware), so a paid success:false was charged
+                    # and delivered nothing. A retry would pay again (#209).
+                    raise PaymentSettledNotDeliveredError(
+                        f"The payment was collected, but the gateway answered HTTP "
+                        f"{response.status_code} without a stamp: {message}.",
+                        status_code=response.status_code, **payment,
+                    )
                 raise PoolAcquisitionError(
-                    f"Failed to acquire stamp from pool: {result.message}. "
+                    f"Failed to acquire stamp from pool: {message}. "
                     "Retry may succeed.",
                     available_count=0,
                 )
