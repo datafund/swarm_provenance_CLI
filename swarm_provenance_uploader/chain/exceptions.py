@@ -330,16 +330,28 @@ DATA_RECORD_EVENTS = frozenset({
 })
 
 
-def replaced_check_advice(event_name: Optional[str]) -> str:
-    """What to check before a replaced write is sent again, for its event (#167).
+def replaced_check_kind(event_name: Optional[str]) -> str:
+    """What to check before a replaced write is sent again, by its event (#167).
 
-    A write with a data record is read back with ``chain get``. A delegate
-    write has no data record: check the delegate state or the transaction
-    in the block explorer. Without an event, both are named.
+    The one place that decides it; the library message and the CLI text
+    both use it. Returns "record" for a write with a data record (read it
+    back with ``chain get``), "delegate" for a delegate write (no data
+    record: check the delegate state or the transaction in the block
+    explorer), and "unknown" without an event or for another event.
     """
     if event_name in DATA_RECORD_EVENTS:
-        return "read the record back (chain get <data hash>)"
+        return "record"
     if event_name == "DelegateAuthorized":
+        return "delegate"
+    return "unknown"
+
+
+def replaced_check_advice(event_name: Optional[str]) -> str:
+    """The library wording of replaced_check_kind's advice."""
+    kind = replaced_check_kind(event_name)
+    if kind == "record":
+        return "read the record back (chain get <data hash>)"
+    if kind == "delegate":
         return (
             "check the delegate state (the contract's isAuthorizedDelegate) or the "
             "transaction in the block explorer"

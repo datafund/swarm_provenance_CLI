@@ -2513,12 +2513,17 @@ def _wait_command(e: "exceptions.TransactionUnconfirmedError") -> Optional[str]:
 
 
 def _replaced_cli_advice(event_name: Optional[str]) -> str:
-    """The check to make before a replaced write is run again, by its event (#167)."""
-    from .chain.exceptions import DATA_RECORD_EVENTS
+    """The CLI wording of the check to make before a replaced write is run again (#167).
 
-    if event_name in DATA_RECORD_EVENTS:
+    The decision is chain.exceptions.replaced_check_kind, shared with the
+    library message.
+    """
+    from .chain import exceptions as chain_exceptions
+
+    kind = chain_exceptions.replaced_check_kind(event_name)
+    if kind == "record":
         return "check the record with swarm-prov-upload chain get <data hash>"
-    if event_name == "DelegateAuthorized":
+    if kind == "delegate":
         return "check the delegate state or the transaction in the explorer"
     return (
         "check the transaction in the explorer, or the record with "
@@ -2555,6 +2560,7 @@ def _not_recorded_json(e: "exceptions.TransactionUnconfirmedError") -> dict:
         data["reason"] = redact_urls(getattr(e, "reason", None))
     if isinstance(e, exceptions.ReceiptTimeoutError):
         data["timeout"] = e.timeout
+        data["wait_command"] = _wait_command(e)
     return data
 
 
@@ -2562,10 +2568,13 @@ def _handle_not_recorded(
     e: "exceptions.TransactionUnconfirmedError",
     output_json: bool = False,
     label: Optional[str] = None,
+    waiting: bool = False,
 ) -> None:
     """Report a sent transaction that is not confirmed as recorded.
 
     `label` names the failed step of a composite command in the error line.
+    `waiting` is True for `chain wait`, which sends nothing: after a receipt
+    timeout, running it again is safe, while a write must not be run again.
     """
     verified = isinstance(e, exceptions.TransactionNotRecordedError)
     if output_json:
@@ -2584,9 +2593,13 @@ def _handle_not_recorded(
             within = f"within {e.timeout:g} seconds"
         else:
             within = "in time"
+        if waiting:
+            advice = "It may still be mined. Running chain wait again is safe: it sends nothing."
+        else:
+            advice = "It may still be mined: do not run the write again."
         typer.secho(
             prefix + f"Not confirmed yet. The transaction was sent, but no receipt "
-            f"arrived {within}. It may still be mined: do not run the command again.",
+            f"arrived {within}. " + advice,
             fg=typer.colors.RED, err=True,
         )
         command = _wait_command(e)
@@ -3193,7 +3206,7 @@ def chain_wait(
     except typer.Exit:
         raise
     except exceptions.TransactionUnconfirmedError as e:
-        _handle_not_recorded(e, output_json=output_json)
+        _handle_not_recorded(e, output_json=output_json, waiting=True)
         raise typer.Exit(code=_unconfirmed_exit_code(e))
     except exceptions.TransactionNotFoundError as e:
         if output_json:
@@ -3261,7 +3274,10 @@ def chain_wait(
         raise typer.Exit(code=EXIT_PENDING)
     except exceptions.ChainError as e:
         _print_chain_traceback(e, verbose)
-        typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
+        if output_json:
+            typer.echo(json.dumps(_step_error_json(e), indent=2))
+        else:
+            typer.secho(f"ERROR: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if output_json:
