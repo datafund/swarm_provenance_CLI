@@ -6353,3 +6353,75 @@ class TestLinksProbeUsesFallbacks:
 
         assert "Duplicate transformation check skipped" in caplog.text
         mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_called_once()
+
+
+class TestDeployBlockSetting:
+    """CHAIN_DEPLOY_BLOCK / deploy_block, and no preset deploy block for a custom contract (#231)."""
+
+    CUSTOM = "0x1234567890abcdef1234567890abcdef12345678"
+
+    def test_preset_deploy_block_for_preset_contract(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        assert ChainProvider(chain="base-sepolia").deploy_block == 39_905_249
+        # The preset contract given explicitly, in another case, is still the preset's
+        provider = ChainProvider(chain="base-sepolia", contract_address=DUMMY_CONTRACT.lower())
+        assert provider.deploy_block == 39_905_249
+
+    def test_custom_contract_does_not_use_the_preset_deploy_block(self, mock_chain_deps):
+        """A contract deployed before the preset block would lose its older events."""
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        provider = ChainProvider(chain="base-sepolia", contract_address=self.CUSTOM)
+        assert provider.deploy_block is None
+
+    def test_custom_contract_with_deploy_block(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        provider = ChainProvider(chain="base-sepolia", contract_address=self.CUSTOM, deploy_block=1_000)
+        assert provider.deploy_block == 1_000
+
+    @pytest.mark.parametrize("value, expected", [
+        (0, 0), (123, 123), ("123", 123), (" 7 ", 7), ("", 39_905_249), (None, 39_905_249),
+    ])
+    def test_deploy_block_values(self, mock_chain_deps, value, expected):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        assert ChainProvider(chain="base-sepolia", deploy_block=value).deploy_block == expected
+
+    @pytest.mark.parametrize("value", [-1, "-1", "abc", "1.5", "1_000", "0x10", "١٢", True, 1.0])
+    def test_invalid_deploy_block_rejected(self, mock_chain_deps, value):
+        from swarm_provenance_uploader.chain.provider import ChainProvider
+
+        with pytest.raises(ChainConfigurationError) as exc_info:
+            ChainProvider(chain="base-sepolia", deploy_block=value)
+        assert "CHAIN_DEPLOY_BLOCK" in str(exc_info.value)
+        assert "non-negative integer" in str(exc_info.value)
+
+    def test_chain_client_passes_deploy_block(self, mock_chain_deps):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        client = ChainClient(
+            chain="base-sepolia", contract_address=self.CUSTOM, deploy_block="2000", require_wallet=False,
+        )
+        assert client._provider.deploy_block == 2_000
+
+    def test_deploy_block_used_by_the_event_scan(self, mock_chain_deps):
+        """A v1 custom contract with CHAIN_DEPLOY_BLOCK uses the event index from that block."""
+        from swarm_provenance_uploader.chain.event_cache import clear_registry
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        clear_registry()
+        client = ChainClient(
+            chain="base-sepolia", contract_address=self.CUSTOM, deploy_block=2_000, require_wallet=False,
+        )
+        client._contract._supports_v2 = False
+        client._contract.get_all_transformations = MagicMock(return_value=[])
+        client._contract.get_all_merge_events = MagicMock(return_value=[])
+        client._contract.get_transformations_from = MagicMock(return_value=[])
+
+        client.get_provenance_chain(DUMMY_HASH)
+
+        assert client._contract.get_all_transformations.call_args.kwargs["from_block"] == 2_000
+        client._contract.get_transformations_from.assert_not_called()
+        clear_registry()

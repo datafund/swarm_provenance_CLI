@@ -510,3 +510,44 @@ def test_max_auto_pay_kept_as_written(tmp_path, raw, kept):
     out = _run("import swarm_provenance_uploader.config as c; print(repr(c.X402_MAX_AUTO_PAY_USD))",
                tmp_path, env)
     assert out == [repr(kept)]
+
+
+def test_chain_deploy_block_read_from_env(tmp_path):
+    tmp_path = tmp_path / "work"
+    tmp_path.mkdir()
+    env = _clean_env(CHAIN_DEPLOY_BLOCK="12345")
+    out = _run("import swarm_provenance_uploader.config as c; print(repr(c.CHAIN_DEPLOY_BLOCK))", tmp_path, env)
+    assert out == ["'12345'"]
+
+
+def test_chain_deploy_block_passed_to_chain_client():
+    from swarm_provenance_uploader.cli import _get_chain_client
+
+    saved = dict(_chain_config)
+    _chain_config["deploy_block"] = "12345"
+    try:
+        with patch("swarm_provenance_uploader.core.chain_client.ChainClient") as client_class:
+            _get_chain_client()
+    finally:
+        _chain_config.clear()
+        _chain_config.update(saved)
+
+    assert client_class.call_args.kwargs["deploy_block"] == "12345"
+
+
+def test_invalid_chain_deploy_block_is_a_configuration_error():
+    """A bad CHAIN_DEPLOY_BLOCK stops the chain command with exit 1 and names the setting."""
+    pytest.importorskip("web3")
+    saved = dict(_chain_config)
+    _chain_config["deploy_block"] = "abc"
+    try:
+        # No network: a mocked Web3 class
+        with patch("swarm_provenance_uploader.chain.provider._import_web3", return_value=MagicMock()):
+            result = runner.invoke(app, ["chain", "get", "a" * 64])
+    finally:
+        _chain_config.clear()
+        _chain_config.update(saved)
+
+    assert result.exit_code == 1, result.output
+    assert "CHAIN_DEPLOY_BLOCK" in result.output
+    assert "non-negative integer" in result.output
