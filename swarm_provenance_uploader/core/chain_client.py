@@ -22,6 +22,7 @@ from ..chain.exceptions import (
     ChainConnectionError,
     ChainTransactionError,
     ChainValidationError,
+    ContractCodeNotFoundError,
     InsufficientFundsError,
     TransactionNotRecordedError,
     TransactionNotVerifiedError,
@@ -126,9 +127,10 @@ def _is_transport_failure(error: Exception) -> bool:
     a JSON-RPC error answer and not a receipt-wait timeout. A node that
     answered with a JSON-RPC error, a contract revert, or a node on the
     wrong chain (ChainIdMismatchError) is not one: another endpoint would
-    give the same answer, or must not be used.
+    give the same answer, or must not be used. ContractCodeNotFoundError is
+    one: an RPC that is not synced has no code at the contract address.
     """
-    if isinstance(error, ChainConnectionError):
+    if isinstance(error, (ChainConnectionError, ContractCodeNotFoundError)):
         return True
     return (
         _is_rpc_failure(error)
@@ -1433,6 +1435,42 @@ class ChainClient:
 
         Returns:
             TransformResult with transaction details.
+
+        Raises:
+            ChainValidationError: If a hash is invalid (raised before any
+                read) or the description is invalid. Nothing was sent.
+            TransformationAlreadyExistsError: If the duplicate check finds
+                the same transformation. Nothing was sent.
+            ChainConnectionError: If no RPC endpoint can be reached during
+                the duplicate check, or before the transaction is sent.
+                Nothing was sent.
+            ContractCodeNotFoundError: If no RPC has contract code at the
+                address (the contract version check). Nothing was sent.
+            ChainIdMismatchError: If the RPC is on another chain than the
+                selected preset. Nothing was sent.
+            ChainConfigurationError: If no wallet key is configured, the RPC
+                rejects a request of the duplicate check (a JSON-RPC error
+                answer), the deploy block is later than the chain head, or
+                the contract address has no code. Nothing was sent.
+            ChainError: If the duplicate check fails for another reason.
+                Nothing was sent.
+            InsufficientFundsError: If the wallet balance is too low.
+            TransactionNotRecordedError: If the transaction succeeded but the
+                contract did not emit the DataTransformed event.
+            TransactionNotVerifiedError: If the transaction was mined but its
+                events could not be decoded.
+            ReceiptTimeoutError: If no receipt arrived in time. The
+                transaction may still be mined.
+            TransactionReplacedError: If another transaction with the same
+                nonce was mined instead.
+            TransactionOutcomeUnknownError: If the connection failed after
+                the transaction was sent. It may have been sent.
+            ChainTransactionError: If building or sending the transaction
+                fails, or the transaction reverts.
+
+        A confirmed v1 contract with no deploy block on a chain longer than
+        50,000 blocks is the only case where the duplicate check is skipped;
+        a warning is logged.
         """
         logger.debug(
             "Transform: original=%s new=%s desc=%s",
@@ -2076,9 +2114,12 @@ class ChainClient:
 
         Raises:
             ChainValidationError: If max_depth is outside 0 to 50.
-            ChainConfigurationError: If the RPC rejects a read, or the
-                lineage of a v1 contract may be incomplete because its
-                deploy block is unknown.
+            ChainConfigurationError: If the RPC rejects a read, the lineage
+                of a v1 contract may be incomplete because its deploy block
+                is unknown, or the deploy block is later than the chain head
+                (for example a CHAIN_DEPLOY_BLOCK set for another chain).
+            ContractCodeNotFoundError: If no RPC has contract code at the
+                address (a ChainConfigurationError).
             ChainConnectionError: If an RPC read fails during the walk.
             ChainError: If another read fails during the walk, or a linked
                 hash reads as not registered.
@@ -2104,7 +2145,16 @@ class ChainClient:
         # scans. A probe error fails the walk like any other read (#230):
         # a transport failure moves to a fallback (this method's read loop),
         # and is never taken as a v1 contract.
-        use_state_reads = self._contract.supports_transformation_links()
+        try:
+            use_state_reads = self._contract.supports_transformation_links()
+        except ChainError:
+            raise
+        except Exception as e:
+            if _is_rpc_failure(e):
+                raise
+            raise ChainError(
+                f"Provenance chain read failed: the contract version check failed: {_error_reason(e)}"
+            ) from e
 
         # Fall back to event cache for v1 contracts
         from ..chain.event_cache import get_cache

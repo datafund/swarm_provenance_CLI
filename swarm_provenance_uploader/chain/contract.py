@@ -13,7 +13,7 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .exceptions import ChainConfigurationError, ChainValidationError
+from .exceptions import ChainConfigurationError, ChainValidationError, ContractCodeNotFoundError
 from .redact import redact_urls
 
 logger = logging.getLogger(__name__)
@@ -47,15 +47,21 @@ class DataStatus(IntEnum):
     DELETED = 2
 
 
-def _is_missing_function_answer(error: Exception) -> bool:
-    """True if a call's error is the contract's answer that the function does not exist.
+def _is_revert(error: Exception) -> bool:
+    """True if web3 reports a revert (ContractLogicError, including
+    ContractCustomError and ContractPanicError). Matched by class name, so
+    web3 is not imported here."""
+    return any(cls.__name__ == "ContractLogicError" for cls in type(error).__mro__)
 
-    A revert (web3 ContractLogicError, including ContractCustomError and
-    ContractPanicError) or an empty result (BadFunctionCallOutput). Matched
-    by class name, so web3 is not imported here.
+
+def _is_empty_result(error: Exception) -> bool:
+    """True if web3 reports an empty call result (BadFunctionCallOutput).
+
+    web3 raises it both when the function is missing and when the address
+    has no code on the RPC, so the caller must check the code. Matched by
+    class name.
     """
-    names = {cls.__name__ for cls in type(error).__mro__}
-    return "ContractLogicError" in names or "BadFunctionCallOutput" in names
+    return any(cls.__name__ == "BadFunctionCallOutput" for cls in type(error).__mro__)
 
 
 # --- Validation helpers ---
@@ -717,11 +723,18 @@ class DataProvenanceContract:
 
         Performs a trial call on first invocation and caches the result.
         Returns False, and caches it, only when the contract answers that
-        the function does not exist: a revert (web3 ContractLogicError) or
-        an empty result (BadFunctionCallOutput). Any other error, such as a
-        connection failure, a timeout or a JSON-RPC error answer, says
-        nothing about the contract: it is raised and not cached, so the
-        next call probes again (#230).
+        the function does not exist: a revert (web3 ContractLogicError), or
+        an empty result (BadFunctionCallOutput) while the address has code
+        on the RPC. Any other error, such as a connection failure, a timeout
+        or a JSON-RPC error answer, says nothing about the contract: it is
+        raised and not cached, so the next call probes again (#230).
+
+        Raises:
+            ContractCodeNotFoundError: If the result was empty and the
+                address has no code on the RPC in use (for example an RPC
+                that is not synced). ChainClient tries the fallbacks.
+            Exception: Any error of the call other than a revert or an
+                empty result, or of the code read (eth_getCode).
         """
         if self._supports_v2 is not None:
             return self._supports_v2
@@ -729,7 +742,16 @@ class DataProvenanceContract:
             test_hash = b"\x00" * 32
             self._contract.functions.getTransformationLinks(test_hash).call()
         except Exception as e:
-            if not _is_missing_function_answer(e):
+            if _is_empty_result(e):
+                # web3 also answers this way when the address has no code:
+                # only a contract that has code but lacks the function is v1
+                if not self._web3.eth.get_code(self._address):
+                    raise ContractCodeNotFoundError(
+                        f"No contract code at {self._address} on this RPC: it may "
+                        "not be synced, or the contract address or chain is wrong.",
+                        contract_address=self._address,
+                    ) from e
+            elif not _is_revert(e):
                 raise
             logger.debug("getTransformationLinks not available, using v1 reads: %s", redact_urls(str(e)))
             self._supports_v2 = False
