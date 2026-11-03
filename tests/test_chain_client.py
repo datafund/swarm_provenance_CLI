@@ -1916,24 +1916,30 @@ class TestEventCache:
         """Tests that get_cache returns the same instance for same key."""
         from swarm_provenance_uploader.chain.event_cache import get_cache
 
-        cache1 = get_cache("base-sepolia", DUMMY_CONTRACT)
-        cache2 = get_cache("base-sepolia", DUMMY_CONTRACT)
+        cache1 = get_cache("base-sepolia", DUMMY_CONTRACT, 0)
+        cache2 = get_cache("base-sepolia", DUMMY_CONTRACT, 0)
         assert cache1 is cache2
 
     def test_different_keys_different_instances(self):
         """Tests that different chain/contract combos get different caches."""
         from swarm_provenance_uploader.chain.event_cache import get_cache
 
-        cache1 = get_cache("base-sepolia", DUMMY_CONTRACT)
-        cache2 = get_cache("base", "0x" + "11" * 20)
+        cache1 = get_cache("base-sepolia", DUMMY_CONTRACT, 0)
+        cache2 = get_cache("base", "0x" + "11" * 20, 0)
         assert cache1 is not cache2
+
+    def test_different_deploy_blocks_different_instances(self):
+        """A cache built from one deploy block is not reused for another (#231 review)."""
+        from swarm_provenance_uploader.chain.event_cache import get_cache
+
+        assert get_cache("base-sepolia", DUMMY_CONTRACT, 1_000) is not get_cache("base-sepolia", DUMMY_CONTRACT, 0)
 
     def test_case_insensitive_address(self):
         """Tests that contract address lookup is case-insensitive."""
         from swarm_provenance_uploader.chain.event_cache import get_cache
 
-        cache1 = get_cache("base-sepolia", "0xABCDEF")
-        cache2 = get_cache("base-sepolia", "0xabcdef")
+        cache1 = get_cache("base-sepolia", "0xABCDEF", 0)
+        cache2 = get_cache("base-sepolia", "0xabcdef", 0)
         assert cache1 is cache2
 
     def test_full_scan_populates_maps(self):
@@ -2927,7 +2933,7 @@ class TestProvenanceChainFailClosedEventPaths:
         client = self._v1_client(mock_chain_deps, None)
         client._contract.get_transformations_from = MagicMock(return_value=[])
         client._contract.get_transformations_to = MagicMock(
-            side_effect=lambda h: [(bytes.fromhex(parent), bytes.fromhex(h), "step")]
+            side_effect=lambda h, **kw: [(bytes.fromhex(parent), bytes.fromhex(h), "step")]
             if h == DUMMY_HASH else []
         )
         chain = client.get_provenance_chain(swarm_hash=DUMMY_HASH, max_depth=1)
@@ -5450,14 +5456,19 @@ class TestTransformPreCheckUsesFallbacks:
         mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
         mock_chain_deps["account"].sign_transaction.assert_not_called()
 
-    def test_other_errors_still_log_and_continue(self, mock_chain_deps):
+    def test_other_errors_stop_the_write(self, mock_chain_deps):
+        """A duplicate check that could not run stops the write (#230 review)."""
+        from swarm_provenance_uploader.exceptions import ChainError
+
         client = self._client(mock_chain_deps)
         client._contract.get_transformation_links = MagicMock(side_effect=ValueError("bad answer"))
 
-        client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
+        with pytest.raises(ChainError, match="duplicate transformation check: bad answer. Nothing was sent."):
+            client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
 
         client._provider._try_fallback.assert_not_called()
-        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_called_once()
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
 
     def test_v1_block_number_read_falls_back(self, mock_chain_deps, monkeypatch):
         import requests
@@ -5525,13 +5536,18 @@ class TestTransformV1PreCheckScanUsesFallbacks:
         mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
         mock_chain_deps["account"].sign_transaction.assert_not_called()
 
-    def test_other_scan_errors_still_log_and_continue(self, mock_chain_deps, monkeypatch):
+    def test_other_scan_errors_stop_the_write(self, mock_chain_deps, monkeypatch):
+        """A duplicate check that could not run stops the write (#230 review)."""
+        from swarm_provenance_uploader.exceptions import ChainError
+
         client, cache = self._client(mock_chain_deps, monkeypatch, ValueError("bad log"))
 
-        client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
+        with pytest.raises(ChainError, match="duplicate transformation check: bad log. Nothing was sent."):
+            client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
 
         client._provider._try_fallback.assert_not_called()
-        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_called_once()
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
 
 
 class TestNestedFallbackGuard:
@@ -6517,3 +6533,200 @@ class TestProvenanceChainIncompleteLineageFailsClosed:
 
         assert chain[0].transformations[0].new_data_hash == child
         client._contract.get_transformations_from.assert_not_called()
+
+
+class TestTransformDuplicateCheckRejectionStopsTheWrite:
+    """A duplicate check that could not run stops the write before signing (#230 review).
+
+    With the real web3.exceptions classes. transform() logged a JSON-RPC
+    error answer or another error, then signed and sent the transaction,
+    so a duplicate could be recorded.
+    """
+
+    MESSAGE = "The RPC rejected the request during the duplicate transformation check"
+
+    def _assert_nothing_sent(self, mock_chain_deps):
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    def test_probe_rejection(self, real_web3_exceptions, mock_chain_deps):
+        _inject_real_exceptions(real_web3_exceptions)
+        client = _fallback_client(mock_chain_deps, [_log("DataTransformed")])
+        mock_chain_deps["contract"].functions.getTransformationLinks.return_value.call.side_effect = (
+            real_web3_exceptions.Web3RPCError("rate limited")
+        )
+
+        with pytest.raises(ChainConfigurationError) as exc_info:
+            client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
+
+        assert str(exc_info.value) == f"{self.MESSAGE}: rate limited. Nothing was sent."
+        client._provider._try_fallback.assert_not_called()
+        self._assert_nothing_sent(mock_chain_deps)
+
+    def test_state_read_rejection(self, real_web3_exceptions, mock_chain_deps):
+        _inject_real_exceptions(real_web3_exceptions)
+        client = _fallback_client(mock_chain_deps, [_log("DataTransformed")])
+        client._contract.supports_transformation_links = MagicMock(return_value=True)
+        client._contract.get_transformation_links = MagicMock(
+            side_effect=real_web3_exceptions.Web3RPCError("rate limited")
+        )
+
+        with pytest.raises(ChainConfigurationError, match=f"{self.MESSAGE}: rate limited. Nothing was sent."):
+            client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
+
+        client._provider._try_fallback.assert_not_called()
+        self._assert_nothing_sent(mock_chain_deps)
+
+    def test_v1_scan_rejection(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.chain.event_cache import clear_registry
+
+        _inject_real_exceptions(real_web3_exceptions)
+        clear_registry()
+        client = _fallback_client(mock_chain_deps, [_log("DataTransformed")])
+        client._contract.supports_transformation_links = MagicMock(return_value=False)
+        client._provider.deploy_block = 0
+        client._contract.get_all_transformations = MagicMock(
+            side_effect=real_web3_exceptions.Web3RPCError("query returned more than 10000 results")
+        )
+
+        try:
+            with pytest.raises(ChainConfigurationError, match="more than 10000 results. Nothing was sent."):
+                client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
+        finally:
+            clear_registry()
+
+        client._provider._try_fallback.assert_not_called()
+        self._assert_nothing_sent(mock_chain_deps)
+
+    def test_probe_other_error(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.exceptions import ChainError
+
+        _inject_real_exceptions(real_web3_exceptions)
+        client = _fallback_client(mock_chain_deps, [_log("DataTransformed")])
+        client._contract.supports_transformation_links = MagicMock(side_effect=ValueError("odd answer"))
+
+        with pytest.raises(ChainError) as exc_info:
+            client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
+
+        assert not isinstance(exc_info.value, (ChainConfigurationError, ChainConnectionError))
+        assert "duplicate transformation check: odd answer. Nothing was sent." in str(exc_info.value)
+        self._assert_nothing_sent(mock_chain_deps)
+
+
+class TestEventCacheKeyedByDeployBlock:
+    """Two clients with different deploy blocks do not share one event cache (#231 review)."""
+
+    def test_earlier_deploy_block_sees_older_edge(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.event_cache import clear_registry
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        clear_registry()
+        child = "b" * 64
+
+        def scan(from_block, to_block):
+            # One edge, at block 500
+            if from_block <= 500 <= to_block:
+                return [(DUMMY_HASH_BYTES, bytes.fromhex(child), "step")]
+            return []
+
+        def make_client(deploy_block):
+            client = ChainClient(chain="base-sepolia", deploy_block=deploy_block, require_wallet=False)
+            client._contract._supports_v2 = False
+            client._contract.get_all_transformations = MagicMock(side_effect=scan)
+            client._contract.get_all_merge_events = MagicMock(return_value=[])
+            return client
+
+        mock_chain_deps["web3_instance"].eth.block_number = 60_000
+        client_a = make_client(1_000)
+        client_b = make_client(0)
+        try:
+            chain_a = client_a.get_provenance_chain(DUMMY_HASH, max_depth=0)
+            chain_b = client_b.get_provenance_chain(DUMMY_HASH, max_depth=0)
+        finally:
+            clear_registry()
+
+        assert chain_a[0].transformations == []
+        assert [t.new_data_hash for t in chain_b[0].transformations] == [child]
+        assert client_b._contract.get_all_transformations.call_args.kwargs["from_block"] == 0
+
+
+class TestPerNodeWindowIsTheCheckedWindow:
+    """The per-node queries scan the window that the completeness check checked (#231 review)."""
+
+    def test_queries_use_the_checked_block(self, mock_chain_deps):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        client = ChainClient(chain="base-sepolia", require_wallet=False)
+        client._contract._supports_v2 = False
+        client._provider.deploy_block = None
+        client._contract.get_transformations_from = MagicMock(return_value=[])
+        client._contract.get_transformations_to = MagicMock(return_value=[])
+        web3 = mock_chain_deps["web3_instance"]
+        # Checked at 50,000; a later read would see a longer chain
+        type(web3.eth).block_number = PropertyMock(side_effect=[50_000] + [60_000] * 10)
+        try:
+            client.get_provenance_chain(DUMMY_HASH)
+        finally:
+            del type(web3.eth).block_number
+
+        assert client._contract.get_transformations_from.call_args.kwargs["to_block"] == 50_000
+        assert client._contract.get_transformations_to.call_args.kwargs["to_block"] == 50_000
+
+    @pytest.mark.parametrize("method", ["get_transformations_from", "get_transformations_to"])
+    def test_contract_query_ends_at_to_block(self, mock_chain_deps, method):
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        web3 = mock_chain_deps["web3_instance"]
+        contract = DataProvenanceContract(web3=web3, contract_address=DUMMY_CONTRACT)
+        contract._get_logs_chunked = MagicMock(return_value=[])
+        type(web3.eth).block_number = PropertyMock(side_effect=AssertionError("block number read"))
+        try:
+            getattr(contract, method)(DUMMY_HASH, to_block=70_000)
+        finally:
+            del type(web3.eth).block_number
+
+        _, _, from_block, to_block = contract._get_logs_chunked.call_args.args
+        assert (from_block, to_block) == (20_000, 70_000)
+
+
+class TestRecordReadProbeTransportFailure:
+    """getDataRecord fails, then the probe hits a transport failure (#230 review)."""
+
+    def test_contract_raises_and_does_not_cache(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.chain.contract import DataProvenanceContract
+
+        functions = mock_chain_deps["contract"].functions
+        functions.getDataRecord.return_value.call.side_effect = OverflowError("decode")
+        functions.getTransformationLinks.return_value.call.side_effect = (
+            real_web3_exceptions.ProviderConnectionError("down")
+        )
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"], contract_address=DUMMY_CONTRACT,
+        )
+
+        with pytest.raises(real_web3_exceptions.ProviderConnectionError):
+            contract.get_data_record(DUMMY_HASH)
+        assert contract._supports_v2 is None
+        functions.dataRecords.return_value.call.assert_not_called()
+
+    def test_read_loop_falls_back(self, real_web3_exceptions, mock_chain_deps):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        _inject_real_exceptions(real_web3_exceptions)
+        functions = mock_chain_deps["contract"].functions
+        functions.getDataRecord.return_value.call.side_effect = [
+            OverflowError("decode"),
+            (DUMMY_HASH_BYTES, OTHER_ADDRESS, 1, "t", b"\x00" * 32, [], [], 0),
+        ]
+        functions.getTransformationLinks.return_value.call.side_effect = (
+            real_web3_exceptions.ProviderConnectionError("down")
+        )
+        client = ChainClient(chain="base-sepolia", require_wallet=False)
+        client._provider._try_fallback = MagicMock(side_effect=[True, False])
+
+        record = client.get(DUMMY_HASH)
+
+        assert record.owner == OTHER_ADDRESS
+        client._provider._try_fallback.assert_called_once()
+        assert client._contract._supports_v2 is None
+        functions.dataRecords.return_value.call.assert_not_called()
