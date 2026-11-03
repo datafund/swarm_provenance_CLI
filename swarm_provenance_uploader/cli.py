@@ -305,6 +305,12 @@ _X402_EXPLORERS = {
 }
 
 
+# A hedge, not a measured fact: swarm_connect models about 120 s of stamp
+# propagation after a purchase (STAMP_PROPAGATION_SECONDS).
+_PURCHASE_TIMING_NOTE = ("It may show Usable: No, or not be listed yet, for a few minutes "
+                         "after the purchase.")
+
+
 def _wallet_stamps_command(e: exceptions.PaymentOutcomeUnknownError) -> Optional[str]:
     """The command that lists the payer's stamps, or None when the payer is not known."""
     return f"swarm-prov-upload stamps list --wallet {e.payer} --full" if e.payer else None
@@ -407,19 +413,19 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
         if check:
             typer.echo("Check the result before you contact the gateway operator:", err=True)
             typer.echo(f"  {check}", err=True)
-            if check_note:
-                typer.echo(check_note, err=True)
             if e.label_prefix == "paid-":
-                # The CLI sends no label, so every paid stamp it bought starts so
-                if e.depth is not None:
-                    hints = f"Utilization 0%, a TTL close to the requested duration, and depth {e.depth}."
-                else:
-                    hints = "Utilization 0% and a TTL close to the requested duration."
-                typer.echo("Every paid stamp's label starts with paid-, so the new one is most likely "
-                           f"the newest: {hints}", err=True)
+                # The CLI sends no label: the gateway names a paid batch
+                # paid-<suffix> and a pool batch pool-<depth>-<time>
+                hint = ("Stamps the CLI buys have a label that starts with paid- (stamps from the pool "
+                        "start with pool-). The new one has utilization 0% and a TTL close to the "
+                        "requested duration (the gateway's default when no duration was given)")
+                hint += f", and depth {e.depth}." if e.depth is not None else "."
+                typer.echo(hint, err=True)
             elif e.label_prefix:
                 typer.echo(f"In that list, look for the stamp whose label starts with {e.label_prefix}.",
                            err=True)
+            if check_note:
+                typer.echo(check_note, err=True)
         else:
             typer.echo(f"The {missing} was not received.", err=True)
         if e.idempotency_key:
@@ -427,7 +433,8 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
             # does not settle the new authorization.
             typer.echo("A gateway that supports Idempotency-Key answers a re-run with the same key "
                        "from the first request, without charging again. It returns the first answer, "
-                       "which includes the result if a proxy or the connection lost it:", err=True)
+                       "which includes the result if a proxy or the connection lost it; if the "
+                       "gateway's own answer lacked it, the replay lacks it too:", err=True)
             typer.echo(f"  {_rerun_with_key(e.idempotency_key)}", err=True)
         if check:
             typer.echo("If it did not work, contact the gateway operator with the transaction above.",
@@ -819,7 +826,7 @@ def upload(
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
             _report_payment_outcome(e, "the pool stamp acquisition", check=_wallet_stamps_command(e),
-                                    missing="batch ID")
+                                    missing="batch ID", check_note=_PURCHASE_TIMING_NOTE)
         except typer.Exit:
             # The availability check above already printed its error and chose
             # the exit code; the catch-all would re-report it as an empty
@@ -863,7 +870,7 @@ def upload(
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
             _report_payment_outcome(e, "the stamp purchase", check=_wallet_stamps_command(e),
-                                    missing="batch ID")
+                                    missing="batch ID", check_note=_PURCHASE_TIMING_NOTE)
         except exceptions.StampPurchaseError as e:
             typer.secho(f"ERROR: Failed purchasing stamp: {e}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
@@ -1486,7 +1493,7 @@ def upload_collection(
             _report_payment_required(e)
         except exceptions.PaymentOutcomeUnknownError as e:
             _report_payment_outcome(e, "getting the stamp", check=_wallet_stamps_command(e),
-                                    missing="batch ID")
+                                    missing="batch ID", check_note=_PURCHASE_TIMING_NOTE)
         except typer.Exit:
             raise  # already reported, e.g. an invalid auto-pay limit (#152)
         except Exception as e:
