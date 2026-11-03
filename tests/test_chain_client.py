@@ -7415,6 +7415,9 @@ _BAD_WRITE_INPUT = [
     pytest.param("set_status", {"swarm_hash": "zz", "status": 1}, id="set_status"),
     pytest.param("batch_set_status", {"swarm_hashes": [DUMMY_HASH, _H2], "statuses": [1]}, id="batch_set_status"),
     pytest.param("transfer_ownership", {"swarm_hash": "zz", "new_owner": OTHER_ADDRESS}, id="transfer_ownership"),
+    pytest.param("anchor_for", {"swarm_hash": DUMMY_HASH, "owner": "zz"}, id="anchor_for-owner"),
+    pytest.param("transfer_ownership", {"swarm_hash": DUMMY_HASH, "new_owner": "zz"}, id="transfer_ownership-owner"),
+    pytest.param("set_delegate", {"delegate": "zz"}, id="set_delegate"),
     pytest.param("merge_transform", {"source_hashes": [DUMMY_HASH], "new_hash": _H3, "description": "d"},
                  id="merge_transform"),
     pytest.param("transform", {"original_hash": DUMMY_HASH, "new_hash": _H2, "description": "x" * 257},
@@ -7538,3 +7541,179 @@ class TestCodeCheckPerEndpoint:
         assert [url for name, url in calls if name == "get_code"] == [self.URLS[0]]
         assert ("wait_for_transaction_receipt", self.URLS[1]) in calls
         mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_called_once()
+
+
+class _ThreeEndpoints:
+    """A, B and C as the RPC endpoints; B has no contract code.
+
+    _try_fallback moves to the next URL; get_code and each read registered
+    with ``by_url`` answer for the endpoint in use (provider.rpc_url) and
+    record it.
+    """
+
+    URLS = ["https://a.example", "https://b.example", "https://c.example"]
+    CODE = {URLS[0]: DUMMY_CODE, URLS[1]: b"", URLS[2]: DUMMY_CODE}
+
+    def __init__(self, client, mock_chain_deps):
+        self.client = client
+        self.provider = client._provider
+        self.provider.rpc_url = self.URLS[0]
+        self.calls = []
+
+        def try_fallback(tried=None):
+            index = self.URLS.index(self.provider.rpc_url) + 1
+            if index >= len(self.URLS):
+                return False
+            self.provider.rpc_url = self.URLS[index]
+            return True
+
+        self.provider._try_fallback = MagicMock(side_effect=try_fallback)
+        mock_chain_deps["web3_instance"].eth.get_code.side_effect = self.by_url(
+            "get_code", {url: code for url, code in self.CODE.items()}
+        )
+
+    def by_url(self, name, answers):
+        """A side_effect answering per endpoint; an exception instance is raised."""
+        def side_effect(*args, **kwargs):
+            url = self.provider.rpc_url
+            self.calls.append((name, url))
+            answer = answers[url]
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+        return side_effect
+
+    def urls(self, name):
+        return [url for call, url in self.calls if call == name]
+
+
+class TestDuplicateCheckDoesNotTrustAnEndpointWithoutCode:
+    """transform()'s duplicate check reads only on endpoints with the contract code (#230 review 8).
+
+    A fails with a transport error, B has no code and answers "no
+    duplicate", C has the duplicate. The read on B was trusted, so the
+    duplicate was sent on C.
+    """
+
+    ORIGINAL = "ab" * 32
+    NEW = "cd" * 32
+
+    def _down(self):
+        import requests
+        return requests.exceptions.ConnectionError("down")
+
+    def _assert_nothing_sent(self, mock_chain_deps):
+        mock_chain_deps["account"].sign_transaction.assert_not_called()
+        mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
+
+    def test_v2_links_read(self, mock_chain_deps):
+        client = _write_client(mock_chain_deps, [_log("DataTransformed")])
+        net = _ThreeEndpoints(client, mock_chain_deps)
+        client._contract.supports_transformation_links = MagicMock(return_value=True)
+        client._contract.get_transformation_links = MagicMock(side_effect=net.by_url("links", {
+            net.URLS[0]: self._down(), net.URLS[1]: [],
+            net.URLS[2]: [(bytes.fromhex(self.NEW), "existing")],
+        }))
+
+        with pytest.raises(TransformationAlreadyExistsError):
+            client.transform(original_hash=self.ORIGINAL, new_hash=self.NEW, description="d")
+
+        assert net.urls("links") == [net.URLS[0], net.URLS[2]]
+        self._assert_nothing_sent(mock_chain_deps)
+
+    def test_per_node_check(self, mock_chain_deps):
+        client = _write_client(mock_chain_deps, [_log("DataTransformed")])
+        net = _ThreeEndpoints(client, mock_chain_deps)
+        client._contract.supports_transformation_links = MagicMock(return_value=False)
+        client._provider.deploy_block = None
+        mock_chain_deps["web3_instance"].eth.block_number = 1_000
+        client._contract.get_transformations_from = MagicMock(side_effect=net.by_url("per_node", {
+            net.URLS[0]: self._down(), net.URLS[1]: [],
+            net.URLS[2]: [(bytes.fromhex(self.ORIGINAL), bytes.fromhex(self.NEW), "existing")],
+        }))
+
+        with pytest.raises(TransformationAlreadyExistsError):
+            client.transform(original_hash=self.ORIGINAL, new_hash=self.NEW, description="d")
+
+        assert net.urls("per_node") == [net.URLS[0], net.URLS[2]]
+        self._assert_nothing_sent(mock_chain_deps)
+
+    def test_v1_cache_scan(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.event_cache import clear_registry, get_cache
+
+        clear_registry()
+        client = _write_client(mock_chain_deps, [_log("DataTransformed")])
+        net = _ThreeEndpoints(client, mock_chain_deps)
+        client._contract.supports_transformation_links = MagicMock(return_value=False)
+        client._provider.deploy_block = 0
+        mock_chain_deps["web3_instance"].eth.block_number = 1_000
+        client._contract.get_all_transformations = MagicMock(side_effect=net.by_url("scan", {
+            net.URLS[0]: self._down(), net.URLS[1]: [],
+            net.URLS[2]: [(bytes.fromhex(self.ORIGINAL), bytes.fromhex(self.NEW), "existing")],
+        }))
+        client._contract.get_all_merge_events = MagicMock(return_value=[])
+
+        try:
+            with pytest.raises(TransformationAlreadyExistsError):
+                client.transform(original_hash=self.ORIGINAL, new_hash=self.NEW, description="d")
+            cache = get_cache(client._provider.chain, client._provider.contract_address, 0)
+        finally:
+            clear_registry()
+
+        # No scan on B, so the cache marker never moved past events B lacks
+        assert net.urls("scan") == [net.URLS[0], net.URLS[2]]
+        assert cache._forward == {self.ORIGINAL: [(self.NEW, "existing")]}
+        assert cache._last_scanned_block == 1_000
+        self._assert_nothing_sent(mock_chain_deps)
+
+
+class TestLineageDoesNotTrustAnEndpointWithoutCode:
+    """get_provenance_chain reads and caches only answers from endpoints with the code (#230 review 8)."""
+
+    CHILD = "cd" * 32
+
+    def _down(self):
+        import requests
+        return requests.exceptions.ConnectionError("down")
+
+    def test_v2_state_reads(self, mock_chain_deps):
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        client = ChainClient(chain="base-sepolia", require_wallet=False)
+        net = _ThreeEndpoints(client, mock_chain_deps)
+        client._contract._supports_v2 = True
+        client._contract.get_transformation_links = MagicMock(side_effect=net.by_url("links", {
+            net.URLS[0]: self._down(), net.URLS[1]: [],
+            net.URLS[2]: [(bytes.fromhex(self.CHILD), "step")],
+        }))
+        client._contract.get_transformation_parents = MagicMock(return_value=[])
+
+        chain = client.get_provenance_chain(DUMMY_HASH, max_depth=0)
+
+        assert [t.new_data_hash for t in chain[0].transformations] == [self.CHILD]
+        assert net.urls("links") == [net.URLS[0], net.URLS[2]]
+
+    def test_v1_cache_scan(self, mock_chain_deps):
+        from swarm_provenance_uploader.chain.event_cache import clear_registry, get_cache
+        from swarm_provenance_uploader.core.chain_client import ChainClient
+
+        clear_registry()
+        client = ChainClient(chain="base-sepolia", deploy_block=0, require_wallet=False)
+        net = _ThreeEndpoints(client, mock_chain_deps)
+        client._contract._supports_v2 = False
+        mock_chain_deps["web3_instance"].eth.block_number = 1_000
+        client._contract.get_all_transformations = MagicMock(side_effect=net.by_url("scan", {
+            net.URLS[0]: self._down(), net.URLS[1]: [],
+            net.URLS[2]: [(DUMMY_HASH_BYTES, bytes.fromhex(self.CHILD), "step")],
+        }))
+        client._contract.get_all_merge_events = MagicMock(return_value=[])
+
+        try:
+            chain = client.get_provenance_chain(DUMMY_HASH, max_depth=0)
+            cache = get_cache(client._provider.chain, client._provider.contract_address, 0)
+        finally:
+            clear_registry()
+
+        assert [t.new_data_hash for t in chain[0].transformations] == [self.CHILD]
+        assert net.urls("scan") == [net.URLS[0], net.URLS[2]]
+        assert cache._forward == {DUMMY_HASH: [(self.CHILD, "step")]}
