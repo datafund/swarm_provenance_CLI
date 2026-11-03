@@ -1760,8 +1760,8 @@ def stamps_extend(
             final_note="The batch ID is the stamp ID you gave. Do not pay again.",
             final_stdout=["SUCCESS: Stamp extended.", f"Batch ID: {stamp_id}"],
             check=f"swarm-prov-upload stamps info {stamp_id}",
-            check_note=("Compare the TTL it shows with the TTL before the extension: "
-                        "a longer TTL means the extension worked."),
+            check_note=("Compare the Amount and TTL it shows with the values before the extension: "
+                        "the Amount grows by exactly the amount added per chunk, and the TTL gets longer."),
         )
     except typer.Exit:
         raise  # already reported, e.g. an invalid auto-pay limit (#152)

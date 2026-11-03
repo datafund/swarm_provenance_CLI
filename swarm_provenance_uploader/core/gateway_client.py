@@ -963,6 +963,15 @@ class GatewayClient:
     _NOT_CHARGED_CODES = {"PURCHASE_CAPACITY", "GATEWAY_DAILY_SPEND_CEILING", "SPEND_BUDGET_UNAVAILABLE",
                           "POOL_ALLOWANCE_UNAVAILABLE"}
 
+    # Only answers the gateway sends ONLY before it settles belong here. Its
+    # generic 5xx texts ("Could not purchase stamp. The Bee node may be
+    # unavailable.", "Invalid response from Swarm API. Please try again.", "An
+    # unexpected error occurred while ...", the upload 502/500) are raised both
+    # before and after settle_payment(). Only X-Payment-Status:
+    # settled_not_delivered tells the two apart, and nothing on the answer says
+    # that the gateway adds it (it started with swarm_connect #398) or that no
+    # proxy removed it. A header-less one therefore stays "may have been taken".
+    #
     # 5xx texts without a code that the gateway sends before it settles (#213):
     # the stamp extension's check that Bee reports a stamp price (503), the
     # x402 dependency's pricing failure (503, for example a Bee price of 0),
