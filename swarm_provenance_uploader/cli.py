@@ -843,6 +843,27 @@ def _auto_pay_limit():
         return None
 
 
+def _format_max_pay(max_pay) -> str:
+    """The auto-pay limit as x402 status shows it, without the dollar sign."""
+    from decimal import Decimal
+    from .core.gateway_client import format_auto_pay_limit
+
+    # Two decimals when they are exact, else as the refusal message shows it
+    # (no round(): it fails above 28 digits)
+    max_pay_str = format_auto_pay_limit(max_pay)
+    if max_pay.adjusted() < 15 and Decimal(f"{max_pay:.2f}") == max_pay:
+        max_pay_str = f"{max_pay:.2f}"
+    return max_pay_str
+
+
+def _max_pay_help_default() -> str:
+    """The configured auto-pay limit for --help: formatted, or as written if invalid (#144)."""
+    max_pay = _auto_pay_limit()
+    if max_pay is None:
+        return str(_x402_config["max_auto_pay_usd"])
+    return _format_max_pay(max_pay)
+
+
 def _check_auto_pay_limit(source: str) -> None:
     """Exit 1 if the auto-pay limit is not a finite number of 0 or more (#152)."""
     if _auto_pay_limit() is None:
@@ -2388,15 +2409,7 @@ def x402_status(
         typer.secho("  WARNING: X402_MAX_AUTO_PAY_USD is not a finite number of 0 or more; "
                     "commands that pay will exit with an error.", fg=typer.colors.YELLOW)
     else:
-        from decimal import Decimal
-        from .core.gateway_client import format_auto_pay_limit
-
-        # Two decimals when they are exact, else as the refusal message shows it
-        # (no round(): it fails above 28 digits)
-        max_pay_str = format_auto_pay_limit(max_pay)
-        if max_pay.adjusted() < 15 and Decimal(f"{max_pay:.2f}") == max_pay:
-            max_pay_str = f"{max_pay:.2f}"
-        typer.echo(f"  Max auto-pay: ${max_pay_str}")
+        typer.echo(f"  Max auto-pay: ${_format_max_pay(max_pay)}")
     expected_pay_to = _x402_config.get("expected_pay_to")
     typer.echo(f"  Pay-to pin:   {expected_pay_to or 'none (any recipient the gateway names)'}")
     if expected_pay_to and not re.fullmatch(r"0x[0-9a-fA-F]{40}", expected_pay_to.strip()):
@@ -2432,12 +2445,15 @@ def x402_status(
         if pk_env_name is None:
             typer.echo("To enable x402 payments, set X402_PRIVATE_KEY_ENV to a variable name")
             typer.echo("(or unset it to use X402_PRIVATE_KEY), and put your key in that variable.")
+        elif printable_key_env_name(pk_env_name) == pk_env_name:
+            typer.echo("To enable x402 payments, set your private key for one command,")
+            typer.echo("reading it from your password manager (not typed into the shell):")
+            typer.echo(f"  {pk_env_name}=\"$(op read 'op://<vault>/<item>/<field>')\" swarm-prov-upload x402 status")
+            typer.echo("Or keep it in a .env file with mode 600 (chmod 600 .env), never committed.")
         else:
-            typer.echo("To enable x402 payments, set your private key:")
-            if printable_key_env_name(pk_env_name) == pk_env_name:
-                typer.echo(f"  export {pk_env_name}=0x...")
-            else:
-                typer.echo(f"  put it in {printable_key_env_name(pk_env_name)}")
+            typer.echo(f"To enable x402 payments, put your private key in {printable_key_env_name(pk_env_name)},")
+            typer.echo("reading it from your password manager (not typed into the shell),")
+            typer.echo("or keep it in a .env file with mode 600 (chmod 600 .env), never committed.")
         typer.echo("")
 
 
@@ -2463,9 +2479,12 @@ def x402_balance(
     if not has_pk:
         typer.secho(f"ERROR: No private key configured.", fg=typer.colors.RED, err=True)
         if printable_key_env_name(pk_env_name) == pk_env_name:
-            typer.echo(f"Set your private key: export {pk_env_name}=0x...")
+            typer.echo("Set your private key for one command, reading it from your password manager:")
+            typer.echo(f"  {pk_env_name}=\"$(op read 'op://<vault>/<item>/<field>')\" swarm-prov-upload x402 balance")
         else:
-            typer.echo(f"Set your private key in {printable_key_env_name(pk_env_name)}.")
+            typer.echo(f"Set your private key in {printable_key_env_name(pk_env_name)}, "
+                       "reading it from your password manager.")
+        typer.echo("Or keep it in a .env file with mode 600 (chmod 600 .env), never committed.")
         raise typer.Exit(code=1)
 
     network = _x402_config["network"]
@@ -2506,8 +2525,12 @@ def x402_info():
     typer.echo("   - Create new: Use MetaMask or any Ethereum wallet")
     typer.echo("   - Export private key (starts with 0x)")
 
-    typer.echo("\n2. Set environment variable:")
-    typer.echo("   export X402_PRIVATE_KEY=0x...")
+    typer.echo("\n2. Set X402_PRIVATE_KEY for one command, without typing the key")
+    typer.echo("   (it would stay in your shell history). Read it from your password")
+    typer.echo("   manager's CLI (1Password op, pass, macOS security), for example:")
+    typer.echo("   X402_PRIVATE_KEY=\"$(op read 'op://<vault>/<item>/<field>')\" \\")
+    typer.echo("     swarm-prov-upload --x402 upload --file data.txt")
+    typer.echo("   If you keep it in a .env file instead: chmod 600 .env, never commit it.")
     typer.echo("   (X402_PRIVATE_KEY_ENV can name another variable; the legacy")
     typer.echo("   SWARM_X402_PRIVATE_KEY is still read. See docs/x402-setup.md.)")
 
@@ -4369,7 +4392,8 @@ def main(
     )] = None,
     gateway_url: Annotated[Optional[str], typer.Option(
         "--gateway-url",
-        help=f"Gateway URL (when backend=gateway). [default: {config.GATEWAY_URL}]"
+        help="Gateway URL (when backend=gateway).",
+        show_default=config.GATEWAY_URL,  # shown in --help (#144)
     )] = None,
     x402: Annotated[Optional[bool], typer.Option(
         "--x402/--no-x402",
@@ -4384,15 +4408,18 @@ def main(
     max_pay: Annotated[Optional[str], typer.Option(
         "--max-pay",
         metavar="FLOAT",  # kept as written, then parsed exactly (#152)
-        help="Maximum auto-pay amount in USD per request. [default: 1.00]"
+        help="Maximum auto-pay amount in USD per request.",
+        show_default=_max_pay_help_default(),  # X402_MAX_AUTO_PAY_USD, as x402 status shows it (#144)
     )] = None,
     x402_network: Annotated[Optional[str], typer.Option(
         "--x402-network",
-        help="x402 network: 'base-sepolia' (testnet) or 'base' (mainnet); the CAIP-2 ids 'eip155:84532' and 'eip155:8453' also work. [default: base-sepolia]"
+        help="x402 network: 'base-sepolia' (testnet) or 'base' (mainnet); the CAIP-2 ids 'eip155:84532' and 'eip155:8453' also work.",
+        show_default=_x402_config["network"],  # X402_NETWORK, normalized (#144)
     )] = None,
     chain: Annotated[Optional[str], typer.Option(
         "--chain",
-        help="Blockchain for on-chain anchoring: 'base-sepolia' (testnet) or 'base' (mainnet)."
+        help="Blockchain for on-chain anchoring: 'base-sepolia' (testnet) or 'base' (mainnet).",
+        show_default=config.CHAIN_NAME,
     )] = None,
     chain_rpc: Annotated[Optional[str], typer.Option(
         "--chain-rpc",
@@ -4402,8 +4429,8 @@ def main(
         "--idempotency-key",
         help="Idempotency-Key for this command's paid requests. Pass the key printed by a "
              "failed run to repeat it: a gateway that supports the key answers from the first "
-             "result instead of charging again. [default: a new random key per command]",
-        show_default=False,
+             "result instead of charging again.",
+        show_default="a new random key per command",
     )] = None,
     free: Annotated[Optional[bool], typer.Option(
         "--free/--no-free",

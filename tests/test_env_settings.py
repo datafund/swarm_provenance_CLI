@@ -144,7 +144,9 @@ def test_x402_status_custom_key_env_not_set(no_key_env):
 
     assert result.exit_code == 0
     assert "Not set" in result.stdout
-    assert "export MY_X402_KEY=" in result.stdout
+    # The hint names the custom variable (#141), without "export KEY=0x" (#144)
+    assert "MY_X402_KEY=\"$(op read" in result.stdout
+    assert "export" not in result.stdout
     assert "b" * 16 not in result.output
 
 
@@ -180,7 +182,9 @@ def test_x402_balance_refuses_when_custom_key_env_empty(no_key_env):
         result = runner.invoke(app, ["x402", "balance"])
 
     assert result.exit_code == 1
-    assert "export MY_X402_KEY=" in result.stdout
+    # The hint names the custom variable (#141), without "export KEY=0x" (#144)
+    assert "MY_X402_KEY=\"$(op read" in result.stdout
+    assert "export" not in result.stdout
     client_class.assert_not_called()
 
 
