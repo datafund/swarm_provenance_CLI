@@ -2264,6 +2264,34 @@ class TestPaidRequestOutcomeReviewCases:
         assert "No [2K stamp handed over" in text
         assert len(sent) == 1
 
+    @pytest.mark.parametrize("message,expected", [
+        ("Not acquired.", "without a stamp: Not acquired."),
+        ("Not acquired", "without a stamp: Not acquired."),
+        ("Not acquired. ", "without a stamp: Not acquired."),
+        ("Not acquired...", "without a stamp: Not acquired."),
+    ])
+    def test_paid_pool_acquire_success_false_message_ends_in_one_period(
+            self, paying_client, requests_mock, message, expected):
+        from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
+
+        answer = {"status_code": 200, "json": {"success": False, "message": message, "fallback_used": False}}
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", [PAYMENT_REQUIRED, answer])
+        with pytest.raises(PaymentSettledNotDeliveredError) as exc_info:
+            paying_client.acquire_stamp_from_pool()
+        text = str(exc_info.value)
+        assert text.endswith(expected)
+        assert ".." not in text
+
+    def test_unpaid_pool_acquire_success_false_message_ends_in_one_period(self, requests_mock):
+        from swarm_provenance_uploader.exceptions import PoolAcquisitionError
+
+        requests_mock.post(f"{GW}/api/v1/pool/acquire", json={
+            "success": False, "message": "Not acquired.", "fallback_used": False})
+        with pytest.raises(PoolAcquisitionError) as exc_info:
+            GatewayClient(base_url=GW).acquire_stamp_from_pool()
+        assert ".." not in str(exc_info.value)
+        assert "Not acquired. Retry may succeed." in str(exc_info.value)
+
     def test_paid_pool_acquire_success_false_long_message_is_cut(self, paying_client, requests_mock):
         from swarm_provenance_uploader.exceptions import PaymentSettledNotDeliveredError
 
