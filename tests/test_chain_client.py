@@ -7160,9 +7160,14 @@ class TestLinksProbeEmptyResultChecksCode:
         )
         mock_chain_deps["web3_instance"].eth.get_code.return_value = b""
 
-        with pytest.raises(ContractCodeNotFoundError):
+        with pytest.raises(ContractCodeNotFoundError) as exc_info:
             client.transform(original_hash=DUMMY_HASH, new_hash="b" * 64, description="d")
 
+        # The same final wording as every other write (#230 review 6)
+        assert str(exc_info.value) == (
+            f"No contract code at {DUMMY_CONTRACT} on base-sepolia: "
+            "wrong contract address or chain. Nothing was sent."
+        )
         assert client._provider._try_fallback.call_count == 2
         mock_chain_deps["account"].sign_transaction.assert_not_called()
         mock_chain_deps["web3_instance"].eth.send_raw_transaction.assert_not_called()
@@ -7305,3 +7310,86 @@ class TestDuplicateCheckErrorMapping:
         other = _duplicate_check_error(ValueError("odd"), None)
         assert type(other) is ChainError
         assert str(other).endswith("odd. Nothing was sent.")
+
+
+_H2 = "b" * 64
+_H3 = "c" * 64
+# (method, kwargs, contract function, receipt events)
+_WRITES_ON_ONE_ENDPOINT = [
+    pytest.param("anchor", {"swarm_hash": DUMMY_HASH}, "registerData", ["DataRegistered"], id="anchor"),
+    pytest.param("batch_anchor", {"swarm_hashes": [DUMMY_HASH], "data_types": ["t"]},
+                 "batchRegisterData", ["DataRegistered"], id="batch_anchor"),
+    pytest.param("set_storage_ref", {"data_hash": DUMMY_HASH, "storage_ref": _H2},
+                 "setStorageRef", ["StorageRefLinked"], id="set_storage_ref"),
+    pytest.param("access", {"swarm_hash": DUMMY_HASH}, "recordAccess", ["DataAccessed"], id="access"),
+    pytest.param("batch_access", {"swarm_hashes": [DUMMY_HASH]}, "batchRecordAccess", ["DataAccessed"],
+                 id="batch_access"),
+    pytest.param("set_status", {"swarm_hash": DUMMY_HASH, "status": 1}, "setDataStatus",
+                 ["DataStatusChanged"], id="set_status"),
+    pytest.param("batch_set_status", {"swarm_hashes": [DUMMY_HASH], "statuses": [1]}, "batchSetDataStatus",
+                 ["DataStatusChanged"], id="batch_set_status"),
+    pytest.param("transfer_ownership", {"swarm_hash": DUMMY_HASH, "new_owner": OTHER_ADDRESS},
+                 "transferDataOwnership", ["DataOwnershipTransferred"], id="transfer_ownership"),
+    pytest.param("set_delegate", {"delegate": OTHER_ADDRESS}, "setDelegate", ["DelegateAuthorized"],
+                 id="set_delegate"),
+    pytest.param("merge_transform", {"source_hashes": [DUMMY_HASH, _H2], "new_hash": _H3, "description": "d"},
+                 "recordMergeTransformation", ["DataMerged"], id="merge_transform"),
+    pytest.param("transform", {"original_hash": DUMMY_HASH, "new_hash": _H2, "description": "d"},
+                 "recordTransformation", ["DataTransformed"], id="transform"),
+]
+
+
+class TestWriteRunsOnOneEndpoint:
+    """After an RPC without contract code, the whole write runs on the fallback (#230 review 6).
+
+    _build_tx ran before the contract code check in most writes, so the
+    transaction was built (with its fee fields) on the RPC without code
+    and signed and sent on the fallback. Each web3 call records the
+    endpoint in use; _try_fallback switches it.
+    """
+
+    @pytest.mark.parametrize("method, kwargs, function, events", _WRITES_ON_ONE_ENDPOINT)
+    def test_every_step_after_the_switch_runs_on_the_fallback(
+        self, mock_chain_deps, method, kwargs, function, events
+    ):
+        client = _write_client(mock_chain_deps, [_log(e) for e in events])
+        web3 = mock_chain_deps["web3_instance"]
+        state = {"endpoint": "primary"}
+        calls = []
+
+        def try_fallback(tried=None):
+            if state["endpoint"] == "primary":
+                state["endpoint"] = "fallback"
+                return True
+            return False
+
+        client._provider._try_fallback = MagicMock(side_effect=try_fallback)
+
+        def recorded(name, value):
+            def side_effect(*args, **kwargs):
+                calls.append((name, state["endpoint"]))
+                return value() if callable(value) else value
+            return side_effect
+
+        web3.eth.get_code.side_effect = recorded(
+            "get_code", lambda: b"" if state["endpoint"] == "primary" else DUMMY_CODE
+        )
+        for name in ("get_transaction_count", "estimate_gas", "send_raw_transaction",
+                     "wait_for_transaction_receipt"):
+            mock = getattr(web3.eth, name)
+            mock.side_effect = recorded(name, mock.return_value)
+        functions = mock_chain_deps["contract"].functions
+        build = getattr(functions, function).return_value.build_transaction
+        build.side_effect = recorded("build_transaction", {"from": DUMMY_ADDRESS, "to": DUMMY_CONTRACT, "data": "0x"})
+        # transform's version probe and duplicate check
+        functions.getTransformationLinks.return_value.call.side_effect = recorded("call", [])
+
+        getattr(client, method)(**kwargs)
+
+        client._provider._try_fallback.assert_called_once()
+        assert calls[0] == ("get_code", "primary")
+        assert all(endpoint == "fallback" for _, endpoint in calls[1:]), calls
+        names = {name for name, _ in calls[1:]}
+        assert {"build_transaction", "get_transaction_count", "estimate_gas",
+                "send_raw_transaction", "wait_for_transaction_receipt"} <= names, calls
+        web3.eth.send_raw_transaction.assert_called_once()
