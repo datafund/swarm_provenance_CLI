@@ -291,6 +291,16 @@ class TestAssertLinearTime:
     def test_linear_passes_with_coarse_clock(self, coarse_clock, size):
         _assert_linear_time(redact_urls, lambda n: "a" * n + f" {PATH_KEY_URL}", size)
 
+    def test_frozen_clock_fails_after_deadline(self, monkeypatch):
+        """A thread_time that never advances fails the test after about 5 s instead of hanging."""
+        import time
+
+        monkeypatch.setattr(time, "thread_time", lambda: 0.0)
+        start = time.perf_counter()
+        with pytest.raises(pytest.fail.Exception, match=r"time\.thread_time did not reach 0\.1 s after \d+ calls"):
+            _assert_linear_time(len, lambda n: "a" * n, 1_000)
+        assert 4.5 <= time.perf_counter() - start < 10
+
     def test_quadratic_fails_with_coarse_clock(self, coarse_clock):
         with pytest.raises(pytest.fail.Exception, match="took more than 20x the time"):
             _assert_linear_time(self._quadratic, lambda n: "a" * n, 10_000)
