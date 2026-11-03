@@ -5101,6 +5101,20 @@ class TestChainGasLimitFlag:
                     if any(p.name == "gas" for p in command.params)}
         assert with_gas == set(self.GAS_COMMANDS)
 
+    def test_gas_check_option_names(self):
+        """_check_gas_limit_setting() finds --gas and --json by the parameter names gas and output_json.
+
+        A chain command that names either option differently would skip the
+        CHAIN_GAS_LIMIT check or print text instead of JSON (#226).
+        """
+        chain = typer.main.get_command(app).commands["chain"]
+        for name, command in chain.commands.items():
+            for param in command.params:
+                if "--gas" in param.opts:
+                    assert param.name == "gas", name
+                if "--json" in param.opts:
+                    assert param.name == "output_json", name
+
     @pytest.mark.parametrize("command", GAS_COMMANDS)
     def test_gas_has_lower_bound(self, command):
         """--gas takes at least 21000, the gas of the simplest transaction, and has no upper bound (#226)."""
