@@ -717,7 +717,7 @@ swarm-prov-upload chain wait <tx_hash> --event DataRegistered --count 3 # batch 
 swarm-prov-upload chain wait <tx_hash> --timeout 300 --json
 ```
 
-`chain wait` waits for the receipt of a sent transaction and runs the same checks as a write: the receipt status, the contract's events when `--event` is given, and the replaced check after a timeout. It sends nothing and needs no wallet key, and it uses the fallback RPCs. For a hash the RPC does not know, it waits until `--timeout`, and then reports `not_found` (exit 1). If no RPC can be reached during the wait, it exits 3, because the transaction may still be pending, and with `--json` prints `{"error": "connection_failed", "message": ..., "tx_hash": ..., "explorer_url": ...}`. Success output in JSON:
+`chain wait` waits for the receipt of a sent transaction and runs the same checks as a write: the receipt status, the contract's events when `--event` is given, and the replaced check after a timeout. It sends nothing and needs no wallet key, and it uses the fallback RPCs. For a hash the RPC does not know, it waits until `--timeout`, and then reports `not_found` (exit 1). If no RPC can be reached during the wait, it exits 3, because the transaction may still be pending, and with `--json` prints `{"error": "connection_failed", "message": ..., "tx_hash": ..., "explorer_url": ..., "wait_command": "swarm-prov-upload chain wait 0x... --event ..."}`. Success output in JSON:
 
 ```json
 {
