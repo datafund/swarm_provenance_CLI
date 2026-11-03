@@ -2560,6 +2560,8 @@ def _not_recorded_json(e: "exceptions.TransactionUnconfirmedError") -> dict:
         data["reason"] = redact_urls(getattr(e, "reason", None))
     if isinstance(e, exceptions.ReceiptTimeoutError):
         data["timeout"] = e.timeout
+    if isinstance(e, exceptions.TransactionOutcomeUnknownError):
+        # Exit 3: the command that resumes the wait, or None without a hash
         data["wait_command"] = _wait_command(e)
     return data
 
@@ -2629,6 +2631,9 @@ def _handle_not_recorded(
             "transaction was sent, so it is not known whether it was mined. " + check,
             fg=typer.colors.RED, err=True,
         )
+        command = _wait_command(e)
+        if command:
+            typer.echo(f"  Wait for it: {command}", err=True)
         typer.echo(f"  Reason:      {redact_urls(getattr(e, 'reason', None) or str(e))}", err=True)
     else:
         typer.secho(
