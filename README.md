@@ -375,6 +375,8 @@ print(f"TX: {result.explorer_url}")
 - `set_delegate(delegate, authorized)` - Authorize/revoke a delegate
 - `set_storage_ref(swarm_hash, storage_ref)` - Set/update storage reference for anchored hash
 
+`ChainClient(gas_limit=N)` sets an explicit gas limit for every write and skips gas estimation, so a transaction that would revert is still sent and costs gas. `N` must be an `int` of at least 21000; another value (including `True`, `1.5` or `"50000"`) raises `ChainConfigurationError`.
+
 To read without a wallet key, create the client with `ChainClient(require_wallet=False)`. The key is then read on first use, so write operations, `balance()` and `address` raise `ChainConfigurationError` if no key is configured.
 
 **Read operations** (no gas required):
