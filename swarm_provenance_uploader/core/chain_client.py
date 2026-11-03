@@ -336,6 +336,42 @@ def _read_error(error: Exception, rpc_url: Optional[str]) -> Optional[ChainError
     return None
 
 
+def _redact_value(value):
+    """value with URLs and registered URL secrets redacted in its strings (#234)."""
+    if isinstance(value, str):
+        return redact_urls(value)
+    if isinstance(value, tuple):
+        return tuple(_redact_value(v) for v in value)
+    if isinstance(value, list):
+        return [_redact_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _redact_value(v) for k, v in value.items()}
+    return value
+
+
+def _redact_in_place(error: Exception) -> None:
+    """Redact the text of an exception that a ChainClient method passes through (#234).
+
+    For example a ContractLogicError, ContractCustomError or
+    BadFunctionCallOutput from a contract read, whose message or data can
+    repeat the RPC URL with its API key. The exception keeps its type and
+    identity, so callers that catch the web3 class still catch it. Its
+    ``args`` (what str() shows) and its ``message``, ``data`` and
+    ``user_message`` attributes are redacted; other attributes, such as
+    OffchainLookup's ``payload``, are kept.
+    """
+    try:
+        error.args = _redact_value(error.args)
+    except Exception:  # an exception type that does not allow it
+        pass
+    for name in ("message", "data", "user_message"):
+        if name in getattr(error, "__dict__", {}):
+            try:
+                setattr(error, name, _redact_value(getattr(error, name)))
+            except Exception:
+                pass
+
+
 def _redacted_errors(map_rpc_failures: bool):
     """Decorate a public ChainClient method so its errors do not repeat the RPC URL (#187).
 
@@ -346,7 +382,9 @@ def _redacted_errors(map_rpc_failures: bool):
     transport failure (_with_fallback, #168), and a raw RPC
     failure becomes a chain error (_read_error), raised from it, so the
     redacted original stays in ``__cause__`` and a traceback still shows
-    where it failed. Other exceptions pass through unchanged.
+    where it failed. Other exceptions, such as a contract revert from a
+    read, pass through with their own type, redacted in place
+    (_redact_in_place) and with a redacted exception chain (#234).
     """
     def decorator(method):
         @functools.wraps(method)
@@ -366,12 +404,13 @@ def _redacted_errors(map_rpc_failures: bool):
                 except ChainError:
                     raise
                 except Exception as e:
-                    if not map_rpc_failures:
-                        raise
-                    error = _read_error(e, self._provider.rpc_url)
-                    if error is None:
-                        raise
-                    raise error from e
+                    if map_rpc_failures:
+                        error = _read_error(e, self._provider.rpc_url)
+                        if error is not None:
+                            raise error from e
+                    _redact_in_place(e)
+                    redact_exception_chain(e)
+                    raise
             except ChainError as e:
                 redact_exception_chain(e)
                 raise
