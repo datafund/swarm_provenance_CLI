@@ -984,20 +984,20 @@ class DataProvenanceContract:
 
         Returns:
             List of event objects with args: newDataHash, sourceDataHashes,
-            transformation, newDataType.  Returns empty list if the
-            contract does not emit DataMerged events.
+            transformation, newDataType.  A v1 contract emits no DataMerged
+            events, so its scan returns an empty list.
+
+        Raises:
+            Exception: A failed log query is raised, not read as "no
+                merges" (#230).
         """
         latest = to_block if to_block is not None else self._web3.eth.block_number
-        try:
-            return self._get_logs_chunked(
-                self._contract.events.DataMerged,
-                None,
-                from_block,
-                latest,
-            )
-        except Exception:
-            # Contract may not have DataMerged event (v1)
-            return []
+        return self._get_logs_chunked(
+            self._contract.events.DataMerged,
+            None,
+            from_block,
+            latest,
+        )
 
     # --- Receipt events ---
 
