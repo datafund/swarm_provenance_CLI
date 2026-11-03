@@ -1,3 +1,4 @@
+import click
 import json
 import re
 import pytest
@@ -9391,6 +9392,9 @@ class TestJsonErrorDocuments:
         (["chain", "wait", "0x1234"], 2),                     # not a transaction hash
         (["chain", "anchor"], 2),                             # missing argument
         (["--bogus", "chain", "balance"], 2),                 # unknown global option
+        (["--x402=1", "chain", "balance"], 2),                # a value for a global flag
+        (["chain", "get", DUMMY_SWARM_REF, "--follow=x"], 2),  # a value for a command flag
+        (["chain", "balance", "--json=1"], 2),                # a value for --json itself
         (["chain", "--bogus", "balance"], 2),                 # unknown group option
         (["--backend", "nowhere", "chain", "balance"], 1),
         (["--chain", "mars", "chain", "balance"], 1),
@@ -9398,6 +9402,7 @@ class TestJsonErrorDocuments:
         (["--idempotency-key", "", "upload-collection", "mydir"], 1),
         (["--max-pay", "lots", "upload-collection", "mydir"], 1),
     ], ids=["wait-count-without-event", "wait-bad-hash", "anchor-missing-arg", "unknown-global-option",
+            "global-flag-with-value", "command-flag-with-value", "json-with-value",
             "unknown-group-option", "bad-backend", "bad-chain", "bad-x402-network", "bad-idempotency-key", "bad-max-pay"])
     def test_errors_before_the_command_runs(self, mocker, args, exit_code):
         """Global option checks and usage errors are JSON too, with their exit codes."""
@@ -9598,26 +9603,31 @@ class TestStampsExtendExpiry:
         mocker.patch("swarm_provenance_uploader.cli.GatewayClient", return_value=client)
         return runner.invoke(app, ["stamps", "extend", DUMMY_STAMP, "--duration-hours", "48"])
 
-    def test_prints_the_new_expiry(self, mocker):
+    def test_prints_the_expiry_the_gateway_reported(self, mocker):
+        """Not called the new expiry: Bee may apply the top-up after the gateway read it."""
         result = self._extend(mocker, "2026-12-01T10:00:00Z")
         assert result.exit_code == 0, result.output
         assert f"Batch ID: {DUMMY_STAMP}" in result.stdout
-        assert "New expiry: 2026-12-01T10:00:00Z (estimate at today's price)" in result.stdout
+        assert ("Expiry reported by the gateway: 2026-12-01T10:00:00Z (estimate at today's price; "
+                "it can take a few minutes to include this extension, check with: "
+                f"swarm-prov-upload stamps info {DUMMY_STAMP})") in result.stdout
+        assert "New expiry" not in result.stdout
 
     def test_unknown_expiry_points_to_stamps_info(self, mocker):
         result = self._extend(mocker, None)
         assert result.exit_code == 0, result.output
-        assert "New expiry: not reported by the node yet." in result.stdout
+        assert "Expiry: not reported by the gateway yet." in result.stdout
         assert f"swarm-prov-upload stamps info {DUMMY_STAMP}" in result.stdout
 
     @pytest.mark.parametrize("expires_at", [
         "2026-12-01T10:00:00Z\x1b[2J", "next tuesday", "2026-12-01T10:00:00Z" + "x" * 5000, "9" * 5000,
-    ], ids=["control-characters", "not-iso", "5000-characters-after-a-timestamp", "5000-digits"])
+        "2026-12-01",
+    ], ids=["control-characters", "not-iso", "5000-characters-after-a-timestamp", "5000-digits", "date-only"])
     def test_expiry_that_is_not_a_timestamp_is_not_printed(self, mocker, expires_at):
         """Only an ISO 8601 timestamp is printed; anything else is "not reported" (#217)."""
         result = self._extend(mocker, expires_at)
         assert result.exit_code == 0, result.output
-        assert "New expiry: not reported by the node yet." in result.stdout
+        assert "Expiry: not reported by the gateway yet." in result.stdout
         assert "\x1b" not in result.stdout
         assert "next tuesday" not in result.stdout
         assert len(result.stdout) < 500
@@ -9625,7 +9635,7 @@ class TestStampsExtendExpiry:
     @pytest.mark.parametrize("expires_at", ["2026-12-01T10:00:00+00:00", "2026-12-01T10:00:00.123Z"])
     def test_other_iso_forms_are_printed(self, mocker, expires_at):
         result = self._extend(mocker, expires_at)
-        assert f"New expiry: {expires_at} (estimate at today's price)" in result.stdout
+        assert f"Expiry reported by the gateway: {expires_at} (estimate at today's price;" in result.stdout
 
     @pytest.mark.parametrize("expires_at", [1764583200, {"at": "2026-12-01T10:00:00Z"}],
                              ids=["int", "dict"])
@@ -9639,7 +9649,7 @@ class TestStampsExtendExpiry:
 
         assert result.exit_code == 0, result.output
         assert f"Batch ID: {DUMMY_STAMP}" in result.stdout
-        assert "New expiry: not reported by the node yet." in result.stdout
+        assert "Expiry: not reported by the gateway yet." in result.stdout
 
 
 class TestJsonReviewRound1:
@@ -9798,3 +9808,86 @@ class TestJsonOnlyForCommandsWithJson:
         result = _json_runner().invoke(app, ["--version", "chain", "balance", "--json"])
         assert result.exit_code == 0
         assert result.stdout.count("swarm-prov-upload") == 1
+
+
+class TestJsonReviewRound2:
+    """Review round 2 fixes for --json (#211, #241)."""
+
+    def test_json_with_a_value_alone(self):
+        """--json=1 is a usage error, and --json was asked for: the error is a document."""
+        result = _json_runner().invoke(app, ["chain", "balance", "--json=1"])
+        assert result.exit_code == 2
+        assert _one_json_document(result)["error"] == "invalid_input"
+
+    @pytest.mark.parametrize("args", [
+        ["chain", "verify", DUMMY_SWARM_REF, "--verbose=1"],
+        ["--x402=1", "chain", "verify", DUMMY_SWARM_REF],
+        ["stamps", "extend", DUMMY_STAMP, "--verbose=1"],
+    ], ids=["chain-verify", "global-flag-before-chain-verify", "stamps-extend"])
+    def test_flag_with_value_on_a_text_command_stays_text(self, args):
+        result = _json_runner().invoke(app, args)
+        assert result.exit_code == 2
+        assert result.stdout == ""
+        assert "does not take a value" in re.sub(r"\x1b\[[0-9;]*m", "", result.stderr)
+
+    def _upload(self, mocker, *args, upload_error=None):
+        from swarm_provenance_uploader.models import ManifestUploadResponse
+
+        client = mocker.MagicMock()
+        client.purchase_stamp.return_value = DUMMY_STAMP
+        client.get_stamp.return_value = _usable_stamp(DUMMY_STAMP)
+        client.upload_manifest.return_value = ManifestUploadResponse(
+            reference=DUMMY_SWARM_REF, file_count=1, message="ok")
+        client.upload_manifest.side_effect = upload_error
+        mocker.patch("swarm_provenance_uploader.cli._get_gateway_client_with_x402", return_value=client)
+        mocker.patch("swarm_provenance_uploader.cli.time.sleep")
+        runner_ = _json_runner()
+        with runner_.isolated_filesystem():
+            import os
+            os.mkdir("mydir")
+            with open("mydir/a.txt", "w") as f:
+                f.write("x")
+            return runner_.invoke(app, ["upload-collection", "mydir", *args, "--json"])
+
+    def test_upload_failed_names_the_unused_stamp(self, mocker):
+        result = self._upload(mocker, upload_error=RuntimeError("upload refused"))
+        assert result.exit_code == 1
+        document = _one_json_document(result)
+        assert document["error"] == "upload_failed" and document["step"] == "upload"
+        assert document["unused_stamp_id"] == DUMMY_STAMP
+
+    def test_interrupted_names_the_unused_stamp(self, mocker):
+        result = self._upload(mocker, upload_error=KeyboardInterrupt())
+        assert result.exit_code == 130
+        document = _one_json_document(result)
+        assert document["error"] == "interrupted"
+        assert document["unused_stamp_id"] == DUMMY_STAMP
+
+    def test_no_unused_stamp_with_stamp_id(self, mocker):
+        """A stamp the user gave is not this command's to hand back."""
+        result = self._upload(mocker, "--stamp-id", DUMMY_STAMP, upload_error=RuntimeError("refused"))
+        assert result.exit_code == 1
+        assert "unused_stamp_id" not in _one_json_document(result)
+
+    def test_no_unused_stamp_on_chain_errors(self, mocker):
+        client = _successful_chain_client(mocker)
+        client.balance.side_effect = _chain_error("chain")
+        result = _json_runner().invoke(app, ["chain", "balance", "--json"])
+        assert "unused_stamp_id" not in _one_json_document(result)
+
+    def test_abort_is_a_document(self, mocker):
+        """click's Abort (for example from a prompt) keeps click's exit code 1."""
+        client = _successful_chain_client(mocker)
+        client.anchor.side_effect = click.exceptions.Abort()
+
+        result = _json_runner().invoke(app, ["chain", "anchor", DUMMY_SWARM_REF, "--json"])
+
+        assert result.exit_code == 1
+        assert _one_json_document(result) == {"error": "aborted", "message": "Aborted."}
+
+    def test_abort_without_json_prints_no_document(self, mocker):
+        client = _successful_chain_client(mocker)
+        client.anchor.side_effect = click.exceptions.Abort()
+        result = _json_runner().invoke(app, ["chain", "anchor", DUMMY_SWARM_REF])
+        assert result.exit_code == 1
+        assert result.stdout == ""
