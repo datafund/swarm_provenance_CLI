@@ -385,7 +385,7 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
     if isinstance(e, exceptions.StampPurchasePendingError):
         fields += [("Stamp label", e.label), ("Depth", e.depth)]
     elif unreadable and e.label_prefix:
-        fields += [("Stamp label", f"{e.label_prefix}<suffix>"), ("Depth", e.depth)]
+        fields += [("Stamp label", f"{e.label_prefix}<suffix>")]
     for name, value in fields:
         if value is not None:
             typer.echo(f"  {name + ':':<17}{value}", err=True)
@@ -415,12 +415,11 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
             typer.echo(f"  {check}", err=True)
             if e.label_prefix == "paid-":
                 # The CLI sends no label: the gateway names a paid batch
-                # paid-<suffix> and a pool batch pool-<depth>-<time>
-                hint = ("Stamps the CLI buys have a label that starts with paid- (stamps from the pool "
-                        "start with pool-). The new one has utilization 0% and a TTL close to the "
-                        "requested duration (the gateway's default when no duration was given)")
-                hint += f", and depth {e.depth}." if e.depth is not None else "."
-                typer.echo(hint, err=True)
+                # paid-<suffix> and a pool batch pool-<depth>-<time>. No depth
+                # or TTL: a size preset can win over --depth, and --amount
+                # sets the TTL, so neither holds for every invocation.
+                typer.echo("Stamps the CLI buys have a label that starts with paid- (most stamps from "
+                           "the pool start with pool-). The new one has utilization 0%.", err=True)
             elif e.label_prefix:
                 typer.echo(f"In that list, look for the stamp whose label starts with {e.label_prefix}.",
                            err=True)

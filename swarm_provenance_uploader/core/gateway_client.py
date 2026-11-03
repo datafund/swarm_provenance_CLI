@@ -1275,7 +1275,6 @@ class GatewayClient:
                 # swarm_connect names a paid batch "<label>-<random hex>", or
                 # "paid-<random hex>" without a label: enough to find it (#216)
                 unreadable.label_prefix = f"{label}-" if label else "paid-"
-                unreadable.depth = depth
                 raise
             if verbose:
                 print(f"DEBUG: Purchased stamp ID: {result.batchID}")

@@ -235,12 +235,10 @@ class PaymentResultUnreadableError(PaymentSettledNotDeliveredError):
 
     After a stamp purchase, `label_prefix` is how the new batch's label
     starts (the gateway adds a random suffix to the label of a paid
-    purchase) and `depth` the depth the request asked for, when it named
-    one. Both are None otherwise.
+    purchase); None otherwise.
     """
 
     label_prefix = None
-    depth = None
 
 
 class PaymentDeliveredNotStoredError(PaymentSettledNotDeliveredError):
