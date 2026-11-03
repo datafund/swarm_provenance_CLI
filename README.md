@@ -321,7 +321,7 @@ swarm-prov-upload chain get <hash> --follow --json        # JSON output
 
 > **`chain get --follow` fails closed**: if any read fails during the walk, the command prints an error and exits with code 1 instead of printing a partial chain. In `--json` output, each record has a `parents` list (`null` for records at the depth limit).
 
-> **`chain protect` vs separate commands**: `chain protect` combines verify + anchor + transform + restrict into one command. If the restrict step fails, the command shows a warning (transform already succeeded) and exits 0 with `partial_failure: true` in JSON output. Use `chain transform --restrict-original` for the two-step version without the pre-flight ACTIVE check.
+> **`chain protect` vs separate commands**: `chain protect` combines verify + anchor + transform + restrict into one command. If the restrict step fails, the command lists the steps that were recorded (the transform transaction), prints the error and the command to restrict the original manually, and exits 1, or 3 when the restrict transaction may still be mined. The JSON output then has `partial_failure: true` and `failed_step: "restrict"`. Use `chain transform --restrict-original` for the two-step version without the pre-flight ACTIVE check.
 
 ### Global flags
 

@@ -375,11 +375,11 @@ The transaction was sent, but no receipt arrived within 120 seconds. The transac
 swarm-prov-upload chain wait 0x<tx hash> --event DataRegistered
 ```
 
-`chain wait` sends nothing and needs no wallet key. Use `--count N` for a batch write, and `--timeout SECONDS` to wait longer than 120 seconds. It exits 0 when the transaction is confirmed (with `--event`, when the contract emitted the events), 1 when it reverted, was not recorded, was replaced or is not found, and 3 when it is still pending.
+`chain wait` sends nothing and needs no wallet key. Use `--count N` for a batch write, and `--timeout SECONDS` to wait longer than 120 seconds. It exits 0 when the transaction is confirmed (with `--event`, when the contract emitted the events), 1 when it reverted, was not recorded, was replaced or is not found, and 3 when it is still pending or no RPC can be reached (with `--json`, `{"error": "connection_failed", ...}`).
 
 ### "Replaced"
 
-The receipt wait timed out, and another transaction with the same nonce from the same address was mined instead, so this transaction will never be mined. This can happen when the same wallet key is used elsewhere at the same time. The other transaction may have made the same write. Check the record with `chain get <data hash>` before you run the command again. With `--json`, the error is `"replaced"`, and the command exits 1.
+The receipt wait timed out, and another transaction with the same nonce from the same address was mined instead, so this transaction will never be mined. This can happen when the same wallet key is used elsewhere at the same time. The other transaction may have made the same write. Check the record with `chain get <data hash>` before you run the command again. For `chain delegate`, which has no data record, check the delegate state or the transaction in the explorer. With `--json`, the error is `"replaced"`, and the command exits 1.
 
 ### "Transaction reverted"
 
