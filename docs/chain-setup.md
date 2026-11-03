@@ -128,6 +128,8 @@ CHAIN_NAME=base-sepolia
 # Optional: Block the contract was deployed in, where event scans start.
 # A custom CHAIN_CONTRACT does not use the preset's deploy block.
 # It also turns on the duplicate check of `chain transform` on a v1 contract.
+# It must not be later than the contract's real deploy block: events before
+# it are not read.
 # CHAIN_DEPLOY_BLOCK=12345678
 
 # Optional: Custom block explorer URL (uses preset if not set)
@@ -251,7 +253,7 @@ swarm-prov-upload chain get <hash> --follow --depth 2
 swarm-prov-upload chain get <hash> --follow --json
 ```
 
-On a v2 contract, the walk reads the transformation links from the contract state. On a v1 contract, it scans the contract's events from its deploy block. The preset's deploy block is used only for the preset's own contract. With a custom `CHAIN_CONTRACT`, set `CHAIN_DEPLOY_BLOCK` to the block the contract was deployed in. Without a deploy block, only the last 50,000 blocks can be scanned. If the chain is longer, the lineage may be incomplete, so the command stops with an error that asks you to set `CHAIN_DEPLOY_BLOCK`, and exits with code 1. `CHAIN_DEPLOY_BLOCK` also turns on the duplicate transformation check of `chain transform` and `chain protect` on a v1 contract. Without it, the check is skipped with a warning.
+On a v2 contract, the walk reads the transformation links from the contract state. On a v1 contract, it scans the contract's events from its deploy block. The preset's deploy block is used only for the preset's own contract. With a custom `CHAIN_CONTRACT`, set `CHAIN_DEPLOY_BLOCK` to the block the contract was deployed in. The value must not be later than that block, because events before it are not read. A value above the latest block of the chain, for example one left over after a change of `CHAIN_NAME`, stops the command with an error. Without a deploy block, only the last 50,000 blocks can be scanned. If the chain is longer, the lineage may be incomplete, so the command stops with an error that asks you to set `CHAIN_DEPLOY_BLOCK`, and exits with code 1. `CHAIN_DEPLOY_BLOCK` also turns on the duplicate transformation check of `chain transform` and `chain protect` on a v1 contract. Without it, the check is skipped with a warning.
 
 ### Record data access
 
