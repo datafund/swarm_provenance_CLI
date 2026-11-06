@@ -82,7 +82,11 @@ swarm-prov-upload stamps check <stamp_id>
 ### 6. Extend a stamp (optional)
 
 ```bash
-swarm-prov-upload --x402 stamps extend <stamp_id> --duration-hours 48
+# On the default gateway: a real USDC payment on Base mainnet (asks before it pays)
+X402_NETWORK=base swarm-prov-upload --x402 stamps extend <stamp_id> --duration-hours 48
+
+# On the staging gateway (test USDC), for a stamp bought there
+swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x402 stamps extend <stamp_id> --duration-hours 48
 ```
 
 The gateway charges for an extension like a purchase. A stamp you bought can be extended only with a paid request (`--x402`) from the wallet that bought it. Without `--duration-hours`, the gateway adds 25 hours.

@@ -275,13 +275,13 @@ class TestX402ClientSelectPaymentOption:
         message = self._mismatch_message("base-sepolia", gateway_network)
 
         assert message.startswith(
-            f"No payment options for network 'base-sepolia'. Available: ['{gateway_network}']")
+            f"No payment options for network 'base-sepolia'. Available: ['{gateway_network}']. This gateway")
         assert "real USDC on Base mainnet" in message
         assert "X402_NETWORK=base " in message
         assert "(or the global option --x402-network base before the command)" in message
         # --max-pay limits auto-pay only; without auto-pay the prompt is the check (#250 review)
         assert "check the amount in the payment prompt" in message
-        assert "--auto-pay" in message and "--max-pay" in message
+        assert "with auto-pay (--auto-pay or X402_AUTO_PAY=true), keep --max-pay small" in message
         assert "and keep --max-pay small" not in message  # the old prompt-mode wording
         assert "--gateway-url https://provenance-gateway.dev.datafund.io" in message
         assert "--free" in message
@@ -291,7 +291,7 @@ class TestX402ClientSelectPaymentOption:
         """A mainnet setting against staging says the gateway takes test USDC (#250)."""
         message = self._mismatch_message("base", gateway_network)
 
-        assert "test USDC on Base Sepolia" in message
+        assert f"Available: ['{gateway_network}']. This gateway takes test USDC on Base Sepolia" in message
         assert "X402_NETWORK=base-sepolia" in message
         assert "(or the global option --x402-network base-sepolia before the command)" in message
         assert "real USDC" not in message

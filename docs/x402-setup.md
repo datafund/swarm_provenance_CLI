@@ -113,12 +113,14 @@ Read [Production vs staging](#production-vs-staging) first. In short: to test, u
 
 ### Testing on the staging gateway (test USDC)
 
-Test USDC works only with the staging gateway. Point the CLI at it:
+Test USDC works only with the staging gateway. Point the CLI at it, in your shell:
 
 ```bash
-PROVENANCE_GATEWAY_URL=https://provenance-gateway.dev.datafund.io
-X402_NETWORK=base-sepolia   # the default
+export PROVENANCE_GATEWAY_URL=https://provenance-gateway.dev.datafund.io
+export X402_NETWORK=base-sepolia   # the default
 ```
+
+or in your `.env` file (without `export`), or for one command with `--gateway-url https://provenance-gateway.dev.datafund.io`.
 
 Get test USDC:
 
@@ -376,7 +378,7 @@ The gateway's payment request names a different USDC signing domain than the tok
 
 The gateway doesn't support your configured network. Check that `X402_NETWORK` matches what the gateway accepts. The client treats the x402 v1 names and their CAIP-2 chain ids as the same network: `base-sepolia` is `eip155:84532` and `base` is `eip155:8453`.
 
-The common case is the default `base-sepolia` against the default gateway, which takes only `base` (real USDC). The message then says how to go on: set `X402_NETWORK=base` (or the global option `--x402-network base` before the command) to pay real USDC and check the amount in the payment prompt (with `--auto-pay`, keep `--max-pay` small), or use `--gateway-url https://provenance-gateway.dev.datafund.io` to test with test USDC, or `--free`. See [Production vs staging](#production-vs-staging).
+The common case is the default `base-sepolia` against the default gateway, which takes only `base` (real USDC). The message then says how to go on: set `X402_NETWORK=base` (or the global option `--x402-network base` before the command) to pay real USDC and check the amount in the payment prompt (with auto-pay, `--auto-pay` or `X402_AUTO_PAY=true`, keep `--max-pay` small), or use `--gateway-url https://provenance-gateway.dev.datafund.io` to test with test USDC, or `--free`. See [Production vs staging](#production-vs-staging).
 
 ## Security best practices
 

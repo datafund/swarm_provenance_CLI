@@ -988,6 +988,7 @@ class TestRealMoneyTexts:
         assert "only with the staging gateway" in result.stdout
         assert "--auto-pay --max-pay 0.05" in result.stdout
         assert "asks before each payment unless auto-pay is on" in result.stdout
+        assert "Without auto-pay (--auto-pay or X402_AUTO_PAY=true), the CLI asks" in result.stdout
         # Every example command names its gateway or network (#251 review)
         for line in result.stdout.splitlines():
             if "--x402 " in line and "swarm-prov-upload" in line:

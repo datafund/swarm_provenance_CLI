@@ -2555,10 +2555,10 @@ def x402_info():
     typer.echo("   On the default gateway (real USDC):")
     typer.echo("   X402_NETWORK=base swarm-prov-upload --x402 upload --file data.txt")
 
-    typer.echo("\n5. Without --auto-pay, the CLI asks before each payment: check the amount in the prompt")
-    typer.echo("   before you confirm. --max-pay (X402_MAX_AUTO_PAY_USD) is the per-payment")
-    typer.echo("   limit for auto-pay only. If you enable auto-pay, keep it small. This")
-    typer.echo("   software is alpha; spend small amounts:")
+    typer.echo("\n5. Without auto-pay (--auto-pay or X402_AUTO_PAY=true), the CLI asks before each")
+    typer.echo("   payment: check the amount in the prompt before you confirm.")
+    typer.echo("   --max-pay (X402_MAX_AUTO_PAY_USD) is the per-payment limit for auto-pay only.")
+    typer.echo("   If you enable auto-pay, keep it small. This software is alpha; spend small amounts:")
     typer.echo("   X402_NETWORK=base swarm-prov-upload --x402 --auto-pay --max-pay 0.05 upload --file data.txt")
 
     typer.echo("\nConfiguration options (.env or environment):")

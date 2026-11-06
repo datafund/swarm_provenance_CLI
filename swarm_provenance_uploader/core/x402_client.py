@@ -181,14 +181,15 @@ def _network_mismatch_hint(configured: str, available: list) -> str:
     configured = normalize_network(configured)
     available = {normalize_network(network) for network in available}
     if configured == "base-sepolia" and "base" in available:
-        # --max-pay limits auto-pay only; without --auto-pay the prompt is the check.
-        return (" This gateway charges real USDC on Base mainnet. To pay there, set "
+        # --max-pay limits auto-pay only; without auto-pay the prompt is the check.
+        return ("This gateway charges real USDC on Base mainnet. To pay there, set "
                 "X402_NETWORK=base (or the global option --x402-network base before the command) and check the amount in the payment "
-                "prompt before you confirm; with --auto-pay, keep --max-pay small (for example 0.05). "
+                "prompt before you confirm; with auto-pay (--auto-pay or X402_AUTO_PAY=true), keep --max-pay "
+                "small (for example 0.05). "
                 f"To test with test USDC on Base Sepolia, use --gateway-url {STAGING_GATEWAY_URL}, "
                 "or --free for the rate-limited free tier.")
     if configured == "base" and "base-sepolia" in available:
-        return (" This gateway takes test USDC on Base Sepolia. Set X402_NETWORK=base-sepolia "
+        return ("This gateway takes test USDC on Base Sepolia. Set X402_NETWORK=base-sepolia "
                 "(or the global option --x402-network base-sepolia before the command) to pay it.")
     return ""
 
@@ -537,10 +538,11 @@ class X402Client:
 
         if not compatible:
             available_networks = [opt.network for opt in requirements.accepts]
+            hint = _network_mismatch_hint(self.network, available_networks)
             raise X402NetworkError(
                 f"No payment options for network '{self.network}'. "
                 f"Available: {available_networks}"
-                + _network_mismatch_hint(self.network, available_networks),
+                + (f". {hint}" if hint else ""),
                 expected=self.network,
                 actual=", ".join(available_networks),
             )
