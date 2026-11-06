@@ -156,7 +156,7 @@ x402 enables pay-per-request payments using USDC on Base chain. When the gateway
 
 > **Warning: the default gateway (`https://provenance-gateway.datafund.io`) charges real USDC on Base mainnet.** The CLI's default network is `base-sepolia` (test USDC), so against the default gateway `--x402` stops with "No payment options for network 'base-sepolia'" and pays nothing.
 > - **To test** without real money, use the staging gateway, which takes test USDC on Base Sepolia: `--gateway-url https://provenance-gateway.dev.datafund.io`. Or use the free tier (`--free`, 3 requests per minute, no wallet).
-> - **To pay on the default gateway**, set `X402_NETWORK=base` (or `--x402-network base`) with a small cap such as `--max-pay 0.05`, and leave auto-pay off until you have checked the payment prompt.
+> - **To pay on the default gateway**, set `X402_NETWORK=base` (or `--x402-network base`) and leave auto-pay off: the CLI then asks before every payment, whatever the amount, so check the amount in the prompt before you confirm. `--max-pay` (`X402_MAX_AUTO_PAY_USD`) is the per-payment limit for auto-pay only; if you enable auto-pay, keep it small, for example `--auto-pay --max-pay 0.05`.
 >
 > The software is alpha: refunds should not be expected. The payer needs USDC but no ETH; the facilitator pays the gas.
 
@@ -185,7 +185,7 @@ swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x40
 swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x402 --auto-pay --max-pay 0.05 upload --file data.txt
 ```
 
-On the default gateway (real USDC), the same upload is `X402_NETWORK=base swarm-prov-upload --x402 --max-pay 0.05 upload --file data.txt`; it asks before it pays.
+On the default gateway (real USDC), the same upload is `X402_NETWORK=base swarm-prov-upload --x402 upload --file data.txt`. It asks before every payment; check the amount in the prompt before you confirm.
 
 ### x402 commands
 
@@ -207,9 +207,9 @@ swarm-prov-upload x402 info
 | `X402_ENABLED` | Enable x402 payments | `false` |
 | `X402_PRIVATE_KEY` | Wallet private key (keep secret!) | - |
 | `X402_PRIVATE_KEY_ENV` | Name of the variable that holds the key. When set to another name, only that variable is read. A value that is not a valid variable name, or that looks like a key, is rejected and not printed | `X402_PRIVATE_KEY` |
-| `X402_NETWORK` | `base-sepolia` (test USDC, the staging gateway) or `base` (real USDC, the default gateway). The CAIP-2 ids `eip155:84532` and `eip155:8453` also work | `base-sepolia` |
+| `X402_NETWORK` | `base-sepolia` (test USDC, the staging gateway) or `base` (Base mainnet: what the default production gateway charges, in real USDC). The CAIP-2 ids `eip155:84532` and `eip155:8453` also work | `base-sepolia` |
 | `X402_AUTO_PAY` | Auto-pay without prompts | `false` |
-| `X402_MAX_AUTO_PAY_USD` | Maximum auto-pay amount per request. A finite number of 0 or more; `inf`, `nan`, negative and non-numeric values are rejected | `1.00` |
+| `X402_MAX_AUTO_PAY_USD` | Maximum auto-pay amount per payment, used only with auto-pay. A finite number of 0 or more; `inf`, `nan`, negative and non-numeric values are rejected | `1.00` |
 | `X402_EXPECTED_PAY_TO` | Only pay this recipient address (optional) | not set |
 | `X402_RPC_URL` | Custom RPC URL for the USDC balance and EIP-712 domain checks (optional). Like `CHAIN_RPC_URLS`, applies whichever `X402_NETWORK` is selected | Uses the network preset |
 
@@ -222,7 +222,7 @@ The signing key and `x402 status` use the same lookup: the variable named by `X4
 | `--free` / `--no-free` | Enable/disable free tier mode |
 | `--x402` / `--no-x402` | Enable/disable x402 for this command |
 | `--auto-pay` / `--no-auto-pay` | Enable/disable auto-pay |
-| `--max-pay FLOAT` | Maximum auto-pay amount in USD. A finite number of 0 or more; `inf` is rejected |
+| `--max-pay FLOAT` | Maximum auto-pay amount in USD per payment, used only with `--auto-pay`. A finite number of 0 or more; `inf` is rejected |
 | `--x402-network TEXT` | Network: `base-sepolia` or `base` (or the CAIP-2 ids `eip155:84532` and `eip155:8453`) |
 | `--idempotency-key TEXT` | Idempotency-Key for this command's paid requests; pass the key printed by a failed run to repeat it without paying twice (on a gateway that supports it) |
 

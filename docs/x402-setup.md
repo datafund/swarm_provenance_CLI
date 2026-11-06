@@ -161,8 +161,9 @@ X402_NETWORK=base-sepolia
 # Optional: Auto-pay without prompts
 X402_AUTO_PAY=false
 
-# Optional: Maximum auto-pay amount per request in USD (a finite number of 0 or more)
-X402_MAX_AUTO_PAY_USD=1.00
+# Optional: Maximum auto-pay amount per payment in USD, used only with auto-pay
+# (a finite number of 0 or more). Keep it small on the default gateway (real USDC).
+X402_MAX_AUTO_PAY_USD=0.05
 
 # Optional: Only pay this recipient (the gateway operator's published pay-to address)
 X402_EXPECTED_PAY_TO=0x...
@@ -218,15 +219,15 @@ The prompt shows the exact amount (all 6 USDC decimals), the network, the recipi
 
 ### Auto-pay mode
 
-Skip prompts for payments under your configured limit:
+Skip prompts for payments under your configured limit. On the default gateway these are real USDC payments that nobody confirms, so keep the limit small (the built-in default is 1.00):
 
 ```bash
 # Enable auto-pay for this command
-swarm-prov-upload --x402 --auto-pay --max-pay 1.00 upload --file data.txt
+swarm-prov-upload --x402 --auto-pay --max-pay 0.05 upload --file data.txt
 
 # Or set in environment
 export X402_AUTO_PAY=true
-export X402_MAX_AUTO_PAY_USD=1.00
+export X402_MAX_AUTO_PAY_USD=0.05
 
 # Turn it off for one command even if X402_AUTO_PAY=true
 swarm-prov-upload --x402 --no-auto-pay upload --file data.txt
@@ -270,10 +271,16 @@ The CLI's default network stays `base-sepolia`, so nothing is paid by accident: 
 swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x402 upload --file data.txt
 ```
 
-**To pay on the default gateway**, switch the network to `base`, keep a small cap, and leave auto-pay off until you have checked the payment prompt:
+**To pay on the default gateway**, switch the network to `base` and leave auto-pay off. The CLI then asks before every payment, whatever the amount: check the amount in the prompt before you confirm.
 
 ```bash
-X402_NETWORK=base swarm-prov-upload --x402 --max-pay 0.05 upload --file data.txt
+X402_NETWORK=base swarm-prov-upload --x402 upload --file data.txt
+```
+
+`--max-pay` (`X402_MAX_AUTO_PAY_USD`) is the per-payment limit for auto-pay only; it does not limit a payment you confirm in the prompt. If you enable auto-pay, keep it small:
+
+```bash
+X402_NETWORK=base swarm-prov-upload --x402 --auto-pay --max-pay 0.05 upload --file data.txt
 ```
 
 The software is alpha: spend small amounts, and do not expect refunds.
@@ -319,7 +326,7 @@ A server error that the gateway sends before it collects the payment is shown as
 
 ### "Payment was taken, but ... failed"
 
-The gateway confirmed it collected the payment, but the request failed afterwards. Contact the gateway operator with the transaction hash shown; they can deliver the result or refund it. Re-running pays again.
+The gateway confirmed it collected the payment, but the request failed afterwards. Contact the gateway operator with the transaction hash shown for the result. Refunds should not be expected during the alpha; send feedback to info@datafund.io. Re-running pays again.
 
 ### "... most likely succeeded, but its result could not be read"
 
@@ -359,7 +366,7 @@ The gateway's payment request names a different USDC signing domain than the tok
 
 The gateway doesn't support your configured network. Check that `X402_NETWORK` matches what the gateway accepts. The client treats the x402 v1 names and their CAIP-2 chain ids as the same network: `base-sepolia` is `eip155:84532` and `base` is `eip155:8453`.
 
-The common case is the default `base-sepolia` against the default gateway, which takes only `base` (real USDC). The message then says how to go on: set `X402_NETWORK=base` (or `--x402-network base`) with a small `--max-pay` to pay real USDC, or use `--gateway-url https://provenance-gateway.dev.datafund.io` to test with test USDC, or `--free`. See [Production vs staging](#production-vs-staging).
+The common case is the default `base-sepolia` against the default gateway, which takes only `base` (real USDC). The message then says how to go on: set `X402_NETWORK=base` (or `--x402-network base`) to pay real USDC and check the amount in the payment prompt (with `--auto-pay`, keep `--max-pay` small), or use `--gateway-url https://provenance-gateway.dev.datafund.io` to test with test USDC, or `--free`. See [Production vs staging](#production-vs-staging).
 
 ## Security best practices
 
