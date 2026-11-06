@@ -139,7 +139,7 @@ The CLI reads the payment key from the `X402_PRIVATE_KEY` environment variable (
 X402_PRIVATE_KEY="$(op read 'op://<vault>/<item>/<field>')" swarm-prov-upload x402 status
 ```
 
-The same form works for any command, for example `swarm-prov-upload --x402 upload --file data.txt`. If you must keep the key in a `.env` file, make the file readable only by you (`chmod 600 .env`) and never commit it. Use a dedicated wallet that holds only what you plan to spend.
+The same form works for any command, for example `swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x402 upload --file data.txt` (staging, test USDC) or `X402_NETWORK=base swarm-prov-upload --x402 upload --file data.txt` (the default gateway, real USDC). If you must keep the key in a `.env` file, make the file readable only by you (`chmod 600 .env`) and never commit it. Use a dedicated wallet that holds only what you plan to spend.
 
 ### Environment variables
 
@@ -376,7 +376,7 @@ The gateway's payment request names a different USDC signing domain than the tok
 
 The gateway doesn't support your configured network. Check that `X402_NETWORK` matches what the gateway accepts. The client treats the x402 v1 names and their CAIP-2 chain ids as the same network: `base-sepolia` is `eip155:84532` and `base` is `eip155:8453`.
 
-The common case is the default `base-sepolia` against the default gateway, which takes only `base` (real USDC). The message then says how to go on: set `X402_NETWORK=base` (or `--x402-network base`) to pay real USDC and check the amount in the payment prompt (with `--auto-pay`, keep `--max-pay` small), or use `--gateway-url https://provenance-gateway.dev.datafund.io` to test with test USDC, or `--free`. See [Production vs staging](#production-vs-staging).
+The common case is the default `base-sepolia` against the default gateway, which takes only `base` (real USDC). The message then says how to go on: set `X402_NETWORK=base` (or the global option `--x402-network base` before the command) to pay real USDC and check the amount in the payment prompt (with `--auto-pay`, keep `--max-pay` small), or use `--gateway-url https://provenance-gateway.dev.datafund.io` to test with test USDC, or `--free`. See [Production vs staging](#production-vs-staging).
 
 ## Security best practices
 

@@ -183,13 +183,13 @@ def _network_mismatch_hint(configured: str, available: list) -> str:
     if configured == "base-sepolia" and "base" in available:
         # --max-pay limits auto-pay only; without --auto-pay the prompt is the check.
         return (" This gateway charges real USDC on Base mainnet. To pay there, set "
-                "X402_NETWORK=base (or --x402-network base) and check the amount in the payment "
+                "X402_NETWORK=base (or the global option --x402-network base before the command) and check the amount in the payment "
                 "prompt before you confirm; with --auto-pay, keep --max-pay small (for example 0.05). "
                 f"To test with test USDC on Base Sepolia, use --gateway-url {STAGING_GATEWAY_URL}, "
                 "or --free for the rate-limited free tier.")
     if configured == "base" and "base-sepolia" in available:
         return (" This gateway takes test USDC on Base Sepolia. Set X402_NETWORK=base-sepolia "
-                "(or --x402-network base-sepolia) to pay it.")
+                "(or the global option --x402-network base-sepolia before the command) to pay it.")
     return ""
 
 

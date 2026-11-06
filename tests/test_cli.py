@@ -935,6 +935,11 @@ class TestRootHelpDefaults:
         assert "[default: (base)]" in network
         assert "[default: (5.00)]" in max_pay
 
+    def test_max_pay_help_names_both_ways_to_turn_on_auto_pay(self):
+        help_text = self._help()
+        max_pay = help_text[help_text.index("--max-pay "):][:200]
+        assert "used only with auto-pay (--auto-pay or X402_AUTO_PAY=true)" in max_pay
+
     def test_help_shows_default_chain(self):
         from swarm_provenance_uploader import config
         help_text = self._help()
@@ -982,6 +987,7 @@ class TestRealMoneyTexts:
         assert STAGING_GATEWAY in result.stdout
         assert "only with the staging gateway" in result.stdout
         assert "--auto-pay --max-pay 0.05" in result.stdout
+        assert "asks before each payment unless auto-pay is on" in result.stdout
         # Each example names its gateway: staging, or X402_NETWORK=base for the default one
         assert f"--gateway-url {STAGING_GATEWAY} --x402 upload" in result.stdout
         assert "X402_NETWORK=base swarm-prov-upload --x402 upload" in result.stdout

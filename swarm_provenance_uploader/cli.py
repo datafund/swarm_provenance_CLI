@@ -2548,7 +2548,8 @@ def x402_info():
     typer.echo(f"   --gateway-url {config.GATEWAY_STAGING_URL}")
     typer.echo("   Or try the rate-limited free tier first, without a wallet: --free")
 
-    typer.echo("\n4. Enable x402 when uploading (asks before each payment). On the staging gateway:")
+    typer.echo("\n4. Enable x402 when uploading (asks before each payment unless auto-pay is on).")
+    typer.echo("   On the staging gateway:")
     typer.echo(f"   swarm-prov-upload --gateway-url {config.GATEWAY_STAGING_URL} --x402 upload --file data.txt")
     typer.echo("   On the default gateway (real USDC):")
     typer.echo("   X402_NETWORK=base swarm-prov-upload --x402 upload --file data.txt")
@@ -4423,7 +4424,7 @@ def main(
     max_pay: Annotated[Optional[str], typer.Option(
         "--max-pay",
         metavar="FLOAT",  # kept as written, then parsed exactly (#152)
-        help="Maximum auto-pay amount in USD per payment (used only with --auto-pay).",
+        help="Maximum auto-pay amount in USD per payment, used only with auto-pay (--auto-pay or X402_AUTO_PAY=true).",
         show_default=_max_pay_help_default(),  # X402_MAX_AUTO_PAY_USD, as x402 status shows it (#144)
     )] = None,
     x402_network: Annotated[Optional[str], typer.Option(

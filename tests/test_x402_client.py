@@ -278,7 +278,7 @@ class TestX402ClientSelectPaymentOption:
             f"No payment options for network 'base-sepolia'. Available: ['{gateway_network}']")
         assert "real USDC on Base mainnet" in message
         assert "X402_NETWORK=base " in message
-        assert "(or --x402-network base)" in message
+        assert "(or the global option --x402-network base before the command)" in message
         # --max-pay limits auto-pay only; without auto-pay the prompt is the check (#250 review)
         assert "check the amount in the payment prompt" in message
         assert "--auto-pay" in message and "--max-pay" in message
@@ -293,7 +293,7 @@ class TestX402ClientSelectPaymentOption:
 
         assert "test USDC on Base Sepolia" in message
         assert "X402_NETWORK=base-sepolia" in message
-        assert "--x402-network base-sepolia" in message
+        assert "(or the global option --x402-network base-sepolia before the command)" in message
         assert "real USDC" not in message
 
     @pytest.mark.parametrize("configured, available, expected", [

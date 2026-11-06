@@ -156,7 +156,7 @@ x402 enables pay-per-request payments using USDC on Base chain. When the gateway
 
 > **Warning: the default gateway (`https://provenance-gateway.datafund.io`) charges real USDC on Base mainnet.** The CLI's default network is `base-sepolia` (test USDC), so against the default gateway `--x402` stops with "No payment options for network 'base-sepolia'" and pays nothing.
 > - **To test** without real money, use the staging gateway, which takes test USDC on Base Sepolia: `--gateway-url https://provenance-gateway.dev.datafund.io`. Or use the free tier (`--free`, 3 requests per minute and 3 free small pooled stamps per client per day on the default gateway, no wallet).
-> - **To pay on the default gateway**, set `X402_NETWORK=base` (or `--x402-network base`) and leave auto-pay off: the CLI then asks before every payment, whatever the amount, so check the amount in the prompt before you confirm. `--max-pay` (`X402_MAX_AUTO_PAY_USD`) is the per-payment limit for auto-pay only; if you enable auto-pay, keep it small, for example `--auto-pay --max-pay 0.05`.
+> - **To pay on the default gateway**, set `X402_NETWORK=base` (or the global option `--x402-network base` before the command) and leave auto-pay off: the CLI then asks before every payment, whatever the amount, so check the amount in the prompt before you confirm. `--max-pay` (`X402_MAX_AUTO_PAY_USD`) is the per-payment limit for auto-pay only; if you enable auto-pay, keep it small, for example `--auto-pay --max-pay 0.05`.
 >
 > The software is alpha: refunds should not be expected. The payer needs USDC but no ETH; the facilitator pays the gas.
 
@@ -222,7 +222,7 @@ The signing key and `x402 status` use the same lookup: the variable named by `X4
 | `--free` / `--no-free` | Enable/disable free tier mode |
 | `--x402` / `--no-x402` | Enable/disable x402 for this command |
 | `--auto-pay` / `--no-auto-pay` | Enable/disable auto-pay |
-| `--max-pay FLOAT` | Maximum auto-pay amount in USD per payment, used only with `--auto-pay`. A finite number of 0 or more; `inf` is rejected |
+| `--max-pay FLOAT` | Maximum auto-pay amount in USD per payment, used only with auto-pay (`--auto-pay` or `X402_AUTO_PAY=true`). A finite number of 0 or more; `inf` is rejected |
 | `--x402-network TEXT` | Network: `base-sepolia` or `base` (or the CAIP-2 ids `eip155:84532` and `eip155:8453`) |
 | `--idempotency-key TEXT` | Idempotency-Key for this command's paid requests; pass the key printed by a failed run to repeat it without paying twice (on a gateway that supports it) |
 
@@ -594,8 +594,11 @@ swarm-prov-upload stamps info <stamp_id>
 
 # Extend stamp TTL by 48 hours (paid; a stamp you bought needs --x402 from the same wallet)
 # Prints the batch ID and the expiry the gateway reports: an estimate read right after the top-up,
-# which may not include the extension yet (check it with stamps info)
-swarm-prov-upload --x402 stamps extend <stamp_id> --duration-hours 48
+# which may not include the extension yet (check it with stamps info).
+# On the default gateway (real USDC on Base mainnet):
+X402_NETWORK=base swarm-prov-upload --x402 stamps extend <stamp_id> --duration-hours 48
+# On the staging gateway (test USDC on Base Sepolia, the default X402_NETWORK):
+swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x402 stamps extend <stamp_id> --duration-hours 48
 
 # Check stamp health (can it be used for uploads?)
 swarm-prov-upload stamps check <stamp_id>

@@ -124,7 +124,7 @@ swarm-prov-upload download <swarm_hash> --output-dir ./downloads
 swarm-prov-upload stamps list
 swarm-prov-upload stamps list --full --wallet <address>   # Full IDs + labels, one wallet's stamps
 swarm-prov-upload stamps info <stamp_id>
-swarm-prov-upload --x402 stamps extend <stamp_id> --duration-hours 48   # Paid; owner only
+X402_NETWORK=base swarm-prov-upload --x402 stamps extend <stamp_id> --duration-hours 48   # Paid (real USDC); owner only
 swarm-prov-upload stamps check <stamp_id>     # Health check
 swarm-prov-upload stamps pool-status          # Pool availability
 
@@ -140,12 +140,12 @@ swarm-prov-upload x402 info
 # Upload with free tier (rate-limited, no wallet needed)
 swarm-prov-upload --free upload --file /path/to/data.txt
 
-# Upload with x402 enabled
-swarm-prov-upload --x402 upload --file /path/to/data.txt
+# Upload with x402 enabled, on the staging gateway (test USDC, the default X402_NETWORK)
+swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x402 upload --file /path/to/data.txt
 
 # Upload with auto-pay (--max-pay is the per-payment limit for auto-pay only; keep it small:
 # the default gateway charges real USDC on Base mainnet)
-swarm-prov-upload --x402 --auto-pay --max-pay 0.05 upload --file /path/to/data.txt
+X402_NETWORK=base swarm-prov-upload --x402 --auto-pay --max-pay 0.05 upload --file /path/to/data.txt
 
 # Notary signing (gateway only)
 swarm-prov-upload notary info                           # Check notary service status
