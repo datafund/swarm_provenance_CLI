@@ -171,6 +171,25 @@ CHAIN_IDS = {
 CAIP2_NETWORKS = {f"eip155:{chain_id}": name for name, chain_id in CHAIN_IDS.items()}
 
 
+# The staging gateway takes test USDC on Base Sepolia; the default (production)
+# gateway takes real USDC on Base mainnet (#250).
+STAGING_GATEWAY_URL = "https://provenance-gateway.dev.datafund.io"
+
+
+def _network_mismatch_hint(configured: str, available: list) -> str:
+    """How to fix a network mismatch between the CLI and the gateway, or "" (#250)."""
+    available = {normalize_network(network) for network in available}
+    if configured == "base-sepolia" and "base" in available:
+        return (" This gateway charges real USDC on Base mainnet. To pay there, set "
+                "X402_NETWORK=base (or --x402-network base) and keep --max-pay small. "
+                f"To test with test USDC on Base Sepolia, use --gateway-url {STAGING_GATEWAY_URL}, "
+                "or --free for the rate-limited free tier.")
+    if configured == "base" and "base-sepolia" in available:
+        return (" This gateway takes test USDC on Base Sepolia. Set X402_NETWORK=base-sepolia "
+                "(or --x402-network base-sepolia) to pay it.")
+    return ""
+
+
 def normalize_network(network: Optional[str]) -> Optional[str]:
     """
     The x402 v1 name for a network given as a v1 name or a CAIP-2 chain id.
@@ -517,7 +536,8 @@ class X402Client:
             available_networks = [opt.network for opt in requirements.accepts]
             raise X402NetworkError(
                 f"No payment options for network '{self.network}'. "
-                f"Available: {available_networks}",
+                f"Available: {available_networks}"
+                + _network_mismatch_hint(self.network, available_networks),
                 expected=self.network,
                 actual=", ".join(available_networks),
             )

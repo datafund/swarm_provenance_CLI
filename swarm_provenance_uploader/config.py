@@ -16,6 +16,8 @@ if _dotenv_path:
 
 # --- Defaults ---
 GATEWAY_DEFAULT_URL = "https://provenance-gateway.datafund.io"
+# Staging: test USDC on Base Sepolia. The default gateway charges real USDC on Base mainnet.
+from .core.x402_client import STAGING_GATEWAY_URL as GATEWAY_STAGING_URL  # noqa: E402
 BEE_DEFAULT_URL = "http://localhost:1633"
 DEFAULT_DEPTH = 17
 DEFAULT_DURATION_HOURS = 25  # Minimum 24 hours required by gateway

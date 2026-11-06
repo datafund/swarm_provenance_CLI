@@ -2507,6 +2507,7 @@ def x402_balance(
         if network == "base-sepolia":
             typer.echo("")
             typer.echo("Get testnet USDC: https://faucet.circle.com/")
+            typer.echo(f"(test USDC works only on the staging gateway: {config.GATEWAY_STAGING_URL})")
 
     except Exception as e:
         typer.secho(f"ERROR: Failed to get balance: {redact_urls(str(e))}", fg=typer.colors.RED, err=True)
@@ -2534,21 +2535,25 @@ def x402_info():
     typer.echo("   (X402_PRIVATE_KEY_ENV can name another variable; the legacy")
     typer.echo("   SWARM_X402_PRIVATE_KEY is still read. See docs/x402-setup.md.)")
 
-    typer.echo("\n3. Get testnet funds (for testing):")
-    typer.echo("   - ETH (gas): https://www.alchemy.com/faucets/base-sepolia")
-    typer.echo("   - USDC:      https://faucet.circle.com/")
+    typer.echo("\n3. Fund the wallet with USDC (no ETH needed: the facilitator pays gas).")
+    typer.echo(f"   The default gateway ({config.GATEWAY_DEFAULT_URL}) charges")
+    typer.echo("   real USDC on Base mainnet. Pay it with X402_NETWORK=base (or --x402-network base).")
+    typer.echo("   Test USDC on Base Sepolia (https://faucet.circle.com/) works only with the staging gateway:")
+    typer.echo(f"   --gateway-url {config.GATEWAY_STAGING_URL}")
+    typer.echo("   Or try the rate-limited free tier first, without a wallet: --free")
 
-    typer.echo("\n4. Enable x402 when uploading:")
+    typer.echo("\n4. Enable x402 when uploading (asks before each payment):")
     typer.echo("   swarm-prov-upload --x402 upload --file data.txt")
 
-    typer.echo("\n5. For auto-pay (up to $1 without prompting):")
-    typer.echo("   swarm-prov-upload --x402 --auto-pay upload --file data.txt")
+    typer.echo("\n5. Cap what auto-pay may spend per payment, and leave auto-pay off until")
+    typer.echo("   you have checked the prompt. This software is alpha; spend small amounts:")
+    typer.echo("   swarm-prov-upload --x402 --auto-pay --max-pay 0.05 upload --file data.txt")
 
     typer.echo("\nConfiguration options (.env or environment):")
     typer.echo("   X402_ENABLED=true          # Enable by default")
-    typer.echo("   X402_NETWORK=base-sepolia  # or 'base' for mainnet")
+    typer.echo("   X402_NETWORK=base-sepolia  # default; 'base' for the default gateway (real USDC)")
     typer.echo("   X402_AUTO_PAY=false        # Auto-pay without prompts")
-    typer.echo("   X402_MAX_AUTO_PAY_USD=1.00 # Max auto-pay per request")
+    typer.echo("   X402_MAX_AUTO_PAY_USD=1.00 # Max auto-pay per payment")
 
     typer.echo("\nUseful commands:")
     typer.echo("   swarm-prov-upload x402 status   # Check configuration")

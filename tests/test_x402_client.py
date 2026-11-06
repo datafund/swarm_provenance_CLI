@@ -257,6 +257,47 @@ class TestX402ClientSelectPaymentOption:
 
         assert "base-sepolia" in str(exc_info.value)
 
+    @staticmethod
+    def _mismatch_message(client_network, gateway_network):
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        client = X402Client(network=client_network)
+        requirements = X402PaymentRequirements(accepts=[X402PaymentOption(
+            scheme="exact", network=gateway_network, maxAmountRequired="50000",
+            resource="/test", payTo=DUMMY_PAY_TO)])
+        with pytest.raises(X402NetworkError) as exc_info:
+            client.select_payment_option(requirements)
+        return str(exc_info.value)
+
+    @pytest.mark.parametrize("gateway_network", ["base", "eip155:8453"])
+    def test_mainnet_gateway_mismatch_explains_both_ways_out(self, mock_eth_deps, gateway_network):
+        """The default base-sepolia against production says how to pay or test (#250)."""
+        message = self._mismatch_message("base-sepolia", gateway_network)
+
+        assert message.startswith(
+            f"No payment options for network 'base-sepolia'. Available: ['{gateway_network}']")
+        assert "real USDC on Base mainnet" in message
+        assert "X402_NETWORK=base " in message
+        assert "(or --x402-network base)" in message
+        assert "--max-pay" in message
+        assert "--gateway-url https://provenance-gateway.dev.datafund.io" in message
+        assert "--free" in message
+
+    @pytest.mark.parametrize("gateway_network", ["base-sepolia", "eip155:84532"])
+    def test_testnet_gateway_mismatch_suggests_base_sepolia(self, mock_eth_deps, gateway_network):
+        """A mainnet setting against staging says the gateway takes test USDC (#250)."""
+        message = self._mismatch_message("base", gateway_network)
+
+        assert "test USDC on Base Sepolia" in message
+        assert "X402_NETWORK=base-sepolia" in message
+        assert "--x402-network base-sepolia" in message
+        assert "real USDC" not in message
+
+    def test_unrelated_network_mismatch_has_no_hint(self, mock_eth_deps):
+        message = self._mismatch_message("base-sepolia", "polygon")
+
+        assert message == "No payment options for network 'base-sepolia'. Available: ['polygon']"
+
     def test_prefers_exact_scheme(self, mock_eth_deps):
         """Tests that 'exact' scheme is preferred."""
         from swarm_provenance_uploader.core.x402_client import X402Client

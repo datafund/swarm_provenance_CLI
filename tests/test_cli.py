@@ -953,6 +953,82 @@ class TestX402BalanceCommand:
         assert "No private key" in result.stdout or "ERROR" in result.stdout
 
 
+STAGING_GATEWAY = "https://provenance-gateway.dev.datafund.io"
+
+
+class TestRealMoneyTexts:
+    """The default gateway charges real USDC on Base mainnet; the texts say so (#250)."""
+
+    def test_default_network_stays_base_sepolia(self):
+        from swarm_provenance_uploader import config
+        assert config.X402_NETWORK == "base-sepolia"
+        assert config.GATEWAY_STAGING_URL == STAGING_GATEWAY
+
+    def test_info_says_default_gateway_is_real_money(self):
+        result = runner.invoke(app, ["x402", "info"])
+
+        assert result.exit_code == 0
+        assert "real USDC on Base mainnet" in result.stdout
+        assert STAGING_GATEWAY in result.stdout
+        assert "only with the staging gateway" in result.stdout
+        assert "--max-pay 0.05" in result.stdout
+        assert "up to $1 without prompting" not in result.stdout
+        assert "ETH (gas)" not in result.stdout
+
+    @pytest.fixture
+    def _balance(self, monkeypatch):
+        from unittest.mock import patch
+        monkeypatch.setenv("X402_PRIVATE_KEY", "0x" + "a" * 64)  # gitleaks:allow (dummy test key)
+        monkeypatch.delenv("X402_PRIVATE_KEY_ENV", raising=False)
+
+        def run(network):
+            _x402_config["network"] = network
+            with patch("swarm_provenance_uploader.core.x402_client.X402Client") as client_class:
+                client_class.return_value.get_usdc_balance.return_value = (1_000_000, 1.0)
+                client_class.return_value.wallet_address = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
+                return runner.invoke(app, ["x402", "balance"])
+        return run
+
+    def test_balance_faucet_says_staging_only(self, _balance):
+        result = _balance("base-sepolia")
+
+        assert result.exit_code == 0, result.output
+        assert "https://faucet.circle.com/" in result.output
+        assert f"(test USDC works only on the staging gateway: {STAGING_GATEWAY})" in result.output
+
+    def test_balance_on_mainnet_has_no_faucet(self, _balance):
+        result = _balance("base")
+
+        assert result.exit_code == 0, result.output
+        assert "faucet" not in result.output
+        assert "staging gateway" not in result.output
+
+    def test_upload_against_mainnet_gateway_explains_the_mismatch(self, requests_mock, mocker):
+        """End to end: the default network against a base-only gateway prints the hint, exit 1."""
+        from swarm_provenance_uploader.core.gateway_client import GatewayClient
+        from swarm_provenance_uploader.core.x402_client import X402Client
+
+        x402 = object.__new__(X402Client)  # no wallet: nothing can be signed
+        x402.network = "base-sepolia"
+        mocker.patch.object(GatewayClient, "_get_x402_client", return_value=x402)
+        gw = "https://test.gateway.io"
+        requests_mock.post(f"{gw}/api/v1/stamps/", status_code=402, json={"x402Version": 1, "accepts": [{
+            "scheme": "exact", "network": "base", "maxAmountRequired": "50000",
+            "resource": "/api/v1/stamps/", "payTo": "0x1234567890AbcdEF1234567890aBcDeF12345678",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"}]})
+        with runner.isolated_filesystem():
+            with open("d.txt", "w") as f:
+                f.write("d")
+            result = runner.invoke(app, ["--x402", "--gateway-url", gw, "upload", "--file", "d.txt"])
+
+        assert result.exit_code == 1
+        output = " ".join(result.output.split())
+        assert "No payment options for network 'base-sepolia'" in output
+        assert "real USDC on Base mainnet" in output
+        assert "X402_NETWORK=base " in output
+        assert f"--gateway-url {STAGING_GATEWAY}" in output
+
+
 class TestX402GlobalFlags:
     """Tests for x402 global CLI flags."""
 
