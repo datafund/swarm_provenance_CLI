@@ -170,7 +170,7 @@ pip install -e .[x402]
 # X402_PRIVATE_KEY: read it from your password manager for each command,
 # never export it in your shell (see docs/x402-setup.md#private-key)
 export X402_ENABLED=true
-export X402_NETWORK=base-sepolia     # Testnet (default)
+export X402_NETWORK=base-sepolia     # test USDC on the staging gateway (default)
 
 # Check x402 status
 swarm-prov-upload x402 status
@@ -364,7 +364,7 @@ When the RPC in use cannot be reached, times out, or does not answer with JSON-R
 ### Testnet setup
 
 1. **Get testnet ETH** (for gas): https://www.alchemy.com/faucets/base-sepolia
-2. **Get testnet USDC** (if using x402): https://faucet.circle.com/
+2. **Get testnet USDC** (if using x402): https://faucet.circle.com/. Test USDC works only with the staging gateway (`--gateway-url https://provenance-gateway.dev.datafund.io`); the default gateway charges real USDC on Base mainnet
 3. **Configure wallet**: Set `PROVENANCE_WALLET_KEY` with your wallet's private key. Only commands that write to the chain, and `chain balance`, need it. `chain get`, `verify`, `lookup` and `status` (without `--set`) work without a key
 
 See [docs/chain-setup.md](docs/chain-setup.md) for detailed setup instructions and [docs/chain-workflows.md](docs/chain-workflows.md) for workflow diagrams.

@@ -959,10 +959,20 @@ STAGING_GATEWAY = "https://provenance-gateway.dev.datafund.io"
 class TestRealMoneyTexts:
     """The default gateway charges real USDC on Base mainnet; the texts say so (#250)."""
 
-    def test_default_network_stays_base_sepolia(self):
+    def test_default_network_stays_base_sepolia(self, monkeypatch, tmp_path):
+        """The built-in default, whatever a developer's .env or environment sets."""
+        import importlib
         from swarm_provenance_uploader import config
-        assert config.X402_NETWORK == "base-sepolia"
-        assert config.GATEWAY_STAGING_URL == STAGING_GATEWAY
+
+        monkeypatch.delenv("X402_NETWORK", raising=False)
+        monkeypatch.chdir(tmp_path)  # no .env here for config's find_dotenv(usecwd=True)
+        try:
+            importlib.reload(config)
+            assert config.X402_NETWORK == "base-sepolia"
+            assert config.GATEWAY_STAGING_URL == STAGING_GATEWAY
+        finally:
+            monkeypatch.undo()
+            importlib.reload(config)
 
     def test_info_says_default_gateway_is_real_money(self):
         result = runner.invoke(app, ["x402", "info"])
@@ -972,6 +982,10 @@ class TestRealMoneyTexts:
         assert STAGING_GATEWAY in result.stdout
         assert "only with the staging gateway" in result.stdout
         assert "--auto-pay --max-pay 0.05" in result.stdout
+        # Each example names its gateway: staging, or X402_NETWORK=base for the default one
+        assert f"--gateway-url {STAGING_GATEWAY} --x402 upload" in result.stdout
+        assert "X402_NETWORK=base swarm-prov-upload --x402 upload" in result.stdout
+        assert "X402_NETWORK=base swarm-prov-upload --x402 --auto-pay --max-pay 0.05" in result.stdout
         assert "check the amount in the prompt" in result.stdout
         assert "limit for auto-pay only" in result.stdout
         assert "up to $1 without prompting" not in result.stdout

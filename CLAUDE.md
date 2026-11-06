@@ -143,8 +143,9 @@ swarm-prov-upload --free upload --file /path/to/data.txt
 # Upload with x402 enabled
 swarm-prov-upload --x402 upload --file /path/to/data.txt
 
-# Upload with auto-pay
-swarm-prov-upload --x402 --auto-pay --max-pay 1.00 upload --file /path/to/data.txt
+# Upload with auto-pay (--max-pay is the per-payment limit for auto-pay only; keep it small:
+# the default gateway charges real USDC on Base mainnet)
+swarm-prov-upload --x402 --auto-pay --max-pay 0.05 upload --file /path/to/data.txt
 
 # Notary signing (gateway only)
 swarm-prov-upload notary info                           # Check notary service status
@@ -350,9 +351,9 @@ Uses python-dotenv for environment configuration. `config.py` loads `find_dotenv
 - `X402_PRIVATE_KEY`: Wallet private key for signing payments
 - `X402_PRIVATE_KEY_ENV`: Name of the variable holding the key (default `X402_PRIVATE_KEY`). Signer and `x402 status`/`balance` share `resolve_x402_private_key()`: a custom name is read alone, otherwise `X402_PRIVATE_KEY` then legacy `SWARM_X402_PRIVATE_KEY`. A value that is not a valid variable name (or contains a run of 32+ hex digits anywhere) resolves no key and is never printed; names are printed only through `printable_key_env_name()`
 - `X402_RPC_URL`: RPC for the USDC balance and EIP-712 domain checks (optional; `X402Client(rpc_url=...)` wins, else the network preset). Registered for redaction
-- `X402_NETWORK`: `base-sepolia` (testnet) or `base` (mainnet). The CAIP-2 ids `eip155:84532` and `eip155:8453` are accepted too (`normalize_network()` in `core/x402_client.py`); a payment option named either way matches, and the signed payload repeats the option's own name
+- `X402_NETWORK`: `base-sepolia` (test USDC, the staging gateway `https://provenance-gateway.dev.datafund.io`; default) or `base` (Base mainnet: the default production gateway charges real USDC there). The CAIP-2 ids `eip155:84532` and `eip155:8453` are accepted too (`normalize_network()` in `core/x402_client.py`); a payment option named either way matches, and the signed payload repeats the option's own name
 - `X402_AUTO_PAY`: Enable auto-pay without prompts (default: false; `--no-auto-pay` overrides it per command)
-- `X402_MAX_AUTO_PAY_USD`: Maximum auto-pay amount per request (default: 1.00). A hard cap: above it the CLI prompts (default No) and library use without a callback refuses before signing. Compared exactly as the decimal value written (`parse_auto_pay_limit()` in `core/gateway_client.py`), so 0.30 allows a payment of 0.30 USDC. `config.X402_MAX_AUTO_PAY_USD` and `--max-pay` are kept as strings (no float round-trip). A value that is not a finite number of 0 or more (`abc`, `nan`, `inf`, `-1`), or is not written in plain ASCII digits (`0_30`), is rejected: `GatewayClient` raises `ValueError`; the CLI exits 1 for `--max-pay` in `main()`, and for the variable in `_get_gateway_client_with_x402()`, so `x402 status` (which warns) and `--help` still work
+- `X402_MAX_AUTO_PAY_USD`: Maximum auto-pay amount per payment, used only with auto-pay (default: 1.00; without auto-pay every payment is prompted). A hard cap: above it the CLI prompts (default No) and library use without a callback refuses before signing. Compared exactly as the decimal value written (`parse_auto_pay_limit()` in `core/gateway_client.py`), so 0.30 allows a payment of 0.30 USDC. `config.X402_MAX_AUTO_PAY_USD` and `--max-pay` are kept as strings (no float round-trip). A value that is not a finite number of 0 or more (`abc`, `nan`, `inf`, `-1`), or is not written in plain ASCII digits (`0_30`), is rejected: `GatewayClient` raises `ValueError`; the CLI exits 1 for `--max-pay` in `main()`, and for the variable in `_get_gateway_client_with_x402()`, so `x402 status` (which warns) and `--help` still work
 - `X402_EXPECTED_PAY_TO`: Only sign payments to this address (optional). Independently of it, `X402Client.refusal_reason()` refuses non-`exact` schemes, a non-USDC `asset` and malformed amounts or recipients before signing
 
 **Chain / Blockchain Configuration**:

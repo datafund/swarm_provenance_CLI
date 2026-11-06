@@ -2548,14 +2548,16 @@ def x402_info():
     typer.echo(f"   --gateway-url {config.GATEWAY_STAGING_URL}")
     typer.echo("   Or try the rate-limited free tier first, without a wallet: --free")
 
-    typer.echo("\n4. Enable x402 when uploading (asks before each payment):")
-    typer.echo("   swarm-prov-upload --x402 upload --file data.txt")
+    typer.echo("\n4. Enable x402 when uploading (asks before each payment). On the staging gateway:")
+    typer.echo(f"   swarm-prov-upload --gateway-url {config.GATEWAY_STAGING_URL} --x402 upload --file data.txt")
+    typer.echo("   On the default gateway (real USDC):")
+    typer.echo("   X402_NETWORK=base swarm-prov-upload --x402 upload --file data.txt")
 
     typer.echo("\n5. Without --auto-pay, the CLI asks before each payment: check the amount in the prompt")
     typer.echo("   before you confirm. --max-pay (X402_MAX_AUTO_PAY_USD) is the per-payment")
     typer.echo("   limit for auto-pay only. If you enable auto-pay, keep it small. This")
     typer.echo("   software is alpha; spend small amounts:")
-    typer.echo("   swarm-prov-upload --x402 --auto-pay --max-pay 0.05 upload --file data.txt")
+    typer.echo("   X402_NETWORK=base swarm-prov-upload --x402 --auto-pay --max-pay 0.05 upload --file data.txt")
 
     typer.echo("\nConfiguration options (.env or environment):")
     typer.echo("   X402_ENABLED=true          # Enable by default")
