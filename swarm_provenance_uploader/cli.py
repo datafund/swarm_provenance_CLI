@@ -559,6 +559,11 @@ def _wallet_stamps_command(e: exceptions.PaymentOutcomeUnknownError) -> Optional
     return f"swarm-prov-upload stamps list --wallet {e.payer} --full" if e.payer else None
 
 
+# The payment-taken messages: no refund promise while the software is alpha.
+_ALPHA_REFUND_NOTE = ("Refunds should not be expected during the alpha. "
+                      "Send feedback to info@datafund.io.")
+
+
 def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: str,
                             final_step: bool = False, final_note: Optional[str] = None,
                             final_stdout: Optional[List[str]] = None,
@@ -568,7 +573,7 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
     Explain a paid request whose payment may have been taken, then exit.
 
     Printed without --verbose: the identifiers are what the user needs to check
-    the payment on-chain or ask the operator for the result or a refund, and a
+    the payment on-chain or ask the operator for the result, and a
     re-run would sign a new authorization and pay again.
 
     Args:
@@ -695,7 +700,8 @@ def _report_payment_outcome(e: exceptions.PaymentOutcomeUnknownError, action: st
                    else "Re-running pays again.", err=True)
     elif e.settled:
         typer.echo("Contact the gateway operator with the transaction above for the "
-                   "result or a refund. Re-running pays again.", err=True)
+                   "result. Re-running pays again.", err=True)
+        typer.echo(_ALPHA_REFUND_NOTE, err=True)
     else:
         typer.echo("Do not re-run yet: a re-run signs a new payment and can pay twice.", err=True)
         typer.echo("Check whether the authorization above was used (a USDC transfer "
@@ -2545,8 +2551,10 @@ def x402_info():
     typer.echo("\n4. Enable x402 when uploading (asks before each payment):")
     typer.echo("   swarm-prov-upload --x402 upload --file data.txt")
 
-    typer.echo("\n5. Cap what auto-pay may spend per payment, and leave auto-pay off until")
-    typer.echo("   you have checked the prompt. This software is alpha; spend small amounts:")
+    typer.echo("\n5. Without --auto-pay, the CLI asks before each payment: check the amount in the prompt")
+    typer.echo("   before you confirm. --max-pay (X402_MAX_AUTO_PAY_USD) is the per-payment")
+    typer.echo("   limit for auto-pay only. If you enable auto-pay, keep it small. This")
+    typer.echo("   software is alpha; spend small amounts:")
     typer.echo("   swarm-prov-upload --x402 --auto-pay --max-pay 0.05 upload --file data.txt")
 
     typer.echo("\nConfiguration options (.env or environment):")
@@ -4413,12 +4421,12 @@ def main(
     max_pay: Annotated[Optional[str], typer.Option(
         "--max-pay",
         metavar="FLOAT",  # kept as written, then parsed exactly (#152)
-        help="Maximum auto-pay amount in USD per request.",
+        help="Maximum auto-pay amount in USD per payment (used only with --auto-pay).",
         show_default=_max_pay_help_default(),  # X402_MAX_AUTO_PAY_USD, as x402 status shows it (#144)
     )] = None,
     x402_network: Annotated[Optional[str], typer.Option(
         "--x402-network",
-        help="x402 network: 'base-sepolia' (testnet) or 'base' (mainnet); the CAIP-2 ids 'eip155:84532' and 'eip155:8453' also work.",
+        help="x402 network: 'base-sepolia' (test USDC, staging gateway) or 'base' (real USDC, the default gateway); CAIP-2 ids eip155:84532 / eip155:8453 also work.",
         show_default=_x402_config["network"],  # X402_NETWORK, normalized (#144)
     )] = None,
     chain: Annotated[Optional[str], typer.Option(

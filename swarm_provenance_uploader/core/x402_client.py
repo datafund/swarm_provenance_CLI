@@ -178,10 +178,13 @@ STAGING_GATEWAY_URL = "https://provenance-gateway.dev.datafund.io"
 
 def _network_mismatch_hint(configured: str, available: list) -> str:
     """How to fix a network mismatch between the CLI and the gateway, or "" (#250)."""
+    configured = normalize_network(configured)
     available = {normalize_network(network) for network in available}
     if configured == "base-sepolia" and "base" in available:
+        # --max-pay limits auto-pay only; without --auto-pay the prompt is the check.
         return (" This gateway charges real USDC on Base mainnet. To pay there, set "
-                "X402_NETWORK=base (or --x402-network base) and keep --max-pay small. "
+                "X402_NETWORK=base (or --x402-network base) and check the amount in the payment "
+                "prompt before you confirm; with --auto-pay, keep --max-pay small (for example 0.05). "
                 f"To test with test USDC on Base Sepolia, use --gateway-url {STAGING_GATEWAY_URL}, "
                 "or --free for the rate-limited free tier.")
     if configured == "base" and "base-sepolia" in available:

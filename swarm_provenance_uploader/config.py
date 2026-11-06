@@ -55,13 +55,14 @@ X402_ENABLED = os.getenv("X402_ENABLED", "false").lower() == "true"
 # X402_PRIVATE_KEY_ENV and X402_RPC_URL are read when they are used, by
 # core.x402_client.resolve_x402_private_key() and X402Client (#141).
 
-# Network: "base-sepolia" (testnet, default) or "base" (mainnet)
+# Network: "base-sepolia" (test USDC, the staging gateway; default) or "base"
+# (Base mainnet: what the default production gateway charges, in real USDC)
 X402_NETWORK = os.getenv("X402_NETWORK", "base-sepolia")
 
 # Auto-pay without prompting (disabled by default for safety)
 X402_AUTO_PAY = os.getenv("X402_AUTO_PAY", "false").lower() == "true"
 
-# Maximum auto-pay amount per request in USD (default: $1.00). Kept as the
+# Maximum auto-pay amount per payment in USD (default: $1.00), auto-pay only. Kept as the
 # string written: GatewayClient parses it exactly, and the CLI reports a value
 # that is not a finite number of 0 or more (#152). A blank value counts as not set.
 X402_MAX_AUTO_PAY_USD = os.getenv("X402_MAX_AUTO_PAY_USD", "")

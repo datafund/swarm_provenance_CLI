@@ -971,7 +971,9 @@ class TestRealMoneyTexts:
         assert "real USDC on Base mainnet" in result.stdout
         assert STAGING_GATEWAY in result.stdout
         assert "only with the staging gateway" in result.stdout
-        assert "--max-pay 0.05" in result.stdout
+        assert "--auto-pay --max-pay 0.05" in result.stdout
+        assert "check the amount in the prompt" in result.stdout
+        assert "limit for auto-pay only" in result.stdout
         assert "up to $1 without prompting" not in result.stdout
         assert "ETH (gas)" not in result.stdout
 
@@ -5814,6 +5816,10 @@ class TestPaymentOutcomeReporting:
         assert self.TX in result.output
         assert f"sepolia.basescan.org/tx/{self.TX}" in result.output
         assert "Contact the gateway operator" in result.output
+        # Alpha: no refund promise; feedback goes to info@datafund.io (#251 review)
+        assert "refund" not in result.output.lower().replace("refunds should not be expected", "")
+        assert "Refunds should not be expected during the alpha" in result.output
+        assert "info@datafund.io" in result.output
 
     def test_purchase_pending(self, mocker):
         err = exceptions.StampPurchasePendingError(

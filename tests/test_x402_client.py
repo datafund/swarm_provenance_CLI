@@ -279,7 +279,10 @@ class TestX402ClientSelectPaymentOption:
         assert "real USDC on Base mainnet" in message
         assert "X402_NETWORK=base " in message
         assert "(or --x402-network base)" in message
-        assert "--max-pay" in message
+        # --max-pay limits auto-pay only; without auto-pay the prompt is the check (#250 review)
+        assert "check the amount in the payment prompt" in message
+        assert "--auto-pay" in message and "--max-pay" in message
+        assert "and keep --max-pay small" not in message  # the old prompt-mode wording
         assert "--gateway-url https://provenance-gateway.dev.datafund.io" in message
         assert "--free" in message
 
@@ -292,6 +295,16 @@ class TestX402ClientSelectPaymentOption:
         assert "X402_NETWORK=base-sepolia" in message
         assert "--x402-network base-sepolia" in message
         assert "real USDC" not in message
+
+    @pytest.mark.parametrize("configured, available, expected", [
+        ("eip155:84532", ["base"], "real USDC on Base mainnet"),
+        ("eip155:8453", ["eip155:84532"], "test USDC on Base Sepolia"),
+    ])
+    def test_hint_normalizes_the_configured_network(self, configured, available, expected):
+        """Called directly with a CAIP-2 id, the hint still matches (#250 review)."""
+        from swarm_provenance_uploader.core.x402_client import _network_mismatch_hint
+
+        assert expected in _network_mismatch_hint(configured, available)
 
     def test_unrelated_network_mismatch_has_no_hint(self, mock_eth_deps):
         message = self._mismatch_message("base-sepolia", "polygon")
