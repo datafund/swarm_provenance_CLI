@@ -122,6 +122,8 @@ export X402_NETWORK=base-sepolia   # the default
 
 or in your `.env` file (without `export`), or for one command with `--gateway-url https://provenance-gateway.dev.datafund.io`.
 
+To use the default (production) gateway again, unset `PROVENANCE_GATEWAY_URL` (`unset PROVENANCE_GATEWAY_URL`) or remove it from `.env`. The production examples below pass `--gateway-url https://provenance-gateway.datafund.io` explicitly, so they reach production either way.
+
 Get test USDC:
 
 1. Go to https://faucet.circle.com/
@@ -141,7 +143,7 @@ The CLI reads the payment key from the `X402_PRIVATE_KEY` environment variable (
 X402_PRIVATE_KEY="$(op read 'op://<vault>/<item>/<field>')" swarm-prov-upload x402 status
 ```
 
-The same form works for any command, for example `swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x402 upload --file data.txt` (staging, test USDC) or `X402_NETWORK=base swarm-prov-upload --x402 upload --file data.txt` (the default gateway, real USDC). If you must keep the key in a `.env` file, make the file readable only by you (`chmod 600 .env`) and never commit it. Use a dedicated wallet that holds only what you plan to spend.
+The same form works for any command, for example `swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x402 upload --file data.txt` (staging, test USDC) or `X402_NETWORK=base swarm-prov-upload --gateway-url https://provenance-gateway.datafund.io --x402 upload --file data.txt` (the default gateway, real USDC). If you must keep the key in a `.env` file, make the file readable only by you (`chmod 600 .env`) and never commit it. Use a dedicated wallet that holds only what you plan to spend.
 
 ### Environment variables
 
@@ -209,7 +211,7 @@ swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x40
 On the default gateway (real USDC), check the amount before you confirm:
 
 ```bash
-X402_NETWORK=base swarm-prov-upload --x402 upload --file data.txt
+X402_NETWORK=base swarm-prov-upload --gateway-url https://provenance-gateway.datafund.io --x402 upload --file data.txt
 ```
 
 Output (staging):
@@ -228,14 +230,14 @@ The prompt shows the exact amount (all 6 USDC decimals), the network, the recipi
 
 ### Auto-pay mode
 
-Skip prompts for payments under your configured limit. On the default gateway these are real USDC payments that nobody confirms, so keep the limit small (the built-in default is 1.00):
+Skip prompts for payments at or under your configured limit. On the default gateway these are real USDC payments that nobody confirms, so keep the limit small (the built-in default is 1.00):
 
 ```bash
 # Enable auto-pay for this command, on the staging gateway (test USDC)
 swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x402 --auto-pay --max-pay 0.05 upload --file data.txt
 
 # The same on the default gateway (real USDC)
-X402_NETWORK=base swarm-prov-upload --x402 --auto-pay --max-pay 0.05 upload --file data.txt
+X402_NETWORK=base swarm-prov-upload --gateway-url https://provenance-gateway.datafund.io --x402 --auto-pay --max-pay 0.05 upload --file data.txt
 
 # Or set in environment
 export X402_AUTO_PAY=true
@@ -286,13 +288,13 @@ swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x40
 **To pay on the default gateway**, switch the network to `base` and leave auto-pay off. The CLI then asks before every payment, whatever the amount: check the amount in the prompt before you confirm.
 
 ```bash
-X402_NETWORK=base swarm-prov-upload --x402 upload --file data.txt
+X402_NETWORK=base swarm-prov-upload --gateway-url https://provenance-gateway.datafund.io --x402 upload --file data.txt
 ```
 
 `--max-pay` (`X402_MAX_AUTO_PAY_USD`) is the per-payment limit for auto-pay only; it does not limit a payment you confirm in the prompt. If you enable auto-pay, keep it small:
 
 ```bash
-X402_NETWORK=base swarm-prov-upload --x402 --auto-pay --max-pay 0.05 upload --file data.txt
+X402_NETWORK=base swarm-prov-upload --gateway-url https://provenance-gateway.datafund.io --x402 --auto-pay --max-pay 0.05 upload --file data.txt
 ```
 
 The software is alpha: spend small amounts, and do not expect refunds.
