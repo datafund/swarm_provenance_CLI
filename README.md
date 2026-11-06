@@ -155,7 +155,7 @@ swarm-prov-upload upload --file data.txt
 x402 enables pay-per-request payments using USDC on Base chain. When the gateway requires payment (HTTP 402), the CLI automatically handles the payment flow.
 
 > **Warning: the default gateway (`https://provenance-gateway.datafund.io`) charges real USDC on Base mainnet.** The CLI's default network is `base-sepolia` (test USDC), so against the default gateway `--x402` stops with "No payment options for network 'base-sepolia'" and pays nothing.
-> - **To test** without real money, use the staging gateway, which takes test USDC on Base Sepolia: `--gateway-url https://provenance-gateway.dev.datafund.io`. Or use the free tier (`--free`, 3 requests per minute, no wallet).
+> - **To test** without real money, use the staging gateway, which takes test USDC on Base Sepolia: `--gateway-url https://provenance-gateway.dev.datafund.io`. Or use the free tier (`--free`, 3 requests per minute and 3 free small pooled stamps per client per day on the default gateway, no wallet).
 > - **To pay on the default gateway**, set `X402_NETWORK=base` (or `--x402-network base`) and leave auto-pay off: the CLI then asks before every payment, whatever the amount, so check the amount in the prompt before you confirm. `--max-pay` (`X402_MAX_AUTO_PAY_USD`) is the per-payment limit for auto-pay only; if you enable auto-pay, keep it small, for example `--auto-pay --max-pay 0.05`.
 >
 > The software is alpha: refunds should not be expected. The payer needs USDC but no ETH; the facilitator pays the gas.

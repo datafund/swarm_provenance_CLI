@@ -198,13 +198,20 @@ swarm-prov-upload x402 balance
 
 ### Interactive mode (default)
 
-When x402 is enabled and a request requires payment, you'll see a confirmation prompt:
+When x402 is enabled and a request requires payment, you'll see a confirmation prompt. On the staging gateway (test USDC, the default `X402_NETWORK=base-sepolia`):
 
 ```bash
-swarm-prov-upload --x402 upload --file data.txt
+swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x402 upload --file data.txt
 ```
 
-Output:
+On the default gateway (real USDC), check the amount before you confirm:
+
+```bash
+X402_NETWORK=base swarm-prov-upload --x402 upload --file data.txt
+```
+
+Output (staging):
+
 ```
 Payment required: $0.050000 USDC
   For:     POST /api/v1/stamps/ (gateway says: "Postage stamp purchase (depth 17, 25h)")
@@ -222,15 +229,18 @@ The prompt shows the exact amount (all 6 USDC decimals), the network, the recipi
 Skip prompts for payments under your configured limit. On the default gateway these are real USDC payments that nobody confirms, so keep the limit small (the built-in default is 1.00):
 
 ```bash
-# Enable auto-pay for this command
-swarm-prov-upload --x402 --auto-pay --max-pay 0.05 upload --file data.txt
+# Enable auto-pay for this command, on the staging gateway (test USDC)
+swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x402 --auto-pay --max-pay 0.05 upload --file data.txt
+
+# The same on the default gateway (real USDC)
+X402_NETWORK=base swarm-prov-upload --x402 --auto-pay --max-pay 0.05 upload --file data.txt
 
 # Or set in environment
 export X402_AUTO_PAY=true
 export X402_MAX_AUTO_PAY_USD=0.05
 
 # Turn it off for one command even if X402_AUTO_PAY=true
-swarm-prov-upload --x402 --no-auto-pay upload --file data.txt
+swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x402 --no-auto-pay upload --file data.txt
 ```
 
 The limit is per payment. A payment above it is never signed automatically: the CLI asks instead, and library use without a confirmation callback refuses it before signing. `--no-x402` and `--no-free` likewise override `X402_ENABLED` and `FREE_TIER` for one command.
@@ -261,7 +271,7 @@ Gateway support: datafund/swarm_connect has it on `dev` (staging) and not yet in
 
 On both, the facilitator submits the transfer and pays the gas: the wallet needs USDC but no ETH.
 
-The default gateway also has a free tier: `--free`, 3 requests per minute, no wallet needed.
+The default gateway also has a free tier: `--free`, 3 requests per minute and 3 free small pooled stamps per client per day, no wallet needed.
 
 The CLI's default network stays `base-sepolia`, so nothing is paid by accident: against the default gateway, `--x402` stops with "No payment options for network 'base-sepolia'. Available: ['base']" and the message says how to go on.
 
@@ -401,5 +411,5 @@ The common case is the default `base-sepolia` against the default gateway, which
 
 - [x402 Protocol Documentation](https://x402.org)
 - [Base Documentation](https://docs.base.org)
-- [Circle USDC Faucet](https://faucet.circle.com/)
+- [Circle USDC Faucet](https://faucet.circle.com/) (Base Sepolia test USDC, staging gateway only)
 - [EIP-712 Specification](https://eips.ethereum.org/EIPS/eip-712)
