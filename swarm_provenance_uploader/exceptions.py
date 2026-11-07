@@ -219,7 +219,7 @@ class PaymentSettledNotDeliveredError(PaymentOutcomeUnknownError):
 
     The gateway reports this with `X-Payment-Status: settled_not_delivered`
     or the `DELIVERY_FAILED_AFTER_PAYMENT` code. The operator needs the
-    `transaction` to deliver the result or refund it.
+    `transaction` to deliver the result.
     """
 
     settled = True

@@ -171,6 +171,29 @@ CHAIN_IDS = {
 CAIP2_NETWORKS = {f"eip155:{chain_id}": name for name, chain_id in CHAIN_IDS.items()}
 
 
+# The staging gateway takes test USDC on Base Sepolia; the default (production)
+# gateway takes real USDC on Base mainnet (#250).
+STAGING_GATEWAY_URL = "https://provenance-gateway.dev.datafund.io"
+
+
+def _network_mismatch_hint(configured: str, available: list) -> str:
+    """How to fix a network mismatch between the CLI and the gateway, or "" (#250)."""
+    configured = normalize_network(configured)
+    available = {normalize_network(network) for network in available}
+    if configured == "base-sepolia" and "base" in available:
+        # --max-pay limits auto-pay only; without auto-pay the prompt is the check.
+        return ("This gateway charges real USDC on Base mainnet. To pay there, set "
+                "X402_NETWORK=base (or the global option --x402-network base before the command) and check the amount in the payment "
+                "prompt before you confirm; with auto-pay (--auto-pay or X402_AUTO_PAY=true), keep --max-pay "
+                "small (for example 0.05). "
+                f"To test with test USDC on Base Sepolia, use --gateway-url {STAGING_GATEWAY_URL}, "
+                "or --free for the rate-limited free tier.")
+    if configured == "base" and "base-sepolia" in available:
+        return ("This gateway takes test USDC on Base Sepolia. Set X402_NETWORK=base-sepolia "
+                "(or the global option --x402-network base-sepolia before the command) to pay it.")
+    return ""
+
+
 def normalize_network(network: Optional[str]) -> Optional[str]:
     """
     The x402 v1 name for a network given as a v1 name or a CAIP-2 chain id.
@@ -515,9 +538,11 @@ class X402Client:
 
         if not compatible:
             available_networks = [opt.network for opt in requirements.accepts]
+            hint = _network_mismatch_hint(self.network, available_networks)
             raise X402NetworkError(
                 f"No payment options for network '{self.network}'. "
-                f"Available: {available_networks}",
+                f"Available: {available_networks}"
+                + (f". {hint}" if hint else ""),
                 expected=self.network,
                 actual=", ".join(available_networks),
             )

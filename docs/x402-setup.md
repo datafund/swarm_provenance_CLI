@@ -2,6 +2,8 @@
 
 This guide walks you through setting up x402 payments for the Swarm Provenance CLI.
 
+> **Alpha software, real money.** The CLI's default gateway, `https://provenance-gateway.datafund.io`, charges real USDC on Base mainnet. The software comes with no guarantees, and refunds should not be expected. Spend small amounts, and test on the staging gateway or the free tier first (see [Production vs staging](#production-vs-staging)). Send feedback to info@datafund.io.
+
 ## What is x402?
 
 x402 is a payment protocol that uses HTTP 402 "Payment Required" responses to enable pay-per-request APIs. When the gateway requires payment for an operation, it returns a 402 response with payment options. The CLI signs a USDC payment using your wallet and retries the request.
@@ -9,8 +11,8 @@ x402 is a payment protocol that uses HTTP 402 "Payment Required" responses to en
 **Key features:**
 - Pay-per-request model (no subscriptions)
 - USDC stablecoin on Base chain
-- EIP-712 signed messages (no gas required for signing)
-- Testnet support for development
+- EIP-712 signed messages: you only sign, and the facilitator submits the transfer and pays the gas, so the wallet needs USDC but no ETH
+- A staging gateway that takes test USDC on Base Sepolia, for testing
 
 ### How it works
 
@@ -66,8 +68,7 @@ x402 is a payment protocol that uses HTTP 402 "Payment Required" responses to en
 
 - Python 3.9+
 - An Ethereum wallet (MetaMask, hardware wallet, etc.)
-- Base Sepolia ETH (for gas, testnet only)
-- Base Sepolia USDC (for payments, testnet only)
+- USDC on the network of the gateway you use: test USDC on Base Sepolia for the staging gateway, or real USDC on Base mainnet for the default gateway. No ETH is needed; the facilitator pays the gas.
 
 ## Step 1: Install x402 dependencies
 
@@ -106,28 +107,31 @@ print(f"Private key: {account.key.hex()}")
 
 **Important:** Store your private key securely. Never commit it to version control.
 
-## Step 3: Get testnet funds
+## Step 3: Choose a gateway and fund the wallet
 
-For development and testing, use Base Sepolia testnet.
+Read [Production vs staging](#production-vs-staging) first. In short: to test, use the staging gateway with test USDC; to pay on the default gateway, fund the wallet with a small amount of real USDC on Base mainnet.
 
-### Get testnet ETH (for gas)
+### Testing on the staging gateway (test USDC)
 
-1. Go to https://www.alchemy.com/faucets/base-sepolia
-2. Enter your wallet address
-3. Request test ETH
+Test USDC works only with the staging gateway. Point the CLI at it, in your shell:
 
-Alternative faucets:
-- https://faucet.quicknode.com/base/sepolia
-- https://www.coinbase.com/faucets/base-ethereum-goerli-faucet
+```bash
+export PROVENANCE_GATEWAY_URL=https://provenance-gateway.dev.datafund.io
+export X402_NETWORK=base-sepolia   # the default
+```
 
-### Get testnet USDC (for payments)
+or in your `.env` file (without `export`), or for one command with `--gateway-url https://provenance-gateway.dev.datafund.io`.
+
+To use the default (production) gateway again, unset `PROVENANCE_GATEWAY_URL` (`unset PROVENANCE_GATEWAY_URL`) or remove it from `.env`. The production examples below pass `--gateway-url https://provenance-gateway.datafund.io` explicitly, so they reach production either way.
+
+Get test USDC:
 
 1. Go to https://faucet.circle.com/
 2. Select "Base Sepolia" network
 3. Enter your wallet address
 4. Request test USDC
 
-The USDC contract on Base Sepolia is: `0x036CbD53842c5426634e7929541eC2318f3dCF7e`
+The USDC contract on Base Sepolia is: `0x036CbD53842c5426634e7929541eC2318f3dCF7e`. No test ETH is needed.
 
 ## Step 4: Configure the CLI
 
@@ -139,7 +143,7 @@ The CLI reads the payment key from the `X402_PRIVATE_KEY` environment variable (
 X402_PRIVATE_KEY="$(op read 'op://<vault>/<item>/<field>')" swarm-prov-upload x402 status
 ```
 
-The same form works for any command, for example `swarm-prov-upload --x402 upload --file data.txt`. If you must keep the key in a `.env` file, make the file readable only by you (`chmod 600 .env`) and never commit it. Use a dedicated wallet that holds only what you plan to spend.
+The same form works for any command, for example `swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x402 upload --file data.txt` (staging, test USDC) or `X402_NETWORK=base swarm-prov-upload --gateway-url https://provenance-gateway.datafund.io --x402 upload --file data.txt` (the default gateway, real USDC). If you must keep the key in a `.env` file, make the file readable only by you (`chmod 600 .env`) and never commit it. Use a dedicated wallet that holds only what you plan to spend.
 
 ### Environment variables
 
@@ -151,15 +155,19 @@ X402_ENABLED=true
 
 # Wallet private key: not stored here, see "Private key" above
 
-# Network: base-sepolia (testnet) or base (mainnet).
-# The CAIP-2 ids eip155:84532 and eip155:8453 also work.
+# Network: base-sepolia (test USDC; the staging gateway) or base (real USDC;
+# the default gateway). The CAIP-2 ids eip155:84532 and eip155:8453 also work.
 X402_NETWORK=base-sepolia
+
+# Optional: the staging gateway, for testing with test USDC
+# PROVENANCE_GATEWAY_URL=https://provenance-gateway.dev.datafund.io
 
 # Optional: Auto-pay without prompts
 X402_AUTO_PAY=false
 
-# Optional: Maximum auto-pay amount per request in USD (a finite number of 0 or more)
-X402_MAX_AUTO_PAY_USD=1.00
+# Optional: Maximum auto-pay amount per payment in USD, used only with auto-pay
+# (a finite number of 0 or more). Keep it small on the default gateway (real USDC).
+X402_MAX_AUTO_PAY_USD=0.05
 
 # Optional: Only pay this recipient (the gateway operator's published pay-to address)
 X402_EXPECTED_PAY_TO=0x...
@@ -194,13 +202,20 @@ swarm-prov-upload x402 balance
 
 ### Interactive mode (default)
 
-When x402 is enabled and a request requires payment, you'll see a confirmation prompt:
+When x402 is enabled and a request requires payment, you'll see a confirmation prompt. On the staging gateway (test USDC, the default `X402_NETWORK=base-sepolia`):
 
 ```bash
-swarm-prov-upload --x402 upload --file data.txt
+swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x402 upload --file data.txt
 ```
 
-Output:
+On the default gateway (real USDC), check the amount before you confirm:
+
+```bash
+X402_NETWORK=base swarm-prov-upload --gateway-url https://provenance-gateway.datafund.io --x402 upload --file data.txt
+```
+
+Output (staging):
+
 ```
 Payment required: $0.050000 USDC
   For:     POST /api/v1/stamps/ (gateway says: "Postage stamp purchase (depth 17, 25h)")
@@ -215,18 +230,21 @@ The prompt shows the exact amount (all 6 USDC decimals), the network, the recipi
 
 ### Auto-pay mode
 
-Skip prompts for payments under your configured limit:
+Skip prompts for payments at or under your configured limit. On the default gateway these are real USDC payments that nobody confirms, so keep the limit small (the built-in default is 1.00):
 
 ```bash
-# Enable auto-pay for this command
-swarm-prov-upload --x402 --auto-pay --max-pay 1.00 upload --file data.txt
+# Enable auto-pay for this command, on the staging gateway (test USDC)
+swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x402 --auto-pay --max-pay 0.05 upload --file data.txt
+
+# The same on the default gateway (real USDC)
+X402_NETWORK=base swarm-prov-upload --gateway-url https://provenance-gateway.datafund.io --x402 --auto-pay --max-pay 0.05 upload --file data.txt
 
 # Or set in environment
 export X402_AUTO_PAY=true
-export X402_MAX_AUTO_PAY_USD=1.00
+export X402_MAX_AUTO_PAY_USD=0.05
 
 # Turn it off for one command even if X402_AUTO_PAY=true
-swarm-prov-upload --x402 --no-auto-pay upload --file data.txt
+swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x402 --no-auto-pay upload --file data.txt
 ```
 
 The limit is per payment. A payment above it is never signed automatically: the CLI asks instead, and library use without a confirmation callback refuses it before signing. `--no-x402` and `--no-free` likewise override `X402_ENABLED` and `FREE_TIER` for one command.
@@ -246,18 +264,40 @@ When a command fails with an unknown payment outcome, the error shows its key an
 
 Gateway support: datafund/swarm_connect has it on `dev` (staging) and not yet in production.
 
-## Switching to mainnet
+## Production vs staging
 
-When ready for production:
+| | Default gateway (production) | Staging gateway |
+|---|---|---|
+| URL | `https://provenance-gateway.datafund.io` (the CLI's default) | `https://provenance-gateway.dev.datafund.io` |
+| Network | Base mainnet (`X402_NETWORK=base`) | Base Sepolia (`X402_NETWORK=base-sepolia`, the default) |
+| Money | **Real USDC**, `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | Test USDC from the faucet, `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
+| Use it for | Paying for real use | Integration testing only. It stores on the real Swarm network |
 
-1. Get real USDC on Base mainnet
-2. Update your `.env`:
+On both, the facilitator submits the transfer and pays the gas: the wallet needs USDC but no ETH.
+
+The default gateway also has a free tier: `--free`, 3 requests per minute and 3 free small pooled stamps per client per day, no wallet needed.
+
+The CLI's default network stays `base-sepolia`, so nothing is paid by accident: against the default gateway, `--x402` stops with "No payment options for network 'base-sepolia'. Available: ['base']" and the message says how to go on.
+
+**To test** without real money, use the staging gateway with the default network:
 
 ```bash
-X402_NETWORK=base
+swarm-prov-upload --gateway-url https://provenance-gateway.dev.datafund.io --x402 upload --file data.txt
 ```
 
-**Warning:** Mainnet uses real funds. Start with small amounts and test thoroughly.
+**To pay on the default gateway**, switch the network to `base` and leave auto-pay off. The CLI then asks before every payment, whatever the amount: check the amount in the prompt before you confirm.
+
+```bash
+X402_NETWORK=base swarm-prov-upload --gateway-url https://provenance-gateway.datafund.io --x402 upload --file data.txt
+```
+
+`--max-pay` (`X402_MAX_AUTO_PAY_USD`) is the per-payment limit for auto-pay only; it does not limit a payment you confirm in the prompt. If you enable auto-pay, keep it small:
+
+```bash
+X402_NETWORK=base swarm-prov-upload --gateway-url https://provenance-gateway.datafund.io --x402 --auto-pay --max-pay 0.05 upload --file data.txt
+```
+
+The software is alpha: spend small amounts, and do not expect refunds.
 
 ## Troubleshooting
 
@@ -277,7 +317,7 @@ X402_PRIVATE_KEY="$(op read 'op://<vault>/<item>/<field>')" swarm-prov-upload x4
 
 ### "Insufficient USDC balance"
 
-Check your balance and get more testnet USDC:
+Check your balance and add USDC on the network you pay on (test USDC from the faucet for the staging gateway, real USDC for the default gateway):
 ```bash
 swarm-prov-upload x402 balance
 ```
@@ -300,7 +340,7 @@ A server error that the gateway sends before it collects the payment is shown as
 
 ### "Payment was taken, but ... failed"
 
-The gateway confirmed it collected the payment, but the request failed afterwards. Contact the gateway operator with the transaction hash shown; they can deliver the result or refund it. Re-running pays again.
+The gateway confirmed it collected the payment, but the request failed afterwards. Contact the gateway operator with the transaction hash shown for the result. Refunds should not be expected during the alpha; send feedback to info@datafund.io. Re-running pays again.
 
 ### "... most likely succeeded, but its result could not be read"
 
@@ -340,11 +380,13 @@ The gateway's payment request names a different USDC signing domain than the tok
 
 The gateway doesn't support your configured network. Check that `X402_NETWORK` matches what the gateway accepts. The client treats the x402 v1 names and their CAIP-2 chain ids as the same network: `base-sepolia` is `eip155:84532` and `base` is `eip155:8453`.
 
+The common case is the default `base-sepolia` against the default gateway, which takes only `base` (real USDC). The message then says how to go on: set `X402_NETWORK=base` (or the global option `--x402-network base` before the command) to pay real USDC and check the amount in the payment prompt (with auto-pay, `--auto-pay` or `X402_AUTO_PAY=true`, keep `--max-pay` small), or use `--gateway-url https://provenance-gateway.dev.datafund.io` to test with test USDC, or `--free`. See [Production vs staging](#production-vs-staging).
+
 ## Security best practices
 
 1. **Never commit private keys** to version control
 2. **Use a dedicated wallet** for x402 payments, not your main wallet
-3. **Start with testnet** before using real funds
+3. **Start on the staging gateway or the free tier** before paying real USDC on the default gateway
 4. **Set reasonable auto-pay limits** to prevent unexpected charges
 5. **Review payment prompts** before confirming
 6. **Keep the key out of your shell history and plaintext files**: read it from a password manager for each command; if you use a `.env` file, `chmod 600` it and never commit it
@@ -373,5 +415,5 @@ The gateway doesn't support your configured network. Check that `X402_NETWORK` m
 
 - [x402 Protocol Documentation](https://x402.org)
 - [Base Documentation](https://docs.base.org)
-- [Circle USDC Faucet](https://faucet.circle.com/)
+- [Circle USDC Faucet](https://faucet.circle.com/) (Base Sepolia test USDC, staging gateway only)
 - [EIP-712 Specification](https://eips.ethereum.org/EIPS/eip-712)
